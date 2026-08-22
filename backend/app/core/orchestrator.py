@@ -18,7 +18,7 @@ import contextlib
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.base import AdapterEvent, RunContext, TOOLS
@@ -33,9 +33,18 @@ from app.core.guardrails import (
     over_run_timeout,
 )
 from app.core.loop_detector import detect_loop
-from app.core.report import parse_report
+from app.core.report import ROLE_ALLOWED_STATUSES, parse_report
 from app.core.state_machine import can_transition
 from app.db.models import Agent, Attachment, Comment, CommentMention, Run, Ticket, Workspace
+
+# Valid role strings — used for MAP-029's role-not-name mention fallback (see
+# `_resolve_handoff_targets`). Same key set as report.py's per-role status matrix.
+_ROLES = frozenset(ROLE_ALLOWED_STATUSES)
+
+# Statuses that don't expect a follow-up handoff (docs/03-agent-design.md §5/§6): the
+# flow always routes review/qa/security to a specific next reviewer, so only done/blocked
+# count as "final" for the purposes of "no valid mention -> block so it doesn't hang".
+_FINAL_STATUSES = frozenset({"done", "blocked"})
 
 _TAIL_CHARS = 2000
 
@@ -306,7 +315,14 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
                     await watchdog_task
 
             await _finish_run(
-                session, run, ticket, agent, terminal, "".join(text_buffer), guardrail_cancel_reason
+                session,
+                run,
+                ticket,
+                agent,
+                terminal,
+                "".join(text_buffer),
+                guardrail_cancel_reason,
+                session_factory=session_factory,
             )
 
         except Exception as exc:  # noqa: BLE001 - must never leave run/agent stuck
@@ -410,6 +426,8 @@ async def _finish_run(
     terminal: AdapterEvent | None,
     accumulated_text: str,
     guardrail_cancel_reason: str | None = None,
+    *,
+    session_factory: async_sessionmaker | None = None,
 ) -> None:
     if terminal is None:
         # Adapter misbehaved: no run_ended event at all. Treat like a failure.
@@ -555,7 +573,148 @@ async def _finish_run(
             session.add(child)
 
     agent.status = "idle"
+
+    if session_factory is not None:
+        await _handoff(session, session_factory, run, ticket, agent, parsed)
+
     await session.commit()
+
+
+async def _resolve_role_agent(
+    session: AsyncSession, ticket: Ticket, role: str
+) -> Agent | None:
+    """Role-not-name fallback (docs/03-agent-design.md §6): pick the `idle` agent with
+    that role and the fewest existing runs on this ticket; if none are idle, fall back
+    to the busiest-tolerant choice among all enabled agents with that role (schedule()
+    queues it automatically since the agent is busy). Ties broken by creation order.
+    """
+    candidates = (
+        await session.scalars(
+            select(Agent).where(
+                Agent.workspace_id == ticket.workspace_id,
+                Agent.role == role,
+                Agent.enabled.is_(True),
+                Agent.status != "disabled",
+            )
+        )
+    ).all()
+    if not candidates:
+        return None
+
+    counts_rows = (
+        await session.execute(
+            select(Run.agent_id, func.count())
+            .where(Run.ticket_id == ticket.id, Run.agent_id.in_([c.id for c in candidates]))
+            .group_by(Run.agent_id)
+        )
+    ).all()
+    run_counts = dict(counts_rows)
+
+    idle = [a for a in candidates if a.status == "idle"]
+    pool = idle if idle else candidates
+    pool = sorted(pool, key=lambda a: (run_counts.get(a.id, 0), a.created_at, a.id))
+    return pool[0]
+
+
+async def _handoff(
+    session: AsyncSession,
+    session_factory: async_sessionmaker,
+    run: Run,
+    ticket: Ticket,
+    agent: Agent,
+    parsed,
+) -> None:
+    """MAP-029: turn a successfully-parsed report's mentions into follow-up runs.
+
+    Resolution order per mention name:
+    1. Already-valid agent name (`parsed.valid_mentions`) -> that agent, unless disabled.
+    2. Otherwise (`parsed.unknown_mentions`) -> if the name is actually a role string,
+       resolve via `_resolve_role_agent`; if it's neither a name nor a role, it's truly
+       unknown and only gets logged.
+
+    handoff_depth: incremented ONCE per report (not once per mention). A report's
+    `mention` list is fan-out within a single handoff *step*; `handoff_depth` tracks
+    chain *depth* (docs: "Tiap handoff menaikkan ticket.handoff_depth" / "Rantai mention
+    menaikkan handoff_depth ... berhenti di max_handoff_depth" — a "rantai" is a sequence
+    of steps, not a sequence of individual mentions). Incrementing per-mention would let
+    a single wide report (e.g. QA filing bugs to 3 engineers) exhaust max_handoff_depth
+    in one step, which isn't what "chain" depth is meant to bound; incrementing once per
+    step still fully bounds runaway A -> B -> A -> B ... chains, which is the actual
+    runaway-loop risk this guardrail exists for.
+    """
+    targets: list[Agent] = []
+    notes: list[str] = []
+    seen_ids: set[str] = set()
+
+    if parsed.valid_mentions:
+        mentioned = (
+            await session.scalars(
+                select(Agent).where(
+                    Agent.workspace_id == ticket.workspace_id,
+                    Agent.name.in_(parsed.valid_mentions),
+                )
+            )
+        ).all()
+        by_name = {a.name: a for a in mentioned}
+        for name in parsed.valid_mentions:
+            a = by_name.get(name)
+            if a is None:
+                continue
+            if not a.enabled or a.status == "disabled":
+                notes.append(f"agent {name} nonaktif")
+                continue
+            if a.id not in seen_ids:
+                seen_ids.add(a.id)
+                targets.append(a)
+
+    for name in parsed.unknown_mentions:
+        if name not in _ROLES:
+            notes.append(f"mention '{name}' tidak dikenal")
+            continue
+        resolved = await _resolve_role_agent(session, ticket, name)
+        if resolved is None:
+            notes.append(f"tidak ada agent dengan role '{name}' di workspace")
+            continue
+        if not resolved.enabled or resolved.status == "disabled":
+            notes.append(f"agent {resolved.name} nonaktif")
+            continue
+        if resolved.id not in seen_ids:
+            seen_ids.add(resolved.id)
+            targets.append(resolved)
+
+    if targets:
+        ticket.handoff_depth = (ticket.handoff_depth or 0) + 1
+        for target in targets:
+            try:
+                await schedule(
+                    session,
+                    session_factory,
+                    ticket=ticket,
+                    agent=target,
+                    trigger="handoff",
+                    parent_run_id=run.id,
+                )
+            except GuardrailBlocked:
+                # schedule() already transitioned the ticket to blocked with a system
+                # comment naming the guardrail; nothing more to do for this report.
+                break
+            except RuntimeError:
+                # workspace got paused between _finish_run starting and this call.
+                break
+        return
+
+    # Nothing resolved: per docs/03-agent-design.md §6, a non-final status with no
+    # valid handoff target must not be left hanging.
+    if ticket.status not in _FINAL_STATUSES:
+        reason = "; ".join(notes) if notes else "tidak ada mention pada laporan"
+        await _block_ticket(
+            session,
+            ticket,
+            agent,
+            f"Tidak ada target handoff yang valid ({reason}); tiket diblokir agar tidak menggantung.",
+        )
+    elif notes:
+        await _write_system_comment(session, ticket.id, "Catatan mention: " + "; ".join(notes))
 
 
 async def stop(run_id: str) -> bool:

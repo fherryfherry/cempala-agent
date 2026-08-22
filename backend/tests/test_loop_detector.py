@@ -247,19 +247,26 @@ def _system_comment_bodies(client, key):
     return [c["body"] for c in detail["comments"] if c["is_system"]]
 
 
+# Both scripts below give a real `mention` (docs/03-agent-design.md §6) instead of
+# `mention: []`. Since MAP-029, the orchestrator auto-schedules a follow-up run for
+# every valid mention, so only the FIRST run in each test is triggered manually --
+# the rest of the sequence plays out through the real handoff engine, exactly the same
+# `schedule()`/`detect_loop()` codepath a manual re-trigger used to exercise directly.
+
 _ALTERNATOR_SCRIPT = '''
 import json, sys
 model = sys.argv[sys.argv.index("-m") + 1]
 # Alternate the ticket between in_progress <-> review so eng/lead runs are each valid
-# state-machine transitions (engineer: in_progress->review; lead: review->in_progress) --
-# this lets the loop detector's history build up through *real* schedule()/execute()
-# calls instead of stubbing status transitions.
+# state-machine transitions (engineer: in_progress->review; lead: review->in_progress),
+# each one handing off to the other -- this lets the loop detector's history build up
+# through *real* schedule()/execute() calls instead of stubbing status transitions.
 status = "review" if model == "opencode/eng" else "in_progress"
+mention = "lead-1" if model == "opencode/eng" else "eng-1"
 text = f"""ok
 
 ```map
 status: {status}
-mention: []
+mention: [{mention}]
 summary: |
   done
 ```
@@ -270,13 +277,15 @@ print(json.dumps({"type": "assistant_text", "text": text}))
 _ABCA_SCRIPT = '''
 import json, sys
 model = sys.argv[sys.argv.index("-m") + 1]
-# in_progress --eng(review)--> review --lead(qa)--> qa --qa(in_progress)--> in_progress
+# in_progress --eng(review)--> review --lead(qa)--> qa --qa(in_progress)--> in_progress,
+# each handing off to the next role in the chain.
 status = {"opencode/eng": "review", "opencode/lead": "qa", "opencode/qa": "in_progress"}[model]
+mention = {"opencode/eng": "lead-1", "opencode/lead": "qa-1", "opencode/qa": "eng-1"}[model]
 text = f"""ok
 
 ```map
 status: {status}
-mention: []
+mention: [{mention}]
 summary: |
   done
 ```
@@ -285,10 +294,21 @@ print(json.dumps({"type": "assistant_text", "text": text}))
 '''
 
 
+def _wait_for_ticket_status(client, key, statuses, timeout=15.0):
+    deadline = time.time() + timeout
+    body = None
+    while time.time() < deadline:
+        body = client.get(f"/api/tickets/{key}").json()
+        if body["status"] in statuses:
+            return body
+        time.sleep(0.03)
+    raise TimeoutError(f"ticket {key} did not reach {statuses} within {timeout}s: {body}")
+
+
 def test_loop_detector_blocks_scheduling_via_api(client, tmp_path, monkeypatch):
     ws_id = _make_workspace(client, tmp_path, guardrails={"loop_threshold": 2})
-    eng_id = _make_agent(client, ws_id, "engineer", "eng-1", model="opencode/eng")
-    lead_id = _make_agent(client, ws_id, "lead", "lead-1", model="opencode/lead")
+    _make_agent(client, ws_id, "engineer", "eng-1", model="opencode/eng")
+    _make_agent(client, ws_id, "lead", "lead-1", model="opencode/lead")
     ticket = _make_ticket(client, ws_id)
     _set_status(client, ticket["key"], "todo")
     _set_status(client, ticket["key"], "in_progress")
@@ -296,33 +316,36 @@ def test_loop_detector_blocks_scheduling_via_api(client, tmp_path, monkeypatch):
     script = _write_python_binary(tmp_path / "opencode", _ALTERNATOR_SCRIPT)
     monkeypatch.setattr(settings, "OPENCODE_BIN", script)
 
-    # A -> B -> A -> B: engineer moves in_progress->review, lead moves review->in_progress,
-    # so the two roles' reports naturally alternate the ticket status back and forth --
-    # each run is a real, valid state-machine transition, not a stubbed one.
-    sequence = [eng_id, lead_id, eng_id, lead_id]
-    for agent_id in sequence:
-        resp = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": agent_id})
-        assert resp.status_code == 201, resp.text
-        final = _wait_for_run(client, resp.json()["id"])
-        assert final["status"] == "done", final
+    eng = client.get(f"/api/workspaces/{ws_id}/agents").json()
+    eng_id = next(a["id"] for a in eng if a["name"] == "eng-1")
 
-    # 5th run: A again -> completes the A,B,A,B,A pattern -> should trip at threshold=2.
+    # Kick off eng-1 manually; eng-1 <-> lead-1 keep handing off to each other
+    # automatically from there (A->B->A->B->A) until the loop detector trips at the
+    # 5th scheduling attempt (round_trips=2, threshold=2).
     resp = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": eng_id})
-    assert resp.status_code == 409, resp.text
-    assert resp.json()["error"]["code"] == "guardrail_blocked"
+    assert resp.status_code == 201, resp.text
+
+    detail = _wait_for_ticket_status(client, ticket["key"], {"blocked"})
+    assert detail["status"] == "blocked"
 
     bodies = _system_comment_bodies(client, ticket["key"])
     assert any("Loop terdeteksi" in b and "eng-1" in b and "lead-1" in b for b in bodies)
 
-    detail = client.get(f"/api/tickets/{ticket['key']}").json()
-    assert detail["status"] == "blocked"
-
 
 def test_loop_detector_does_not_block_a_b_c_a_via_api(client, tmp_path, monkeypatch):
-    ws_id = _make_workspace(client, tmp_path, guardrails={"loop_threshold": 2})
-    eng_id = _make_agent(client, ws_id, "engineer", "eng-1", model="opencode/eng")
-    lead_id = _make_agent(client, ws_id, "lead", "lead-1", model="opencode/lead")
-    qa_id = _make_agent(client, ws_id, "qa", "qa-1", model="opencode/qa")
+    # max_handoff_depth=4 caps the auto-chain at exactly eng->lead->qa->eng (3 handoffs,
+    # 4 runs) so the test doesn't depend on racing/predicting how many more A<->B hops
+    # it'd take to eventually, correctly, trip loop_threshold further down the
+    # (otherwise unbounded) chain -- this test only cares that the A,B,C,A pattern
+    # itself doesn't trip the loop detector. The 4th run's own handoff attempt (back to
+    # lead-1) is what actually hits the depth cap, stopping the chain right after the
+    # full A,B,C,A sequence has run.
+    ws_id = _make_workspace(
+        client, tmp_path, guardrails={"loop_threshold": 2, "max_handoff_depth": 4}
+    )
+    _make_agent(client, ws_id, "engineer", "eng-1", model="opencode/eng")
+    _make_agent(client, ws_id, "lead", "lead-1", model="opencode/lead")
+    _make_agent(client, ws_id, "qa", "qa-1", model="opencode/qa")
     ticket = _make_ticket(client, ws_id)
     _set_status(client, ticket["key"], "todo")
     _set_status(client, ticket["key"], "in_progress")
@@ -330,17 +353,23 @@ def test_loop_detector_does_not_block_a_b_c_a_via_api(client, tmp_path, monkeypa
     script = _write_python_binary(tmp_path / "opencode", _ABCA_SCRIPT)
     monkeypatch.setattr(settings, "OPENCODE_BIN", script)
 
-    # in_progress --eng--> review --lead--> qa --qa--> in_progress, each a real transition.
-    sequence = [eng_id, lead_id, qa_id]
-    for agent_id in sequence:
-        resp = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": agent_id})
-        assert resp.status_code == 201, resp.text
-        final = _wait_for_run(client, resp.json()["id"])
-        assert final["status"] == "done", final
+    agents = client.get(f"/api/workspaces/{ws_id}/agents").json()
+    eng_id = next(a["id"] for a in agents if a["name"] == "eng-1")
 
-    # 4th run: A again -> A,B,C,A -- alternation was broken by C, must not trip. Ticket
-    # is back at in_progress after the qa run, so engineer can act again for real.
+    # in_progress --eng--> review --lead--> qa --qa--> in_progress, each a real transition,
+    # each auto-handed-off via mention. The chain then stops on max_handoff_depth (not
+    # the loop detector) after the 3rd handoff.
     resp = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": eng_id})
     assert resp.status_code == 201, resp.text
-    final = _wait_for_run(client, resp.json()["id"])
-    assert final["status"] == "done", final
+
+    detail = _wait_for_ticket_status(client, ticket["key"], {"blocked"})
+    assert detail["status"] == "blocked"
+
+    bodies = _system_comment_bodies(client, ticket["key"])
+    assert not any("Loop terdeteksi" in b for b in bodies)
+    assert any("max_handoff_depth" in b for b in bodies)
+
+    runs = client.get(f"/api/workspaces/{ws_id}/runs").json()
+    ticket_runs = [r for r in runs if r["ticket_id"] == ticket["id"]]
+    assert len(ticket_runs) == 4, ticket_runs
+    assert all(r["status"] == "done" for r in ticket_runs)
