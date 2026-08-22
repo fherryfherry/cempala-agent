@@ -5,13 +5,21 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.config import settings
+from app.db import session as db_session
 from app.db.models import Base
 from app.db.session import get_session
 from app.main import app
 
 
 @pytest.fixture
-async def client():
+async def client(monkeypatch):
+    # A comment mentioning a real agent now auto-schedules a run (MAP-029) — point
+    # OPENCODE_BIN at a nonexistent path so any triggered run fails fast and
+    # deterministically (adapter's "binary not found" path) instead of trying to spawn
+    # the real opencode binary, which would be slow/costly/non-deterministic here.
+    monkeypatch.setattr(settings, "OPENCODE_BIN", "/nonexistent/opencode-for-tests")
+
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
 
     @event.listens_for(engine.sync_engine, "connect")
@@ -31,6 +39,9 @@ async def client():
             yield session
 
     app.dependency_overrides[get_session] = _override_get_session
+    # main.py's lifespan calls recover_interrupted_runs(db_session.async_session) directly,
+    # bypassing the get_session override above — point it at this test's engine too.
+    monkeypatch.setattr(db_session, "async_session", maker)
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
@@ -84,9 +95,13 @@ def test_create_comment_with_valid_mention(client, tmp_path):
     assert resp.status_code == 201, resp.text
     assert resp.json()["mentions"] == ["eng-1"]
 
+    # The mention also auto-schedules a run for eng-1 (MAP-029); since OPENCODE_BIN is
+    # mocked to a nonexistent path, that run fails fast and adds one system comment
+    # (ticket blocked) — filter to the actual (non-system) comment this test cares about.
     listed = client.get(f"/api/tickets/{ticket['key']}/comments").json()
-    assert len(listed) == 1
-    assert listed[0]["mentions"] == ["eng-1"]
+    non_system = [c for c in listed if not c["is_system"]]
+    assert len(non_system) == 1
+    assert non_system[0]["mentions"] == ["eng-1"]
     assert eng["id"]  # sanity
 
 

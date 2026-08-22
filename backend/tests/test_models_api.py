@@ -6,9 +6,12 @@ import subprocess
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.api.models as models_mod
 from app.config import settings
+from app.db import session as db_session
+from app.db.models import Base
 from app.main import app
 
 
@@ -26,9 +29,17 @@ def _reset_cache():
 
 
 @pytest.fixture
-def client():
+async def client(monkeypatch):
+    # This module's own tests don't touch the DB, but main.py's lifespan always calls
+    # recover_interrupted_runs(db_session.async_session) on TestClient startup — point it
+    # at a throwaway migrated engine instead of whatever DATABASE_URL resolves to by default.
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    monkeypatch.setattr(db_session, "async_session", async_sessionmaker(engine, expire_on_commit=False))
     with TestClient(app) as c:
         yield c
+    await engine.dispose()
 
 
 def test_successful_parse(tmp_path, monkeypatch, client):

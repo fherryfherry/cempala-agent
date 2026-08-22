@@ -8,13 +8,14 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.db import session as db_session
 from app.db.models import Base
 from app.db.session import get_session
 from app.main import app
 
 
 @pytest.fixture
-async def client():
+async def client(monkeypatch):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
 
     @event.listens_for(engine.sync_engine, "connect")
@@ -34,6 +35,9 @@ async def client():
             yield session
 
     app.dependency_overrides[get_session] = _override_get_session
+    # main.py's lifespan calls recover_interrupted_runs(db_session.async_session) directly,
+    # bypassing the get_session override above — point it at this test's engine too.
+    monkeypatch.setattr(db_session, "async_session", maker)
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()

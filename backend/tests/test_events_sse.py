@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from app.core.events import event_bus
+from app.db import session as db_session
 from app.db.models import Agent, Base, Run, Ticket, Workspace
 from app.db.session import get_session
 from app.main import app
@@ -33,7 +34,7 @@ def _free_port() -> int:
 
 
 @pytest.fixture
-def env():
+def env(monkeypatch):
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
         connect_args={"check_same_thread": False},
@@ -59,6 +60,11 @@ def env():
             yield session
 
     app.dependency_overrides[get_session] = _override_get_session
+    # This fixture runs a real uvicorn server (not TestClient), so main.py's lifespan
+    # (which calls recover_interrupted_runs(db_session.async_session) directly, bypassing
+    # the get_session override above) runs for real on startup — point it at this
+    # fixture's own engine too, or server startup fails against the default DB.
+    monkeypatch.setattr(db_session, "async_session", maker)
 
     port = _free_port()
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
