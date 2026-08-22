@@ -221,6 +221,19 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
             run.status = "running"
             run.started_at = _now()
             agent.status = "working"
+            if ticket.status == "todo":
+                # docs/03-agent-design.md §5: "todo -> in_progress | otomatis saat run
+                # dimulai, owner" — a system-driven transition (like _block_ticket's
+                # any -> blocked), not routed through can_transition's role matrix,
+                # which deliberately has no agent-role entry for this pair (see
+                # state_machine.py and test_state_machine.py's
+                # test_owner_may_do_todo_to_in_progress). Needed so MAP-030's
+                # auto-scheduled tickets[] children (created at status="todo") can run
+                # to completion without a human PATCH in between.
+                ticket.status = "in_progress"
+                await _write_system_comment(
+                    session, ticket.id, "Status changed from todo to in_progress (run started)"
+                )
             await session.commit()
 
             prompt = await _build_prompt_for(session, workspace, agent, ticket)
@@ -491,20 +504,29 @@ async def _finish_run(
         await session.commit()
         return
 
-    allowed, reason = can_transition(ticket.status, parsed.status, agent.role)
-    if not allowed:
-        run.status = "failed"
-        run.error = reason
-        run.report = None
-        await _block_ticket(
-            session,
-            ticket,
-            agent,
-            f"Transisi status dari ```map ditolak state machine: {reason}",
-        )
-        agent.status = "idle"
-        await session.commit()
-        return
+    # Same-status re-declaration isn't a real transition, so it doesn't go through
+    # can_transition's from/to matrix at all (test_state_machine_matrix.py's exhaustive
+    # table has no from==to entry — every pair is illegal there by construction).
+    # docs/03-agent-design.md §4/§8: PM breaking an epic down reports "status:
+    # in_progress" on a ticket the run-start auto-transition already moved
+    # todo -> in_progress ("... 4. status: in_progress. Berhenti — sub-tiket akan
+    # dikerjakan sendiri"). parse_report already confirmed the role may declare this
+    # status at all, so nothing more to check here.
+    if parsed.status != ticket.status:
+        allowed, reason = can_transition(ticket.status, parsed.status, agent.role)
+        if not allowed:
+            run.status = "failed"
+            run.error = reason
+            run.report = None
+            await _block_ticket(
+                session,
+                ticket,
+                agent,
+                f"Transisi status dari ```map ditolak state machine: {reason}",
+            )
+            agent.status = "idle"
+            await session.commit()
+            return
 
     run.status = "done"
     old_status = ticket.status
@@ -547,19 +569,21 @@ async def _finish_run(
         for mentioned_agent in mentioned:
             session.add(CommentMention(comment_id=comment.id, agent_id=mentioned_agent.id))
 
+    to_auto_schedule: list[tuple[Ticket, Agent]] = []
     if parsed.tickets:
         from app.api.tickets import _next_key  # reuse the same atomic-counter key logic
 
         workspace = await session.get(Workspace, ticket.workspace_id)
         for draft in parsed.tickets:
             assignee_id = None
+            assignee_agent = None
             if draft.assignee:
-                assignee = await session.scalar(
+                assignee_agent = await session.scalar(
                     select(Agent).where(
                         Agent.workspace_id == ticket.workspace_id, Agent.name == draft.assignee
                     )
                 )
-                assignee_id = assignee.id if assignee else None
+                assignee_id = assignee_agent.id if assignee_agent else None
             child = Ticket(
                 workspace_id=ticket.workspace_id,
                 key=await _next_key(session, workspace),
@@ -571,13 +595,94 @@ async def _finish_run(
                 parent_id=ticket.id,
             )
             session.add(child)
+            # MAP-030 AC: "tickets[] dari PM/QA/Pentester langsung terjadwal untuk
+            # assignee-nya". No assignee (draft.assignee empty/unresolvable) or a
+            # disabled assignee -> leave it at todo, unscheduled (owner can run it
+            # manually later) - same "nonaktif" bar _handoff already applies.
+            if (
+                assignee_agent is not None
+                and assignee_agent.enabled
+                and assignee_agent.status != "disabled"
+            ):
+                to_auto_schedule.append((child, assignee_agent))
 
     agent.status = "idle"
 
+    if to_auto_schedule and session_factory is not None:
+        await session.flush()  # populate child.id before schedule() reads it
+        for child, assignee_agent in to_auto_schedule:
+            try:
+                await schedule(
+                    session,
+                    session_factory,
+                    ticket=child,
+                    agent=assignee_agent,
+                    trigger="auto",
+                )
+            except (GuardrailBlocked, RuntimeError):
+                # schedule() already left the child ticket in a sane state (blocked
+                # with a system comment, or untouched if the workspace got paused);
+                # nothing more to do for this one child.
+                pass
+
     if session_factory is not None:
         await _handoff(session, session_factory, run, ticket, agent, parsed)
+        await _maybe_wake_parent_pm(session, session_factory, ticket)
 
     await session.commit()
+
+
+async def _maybe_wake_parent_pm(
+    session: AsyncSession, session_factory: async_sessionmaker, ticket: Ticket
+) -> None:
+    """MAP-030: "PM menutup epic saat semua anak done" (docs/03-agent-design.md §4/§8).
+
+    Nothing else re-invokes PM once the children it filed via `tickets[]` finish —
+    each child's own handoff chain ends at its terminal status, and PM only reports
+    on the epic when it's actually asked to run. So: whenever a ticket with a parent
+    reaches a terminal status (done/blocked) and every sibling has also reached a
+    terminal status, schedule one more PM run on the parent so it can declare the
+    epic `done` (all children done) or `blocked` (docs §4: "Kalau ada sub-tiket yang
+    blocked: status: blocked"). Runs once per completing sibling by construction: the
+    "all siblings terminal" check only passes on the report that completes the set.
+    """
+    if ticket.parent_id is None or ticket.status not in _FINAL_STATUSES:
+        return
+    parent = await session.get(Ticket, ticket.parent_id)
+    if parent is None or parent.status in _FINAL_STATUSES:
+        return
+    siblings = (await session.scalars(select(Ticket).where(Ticket.parent_id == parent.id))).all()
+    if not siblings or any(s.status not in _FINAL_STATUSES for s in siblings):
+        return
+
+    pm = (
+        await session.scalars(
+            select(Agent).where(
+                Agent.workspace_id == parent.workspace_id,
+                Agent.role == "pm",
+                Agent.enabled.is_(True),
+                Agent.status != "disabled",
+            )
+        )
+    ).first()
+    if pm is None:
+        await _write_system_comment(
+            session,
+            parent.id,
+            "Semua sub-tiket selesai, tapi tidak ada agent PM aktif untuk menutup epic ini.",
+        )
+        return
+    # Bounded by the same max_handoff_depth guardrail as a regular handoff, on the
+    # PARENT (not the child that just finished): a misbehaving PM that keeps declaring
+    # more tickets[] instead of closing the epic (docs say it shouldn't, but nothing
+    # here should rely on that) would otherwise re-trigger this wake-up forever, since
+    # nothing else bounds it. schedule() re-checks the guardrail with this incremented
+    # value before creating the Run row.
+    parent.handoff_depth = (parent.handoff_depth or 0) + 1
+    try:
+        await schedule(session, session_factory, ticket=parent, agent=pm, trigger="auto")
+    except (GuardrailBlocked, RuntimeError):
+        pass  # schedule() already left the parent in a sane state, or workspace paused
 
 
 async def _resolve_role_agent(
@@ -701,6 +806,17 @@ async def _handoff(
             except RuntimeError:
                 # workspace got paused between _finish_run starting and this call.
                 break
+        return
+
+    if parsed.tickets:
+        # MAP-030: PM/QA/Pentester fanning out to tickets[] (docs/03-agent-design.md
+        # §4/§8 — PM's breakdown report: "status: in_progress. Berhenti — sub-tiket
+        # akan dikerjakan sendiri oleh agent yang kamu assign") is itself forward
+        # momentum for THIS ticket even with no mention: the children (already
+        # auto-scheduled above, in _finish_run) are what carries it forward, not a
+        # handoff on the parent. Don't force-block it for "no valid handoff target".
+        if notes:
+            await _write_system_comment(session, ticket.id, "Catatan mention: " + "; ".join(notes))
         return
 
     # Nothing resolved: per docs/03-agent-design.md §6, a non-final status with no
