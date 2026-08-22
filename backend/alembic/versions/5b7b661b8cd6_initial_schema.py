@@ -86,7 +86,7 @@ def upgrade() -> None:
     sa.Column('is_system', sa.Boolean(), nullable=False),
     sa.Column('body', sa.Text(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
-    sa.ForeignKeyConstraint(['author_agent_id'], ['agent.id'], ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(['author_agent_id'], ['agent.id'], ondelete='SET NULL'),
     sa.ForeignKeyConstraint(['ticket_id'], ['ticket.id'], ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('id')
     )

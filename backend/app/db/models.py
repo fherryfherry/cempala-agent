@@ -138,7 +138,7 @@ class Comment(Base):
         String, ForeignKey("ticket.id", ondelete="CASCADE"), nullable=False
     )
     author_agent_id: Mapped[str | None] = mapped_column(
-        String, ForeignKey("agent.id", ondelete="CASCADE"), nullable=True
+        String, ForeignKey("agent.id", ondelete="SET NULL"), nullable=True
     )
     is_system: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
