@@ -73,6 +73,34 @@ export function createWorkspace(body: WorkspaceCreate): Promise<Workspace> {
   });
 }
 
+export function getWorkspace(workspaceId: string): Promise<Workspace> {
+  return apiFetch<Workspace>(`/workspaces/${workspaceId}`);
+}
+
+export interface WorkspaceUpdate {
+  name?: string;
+  repo_path?: string;
+  guardrails?: Record<string, unknown>;
+}
+
+export function updateWorkspace(
+  workspaceId: string,
+  body: WorkspaceUpdate,
+): Promise<Workspace> {
+  return apiFetch<Workspace>(`/workspaces/${workspaceId}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+export function pauseWorkspace(workspaceId: string): Promise<Workspace> {
+  return apiFetch<Workspace>(`/workspaces/${workspaceId}/pause`, { method: "POST" });
+}
+
+export function resumeWorkspace(workspaceId: string): Promise<Workspace> {
+  return apiFetch<Workspace>(`/workspaces/${workspaceId}/resume`, { method: "POST" });
+}
+
 export type Role = "pm" | "lead" | "engineer" | "designer" | "qa" | "pentester";
 export type ToolKind = "opencode" | "claude" | "agy" | "codex";
 

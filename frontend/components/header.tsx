@@ -65,6 +65,9 @@ export function Header() {
               <Link href={`/w/${activeKey}/activity`} className="hover:text-foreground">
                 Activity
               </Link>
+              <Link href={`/w/${activeKey}/settings`} className="hover:text-foreground">
+                Settings
+              </Link>
             </nav>
 
             {agents.data && agents.data.length > 0 && (
