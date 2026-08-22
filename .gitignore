@@ -23,5 +23,8 @@ storage/*
 storage/attachments/*
 !storage/attachments/.gitkeep
 
+# Git worktrees
+.worktrees/
+
 # OS / editor
 .DS_Store
