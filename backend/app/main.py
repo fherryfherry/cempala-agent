@@ -7,6 +7,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.agents import agents_router, workspace_agents_router
+from app.api.comments import comments_router
 from app.api.errors import AppError, app_error_handler, validation_error_handler
 from app.api.models import router as models_router
 from app.api.tickets import tickets_router, workspace_tickets_router
@@ -37,6 +38,7 @@ app.include_router(workspace_agents_router, prefix="/api")
 app.include_router(agents_router, prefix="/api")
 app.include_router(workspace_tickets_router, prefix="/api")
 app.include_router(tickets_router, prefix="/api")
+app.include_router(comments_router, prefix="/api")
 
 
 def _opencode_version() -> str | None:

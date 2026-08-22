@@ -41,6 +41,11 @@ class TicketOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class CommentCreate(BaseModel):
+    body: str
+    author_agent_id: str | None = None
+
+
 class CommentOut(BaseModel):
     id: str
     ticket_id: str
@@ -48,6 +53,7 @@ class CommentOut(BaseModel):
     is_system: bool
     body: str
     created_at: datetime
+    mentions: list[str] = []
 
     model_config = {"from_attributes": True}
 
