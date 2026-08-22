@@ -118,8 +118,14 @@ class OpenCodeTool:
                 if not isinstance(data, dict):
                     continue
 
-                if session_id is None and data.get("session_id"):
-                    session_id = str(data["session_id"])
+                # ponytail: real opencode 1.18.18 CLI JSON (observed live, MAP-033 dogfood) uses
+                # "sessionID" (not "session_id") and nests tokens/cost inside
+                # part.tokens/part.cost on "step_finish" lines, not top-level. MAP-020's fake
+                # test binary encoded the originally-assumed flat schema, which real output
+                # never matches. Kept both shapes so the fake-binary tests still pass.
+                sid = data.get("session_id") or data.get("sessionID")
+                if session_id is None and sid:
+                    session_id = str(sid)
                 if "tokens_in" in data:
                     tokens_in += _num(data["tokens_in"])
                 if "tokens_out" in data:
@@ -127,9 +133,20 @@ class OpenCodeTool:
                 if "cost" in data:
                     cost += _num(data["cost"])
 
+                part = data.get("part") if isinstance(data.get("part"), dict) else None
+                if part is not None:
+                    part_tokens = part.get("tokens")
+                    if isinstance(part_tokens, dict):
+                        tokens_in += _num(part_tokens.get("input"))
+                        tokens_out += _num(part_tokens.get("output"))
+                    if "cost" in part:
+                        cost += _num(part["cost"])
+
                 event_type = data.get("type")
                 if event_type in _KNOWN_EVENT_TYPES:
                     yield AdapterEvent(event_type, data)
+                elif event_type == "text" and part is not None and isinstance(part.get("text"), str):
+                    yield AdapterEvent("assistant_text", {**data, "text": part["text"]})
         finally:
             pass
 
