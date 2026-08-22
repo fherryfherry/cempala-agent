@@ -11,6 +11,9 @@ async_session = async_sessionmaker(engine, expire_on_commit=False)
 def _enable_sqlite_fk(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
+    # ponytail: SQLite serializes writers; without a busy timeout, concurrent
+    # ticket-counter increments raise "database is locked" instead of waiting.
+    cursor.execute("PRAGMA busy_timeout=5000")
     cursor.close()
 
 
