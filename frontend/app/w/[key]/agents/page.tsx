@@ -221,10 +221,10 @@ function CreateAgentForm({ workspaceId }: { workspaceId: string }) {
               </>
             ) : (
               <Select value={model} onValueChange={(v) => setModel(v ?? "")}>
-                <SelectTrigger>
+                <SelectTrigger className="w-full">
                   <SelectValue placeholder={models.isLoading ? "Loading…" : "Select a model"} />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent className="max-w-[min(32rem,90vw)]">
                   {(models.data ?? []).map((m) => (
                     <SelectItem key={m} value={m}>
                       {m}
