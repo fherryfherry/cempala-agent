@@ -2,6 +2,7 @@
 
 import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api";
@@ -26,6 +27,49 @@ export interface WorkspaceEvent {
 }
 
 export type ConnectionStatus = "connecting" | "open" | "error";
+
+/** Builds a human-readable toast message for "agent activity" events (comment,
+ * status_change). Returns null for events that shouldn't produce a toast:
+ * - assistant_text/reasoning/tool_call/etc: already shown live in the Activity feed,
+ *   would be way too noisy as toasts (one per token-stream chunk).
+ * - system comments that just restate "Status changed from X to Y": redundant, the
+ *   matching status_change event already produces its own toast.
+ * Everything else — real agent-authored comments, and system comments about a run
+ * being blocked/failed/rejected — is real "activity" worth surfacing per the
+ * original request (balas chat, bikin/pindah/update/komen tiket).
+ */
+function buildActivityToastMessage(ev: WorkspaceEvent): string | null {
+  if (ev.type === "comment") {
+    const p = ev.payload as {
+      ticket_key?: string;
+      is_system?: boolean;
+      author?: string | null;
+      body_preview?: string;
+    };
+    if (p.is_system && p.body_preview?.startsWith("Status changed from")) {
+      return null;
+    }
+    const who = p.is_system ? "System" : (p.author ?? "Agent");
+    return `${who} commented on ${p.ticket_key ?? "a ticket"}`;
+  }
+  if (ev.type === "status_change") {
+    const p = ev.payload as {
+      ticket_key?: string;
+      ticket_title?: string;
+      from?: string | null;
+      to?: string;
+      actor?: string | null;
+    };
+    if (p.from == null) {
+      const title = p.ticket_title ? `: ${p.ticket_title}` : "";
+      return `New ticket ${p.ticket_key} created${title}`;
+    }
+    return p.actor
+      ? `${p.actor} moved ${p.ticket_key} to ${p.to}`
+      : `${p.ticket_key} moved from ${p.from} to ${p.to}`;
+  }
+  return null;
+}
 
 const MAX_BUFFER = 200;
 
@@ -73,6 +117,9 @@ export function EventsProvider({
         if (typeof ticketKey === "string") {
           queryClient.invalidateQueries({ queryKey: ["ticket", ticketKey] });
         }
+
+        const message = buildActivityToastMessage(ev);
+        if (message) toast(message);
       }
       if (ev.type === "run_started" || ev.type === "run_ended") {
         queryClient.invalidateQueries({ queryKey: ["tickets", workspaceId] });

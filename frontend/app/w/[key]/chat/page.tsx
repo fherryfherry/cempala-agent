@@ -165,9 +165,9 @@ function ThreadPanel({
   const isTicket = mode.type === "ticket";
   const ticketKey = isTicket ? mode.key : null;
 
-  // ponytail: the backend doesn't publish SSE events for comments/status changes yet (only
-  // run-lifecycle events), so a real fix would have it emit `comment`/`status_change` events.
-  // Until then, poll lightly while a conversation is open — good enough for MVP chat.
+  // The backend now publishes live `comment`/`status_change` SSE events (events-context.tsx
+  // invalidates this query on receipt), so this poll is just a redundant safety net for a
+  // missed/dropped SSE message — cheap enough to leave as belt-and-suspenders for MVP chat.
   const ticket = useQuery({
     queryKey: ["ticket", ticketKey],
     queryFn: () => getTicket(ticketKey!),
