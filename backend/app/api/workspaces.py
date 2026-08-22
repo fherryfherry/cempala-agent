@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.errors import AppError
-from app.db.models import Workspace
+from app.db.models import Run, Ticket, Workspace
 from app.db.session import get_session
 from app.schemas.workspace import DEFAULT_GUARDRAILS, WorkspaceCreate, WorkspaceOut, WorkspaceUpdate
 
@@ -75,6 +75,50 @@ async def update_workspace(
     if body.guardrails is not None:
         ws.guardrails = body.guardrails
 
+    await session.commit()
+    await session.refresh(ws)
+    return ws
+
+
+@router.post("/{workspace_id}/pause", response_model=WorkspaceOut)
+async def pause_workspace(workspace_id: str, session: AsyncSession = Depends(get_session)):
+    """Kill switch (MAP-031, docs/02-tsd.md §6): stop every run in this workspace and
+
+    reject new schedules until resumed. Sets the cancel event on each executing run
+    (the adapter's own terminate/kill handles the actual subprocess death — see
+    OpenCodeTool._terminate) and cancels queued runs outright since they never started.
+    """
+    from app.core import orchestrator  # deferred: orchestrator imports app.api.tickets,
+
+    # which imports this module — a top-level import here would be circular.
+
+    ws = await _get_workspace_or_404(session, workspace_id)
+    ws.paused = True
+
+    runs = (
+        await session.scalars(
+            select(Run)
+            .join(Ticket, Run.ticket_id == Ticket.id)
+            .where(Ticket.workspace_id == workspace_id, Run.status.in_(("running", "queued")))
+        )
+    ).all()
+
+    for run in runs:
+        if run.status == "running":
+            await orchestrator.stop(run.id)
+        else:
+            await orchestrator.cancel_queued(run.agent_id, run.id)
+            run.status = "cancelled"
+
+    await session.commit()
+    await session.refresh(ws)
+    return ws
+
+
+@router.post("/{workspace_id}/resume", response_model=WorkspaceOut)
+async def resume_workspace(workspace_id: str, session: AsyncSession = Depends(get_session)):
+    ws = await _get_workspace_or_404(session, workspace_id)
+    ws.paused = False
     await session.commit()
     await session.refresh(ws)
     return ws
