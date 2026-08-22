@@ -33,6 +33,22 @@ import {
 } from "@/components/ui/select";
 
 const ROLES: Role[] = ["pm", "lead", "engineer", "designer", "qa", "pentester"];
+const ROLE_SLUGS: Record<Role, string> = {
+  pm: "pm",
+  lead: "lead",
+  engineer: "eng",
+  designer: "designer",
+  qa: "qa",
+  pentester: "pentester",
+};
+
+function suggestAgentName(role: Role, existingNames: string[]): string {
+  const slug = ROLE_SLUGS[role];
+  const taken = new Set(existingNames);
+  let n = 1;
+  while (taken.has(`${slug}-${n}`)) n++;
+  return `${slug}-${n}`;
+}
 const TOOL_KINDS: { value: ToolKind; enabled: boolean }[] = [
   { value: "opencode", enabled: true },
   { value: "claude", enabled: false },
@@ -101,19 +117,25 @@ export default function AgentsPage() {
 
 function CreateAgentForm({ workspaceId }: { workspaceId: string }) {
   const queryClient = useQueryClient();
+  const agents = useQuery({ queryKey: ["agents", workspaceId], queryFn: () => listAgents(workspaceId) });
   const [name, setName] = useState("");
+  const [nameTouched, setNameTouched] = useState(false);
   const [role, setRole] = useState<Role>("engineer");
   const [model, setModel] = useState("");
   const [toolKind, setToolKind] = useState<ToolKind>("opencode");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [error, setError] = useState<string | null>(null);
 
+  const existingNames = agents.data?.map((a) => a.name) ?? [];
+  const suggestedName = suggestAgentName(role, existingNames);
+  const effectiveName = nameTouched ? name : suggestedName;
+
   const models = useQuery({ queryKey: ["models"], queryFn: getModels, retry: false });
 
   const mutation = useMutation({
     mutationFn: () =>
       createAgent(workspaceId, {
-        name,
+        name: effectiveName,
         role,
         model,
         tool_kind: toolKind,
@@ -122,6 +144,7 @@ function CreateAgentForm({ workspaceId }: { workspaceId: string }) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["agents", workspaceId] });
       setName("");
+      setNameTouched(false);
       setModel("");
       setSystemPrompt("");
       setError(null);
@@ -148,10 +171,18 @@ function CreateAgentForm({ workspaceId }: { workspaceId: string }) {
             <Label htmlFor="agent-name">Name</Label>
             <Input
               id="agent-name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
+              value={effectiveName}
+              onChange={(e) => {
+                setName(e.target.value);
+                setNameTouched(true);
+              }}
               required
             />
+            {!nameTouched && (
+              <p className="text-xs text-zinc-500">
+                Suggested — edit to use a different name.
+              </p>
+            )}
           </div>
 
           <div className="flex flex-col gap-1.5">
