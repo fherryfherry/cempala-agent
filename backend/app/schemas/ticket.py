@@ -21,6 +21,9 @@ class TicketUpdate(BaseModel):
     priority: Priority | None = None
     assignee_id: str | None = None
     status: Status | None = None
+    # Who is making this change, for status-transition permission checks (ADR-005: no
+    # auth, so the caller states it). None = owner, who may perform any transition.
+    actor_agent_id: str | None = None
 
 
 class TicketOut(BaseModel):

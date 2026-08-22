@@ -5,7 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.errors import AppError
 from app.api.workspaces import _get_workspace_or_404
-from app.db.models import Attachment, Comment, Run, Ticket, Workspace
+from app.core.state_machine import can_transition
+from app.db.models import Agent, Attachment, Comment, Run, Ticket, Workspace
 from app.db.session import get_session
 from app.schemas.ticket import (
     AttachmentOut,
@@ -136,10 +137,33 @@ async def get_ticket(key: str, session: AsyncSession = Depends(get_session)):
 async def update_ticket(key: str, body: TicketUpdate, session: AsyncSession = Depends(get_session)):
     ticket = await _get_ticket_or_404(session, key)
 
+    old_status = ticket.status
+    if body.status is not None and body.status != old_status:
+        actor_role = None
+        if body.actor_agent_id is not None:
+            actor = await session.get(Agent, body.actor_agent_id)
+            if actor is None:
+                raise AppError(422, "invalid_reference", "actor_agent_id does not exist")
+            actor_role = actor.role
+
+        allowed, reason = can_transition(old_status, body.status, actor_role)
+        if not allowed:
+            raise AppError(422, "illegal_transition", reason)
+
     for field in ("title", "description", "priority", "assignee_id", "status"):
         value = getattr(body, field)
         if value is not None:
             setattr(ticket, field, value)
+
+    if body.status is not None and body.status != old_status:
+        session.add(
+            Comment(
+                ticket_id=ticket.id,
+                author_agent_id=None,
+                is_system=True,
+                body=f"Status changed from {old_status} to {body.status}",
+            )
+        )
 
     try:
         await session.commit()

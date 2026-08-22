@@ -149,6 +149,67 @@ def test_patch_happy_path(client, tmp_path):
     assert body["status"] == "todo"
 
 
+def _make_agent(client, ws_id, role, name="agent"):
+    resp = client.post(
+        f"/api/workspaces/{ws_id}/agents",
+        json={"name": name, "role": role, "model": "gpt", "tool_kind": "opencode"},
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
+
+
+def test_patch_illegal_transition_422_names_transition(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    ticket = client.post(f"/api/workspaces/{ws_id}/tickets", json=_ticket_payload()).json()
+    engineer_id = _make_agent(client, ws_id, "engineer")
+
+    resp = client.patch(
+        f"/api/tickets/{ticket['key']}",
+        json={"status": "review", "actor_agent_id": engineer_id},
+    )
+    assert resp.status_code == 422
+    msg = resp.json()["error"]["message"]
+    assert "backlog" in msg and "review" in msg and "engineer" in msg
+
+
+def test_patch_owner_bypasses_matrix_including_blocked_to_todo(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    ticket = client.post(f"/api/workspaces/{ws_id}/tickets", json=_ticket_payload()).json()
+
+    resp = client.patch(f"/api/tickets/{ticket['key']}", json={"status": "blocked"})
+    assert resp.status_code == 200, resp.text
+
+    resp = client.patch(f"/api/tickets/{ticket['key']}", json={"status": "todo"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "todo"
+
+
+def test_patch_legal_transition_writes_system_comment(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    ticket = client.post(f"/api/workspaces/{ws_id}/tickets", json=_ticket_payload()).json()
+
+    resp = client.patch(f"/api/tickets/{ticket['key']}", json={"status": "todo"})
+    assert resp.status_code == 200
+
+    detail = client.get(f"/api/tickets/{ticket['key']}").json()
+    comments = detail["comments"]
+    assert len(comments) == 1
+    assert comments[0]["is_system"] is True
+    assert comments[0]["author_agent_id"] is None
+    assert "backlog" in comments[0]["body"] and "todo" in comments[0]["body"]
+
+
+def test_patch_unknown_actor_agent_id_422(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    ticket = client.post(f"/api/workspaces/{ws_id}/tickets", json=_ticket_payload()).json()
+
+    resp = client.patch(
+        f"/api/tickets/{ticket['key']}",
+        json={"status": "todo", "actor_agent_id": "nonexistent"},
+    )
+    assert resp.status_code == 422
+
+
 def test_delete_ticket(client, tmp_path):
     ws_id = _make_workspace(client, tmp_path)
     ticket = client.post(f"/api/workspaces/{ws_id}/tickets", json=_ticket_payload()).json()
