@@ -119,6 +119,17 @@ def test_get_ticket_with_nested_data(client, tmp_path):
     assert body["children"][0]["key"] == child["key"]
 
 
+def test_get_ticket_nested_comments_include_mentions(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    agent = _make_agent(client, ws_id, "engineer", name="ellie")
+    ticket = client.post(f"/api/workspaces/{ws_id}/tickets", json=_ticket_payload("t")).json()
+
+    client.post(f"/api/tickets/{ticket['key']}/comments", json={"body": "hey @ellie look at this"})
+
+    body = client.get(f"/api/tickets/{ticket['key']}").json()
+    assert body["comments"][0]["mentions"] == ["ellie"]
+
+
 def test_list_filters(client, tmp_path):
     ws_id = _make_workspace(client, tmp_path)
     a = client.post(f"/api/workspaces/{ws_id}/tickets", json=_ticket_payload("a")).json()

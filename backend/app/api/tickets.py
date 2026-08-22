@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.errors import AppError
 from app.api.workspaces import _get_workspace_or_404
 from app.core.state_machine import can_transition
-from app.db.models import Agent, Attachment, Comment, Run, Ticket, Workspace
+from app.db.models import Agent, Attachment, Comment, CommentMention, Run, Ticket, Workspace
 from app.db.session import get_session
 from app.schemas.ticket import (
     AttachmentOut,
@@ -124,9 +124,25 @@ async def get_ticket(key: str, session: AsyncSession = Depends(get_session)):
         await session.scalars(select(Ticket).where(Ticket.parent_id == ticket.id))
     ).all()
 
+    comment_out = []
+    for c in comments:
+        agent_ids = (
+            await session.scalars(
+                select(CommentMention.agent_id).where(CommentMention.comment_id == c.id)
+            )
+        ).all()
+        names: list[str] = []
+        if agent_ids:
+            names = list(
+                (await session.scalars(select(Agent.name).where(Agent.id.in_(agent_ids)))).all()
+            )
+        comment_out.append(
+            CommentOut(**CommentOut.model_validate(c).model_dump(exclude={"mentions"}), mentions=names)
+        )
+
     return TicketDetail(
         **TicketOut.model_validate(ticket).model_dump(),
-        comments=[CommentOut.model_validate(c) for c in comments],
+        comments=comment_out,
         attachments=[AttachmentOut.model_validate(a) for a in attachments],
         runs=[RunOut.model_validate(r) for r in runs],
         children=[TicketOut.model_validate(c) for c in children],
