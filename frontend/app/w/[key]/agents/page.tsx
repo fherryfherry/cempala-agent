@@ -17,6 +17,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
+import { AgentStatusBadge } from "@/components/agent-status";
 import {
   Card,
   CardContent,
@@ -85,9 +86,7 @@ export default function AgentsPage() {
                 <span>{agent.name}</span>
                 <Badge variant="secondary">{agent.role}</Badge>
                 <Badge variant="outline">{agent.tool_kind}</Badge>
-                <Badge variant={agent.enabled ? "default" : "outline"}>
-                  {agent.status}
-                </Badge>
+                <AgentStatusBadge status={agent.status} />
               </CardTitle>
             </CardHeader>
             <CardContent className="text-xs text-zinc-500">{agent.model}</CardContent>

@@ -199,17 +199,55 @@ export interface Attachment {
   created_at: string;
 }
 
+export type RunStatus = "queued" | "running" | "done" | "failed" | "cancelled" | "interrupted";
+
 export interface Run {
   id: string;
   ticket_id: string;
   agent_id: string;
-  status: string;
+  status: RunStatus;
   trigger: string;
+  parent_run_id: string | null;
   tool_kind: string;
   model: string;
+  session_id: string | null;
+  tokens_in: number;
+  tokens_out: number;
   cost: number;
+  report: { status?: string; summary?: string; mention?: string[]; tickets?: unknown[] } | null;
+  error: string | null;
   started_at: string | null;
   ended_at: string | null;
+}
+
+export interface RunEvent {
+  id: string;
+  run_id: string;
+  seq: number;
+  type: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface RunDetail extends Run {
+  events: RunEvent[];
+}
+
+export function listRuns(workspaceId: string, status?: string): Promise<Run[]> {
+  const qs = status ? `?status=${status}` : "";
+  return apiFetch<Run[]>(`/workspaces/${workspaceId}/runs${qs}`);
+}
+
+export function getRun(runId: string, opts?: { offset?: number; limit?: number }): Promise<RunDetail> {
+  const params = new URLSearchParams();
+  if (opts?.offset) params.set("offset", String(opts.offset));
+  if (opts?.limit) params.set("limit", String(opts.limit));
+  const qs = params.toString() ? `?${params.toString()}` : "";
+  return apiFetch<RunDetail>(`/runs/${runId}${qs}`);
+}
+
+export function stopRun(runId: string): Promise<Run> {
+  return apiFetch<Run>(`/runs/${runId}/stop`, { method: "POST" });
 }
 
 export interface TicketDetail extends Ticket {

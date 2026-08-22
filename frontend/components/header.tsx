@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
-import { listWorkspaces } from "@/lib/api";
+import { listAgents, listWorkspaces } from "@/lib/api";
+import { AgentStatusDot } from "@/components/agent-status";
 import {
   Select,
   SelectContent,
@@ -19,6 +20,12 @@ export function Header() {
     queryKey: ["workspaces"],
     queryFn: listWorkspaces,
     enabled: !!activeKey,
+  });
+  const workspaceId = workspaces.data?.find((ws) => ws.key === activeKey)?.id;
+  const agents = useQuery({
+    queryKey: ["agents", workspaceId],
+    queryFn: () => listAgents(workspaceId!),
+    enabled: !!workspaceId,
   });
 
   return (
@@ -55,7 +62,18 @@ export function Header() {
               <Link href={`/w/${activeKey}/agents`} className="hover:text-foreground">
                 Agents
               </Link>
+              <Link href={`/w/${activeKey}/activity`} className="hover:text-foreground">
+                Activity
+              </Link>
             </nav>
+
+            {agents.data && agents.data.length > 0 && (
+              <div className="ml-auto flex items-center gap-1.5">
+                {agents.data.map((a) => (
+                  <AgentStatusDot key={a.id} status={a.status} title={`${a.name}: ${a.status}`} />
+                ))}
+              </div>
+            )}
           </>
         )}
       </div>

@@ -21,6 +21,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
+import { AgentStatusDot } from "@/components/agent-status";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Select,
@@ -107,6 +108,8 @@ export default function BoardPage() {
 
   const agentName = (id: string | null) =>
     id ? (agents.data?.find((a) => a.id === id)?.name ?? id) : null;
+  const agentStatus = (id: string | null) =>
+    id ? agents.data?.find((a) => a.id === id)?.status : undefined;
 
   return (
     <div className="flex w-full flex-1 flex-col gap-6 px-6 py-10">
@@ -163,7 +166,10 @@ export default function BoardPage() {
                     <CardContent className="flex flex-col gap-1 px-3 text-sm">
                       <span>{t.title}</span>
                       {agentName(t.assignee_id) && (
-                        <span className="text-xs text-zinc-500">
+                        <span className="flex items-center gap-1.5 text-xs text-zinc-500">
+                          {agentStatus(t.assignee_id) && (
+                            <AgentStatusDot status={agentStatus(t.assignee_id)!} />
+                          )}
                           {agentName(t.assignee_id)}
                         </span>
                       )}

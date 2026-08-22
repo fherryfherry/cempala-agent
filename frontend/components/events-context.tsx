@@ -77,6 +77,10 @@ export function EventsProvider({
       if (ev.type === "run_started" || ev.type === "run_ended") {
         queryClient.invalidateQueries({ queryKey: ["tickets", workspaceId] });
         queryClient.invalidateQueries({ queryKey: ["agents", workspaceId] });
+        queryClient.invalidateQueries({ queryKey: ["runs", workspaceId] });
+      }
+      if (ev.run_id) {
+        queryClient.invalidateQueries({ queryKey: ["run", ev.run_id] });
       }
     };
 
