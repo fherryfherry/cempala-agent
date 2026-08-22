@@ -139,6 +139,31 @@ def test_ticket_context_fields_present():
     assert "pm-1 (t1): Tolong prioritaskan" in prompt
 
 
+def test_extra_instructions_included_when_provided():
+    prompt = build_prompt(
+        _agent("pm-1", "pm"), "/repo", ROSTER, TICKET, extra_instructions="foo marker text"
+    )
+    assert "foo marker text" in prompt
+
+
+def test_extra_instructions_absent_by_default_output_unchanged():
+    with_none = build_prompt(_agent("pm-1", "pm"), "/repo", ROSTER, TICKET, extra_instructions=None)
+    without_param = build_prompt(_agent("pm-1", "pm"), "/repo", ROSTER, TICKET)
+    assert with_none == without_param
+
+
+def test_updates_instruction_present_for_pm_qa_pentester():
+    for role in ("pm", "qa", "pentester"):
+        prompt = build_prompt(_agent(f"{role}-x", role), "/repo", ROSTER, TICKET)
+        assert "updates:" in prompt
+
+
+def test_updates_instruction_absent_for_lead_engineer_designer():
+    for role in ("lead", "engineer", "designer"):
+        prompt = build_prompt(_agent(f"{role}-x", role), "/repo", ROSTER, TICKET)
+        assert "updates:" not in prompt
+
+
 def test_previous_run_summaries_included():
     prompt = build_prompt(
         _agent("eng-1", "engineer"),

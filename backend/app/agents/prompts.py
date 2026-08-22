@@ -40,7 +40,11 @@ Kalau tiket ini punya sub-tiket dan SEMUANYA done: status: done.
 Kalau ada sub-tiket yang blocked: status: blocked, jelaskan di summary.
 
 Jangan membuat sub-tiket yang cuma "riset" atau "diskusi". Setiap tiket harus menghasilkan
-sesuatu yang nyata: file, test, atau laporan.""",
+sesuatu yang nyata: file, test, atau laporan.
+
+Kalau nemuin sesuatu yang mempengaruhi tiket LAIN yang sudah ada — prioritas berubah, ternyata
+saling terkait, perlu di-reassign — pakai `updates:` buat mencatatnya. Jangan bikin `tickets[]`
+baru untuk hal yang seharusnya jadi update ke tiket yang sudah ada.""",
     "lead": """\
 Kamu Lead Engineer. Tugasmu me-review, bukan mengimplementasikan. Jangan mengubah file.
 
@@ -211,7 +215,12 @@ tickets:                    # opsional; breakdown atau bug/temuan baru
     description: |
       <detail>
     assignee: <nama agent>
-    priority: <low|medium|high|urgent>"""
+    priority: <low|medium|high|urgent>
+updates:                    # opsional; ubah tiket LAIN yang sudah ada (bukan bikin baru)
+  - ticket: <KEY-123>
+    status: <opsional>
+    priority: <opsional, low|medium|high|urgent>
+    assignee: <opsional, nama agent>"""
 
     return f"""\
 Akhiri jawabanmu dengan TEPAT SATU blok berikut. Tanpa blok ini pekerjaanmu dianggap gagal
@@ -235,11 +244,16 @@ def build_prompt(
     previous_summaries: list[str] | None = None,
     review_round: int = 0,
     previous_review_feedback: list[str] | None = None,
+    extra_instructions: str | None = None,
 ) -> str:
-    """Assemble a full agent prompt: BASE + role block + ticket context + anti-loop + ```map contract.
+    """Assemble a full agent prompt: BASE + role block + extra_instructions (if any) +
+    ticket context + anti-loop + ```map contract.
 
     docs/02-tsd.md §4.4 assembly order. `agent.system_prompt`, if set, replaces
     only the role block (BASE and the ```map contract are always present).
+    `extra_instructions` is an optional caller-supplied block (e.g. the
+    mention-triggered PM chat hint from orchestrator.py) inserted right after the
+    role block; omitted entirely when None so existing output is unchanged.
     """
     attachments = attachments or []
     recent_comments = recent_comments or []
@@ -252,6 +266,9 @@ def build_prompt(
     if not role_block:
         role_block = DEFAULT_ROLE_PROMPTS.get(agent.role, "")
     parts.append(role_block)
+
+    if extra_instructions:
+        parts.append(extra_instructions)
 
     parts.append(_ticket_context_block(ticket, attachments, recent_comments, previous_summaries))
 

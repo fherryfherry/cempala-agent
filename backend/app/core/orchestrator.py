@@ -34,7 +34,7 @@ from app.core.guardrails import (
 )
 from app.core.loop_detector import detect_loop
 from app.core.report import ROLE_ALLOWED_STATUSES, parse_report
-from app.core.state_machine import can_transition
+from app.core.state_machine import STATUSES, can_transition
 from app.db.models import Agent, Attachment, Comment, CommentMention, Run, Ticket, Workspace
 
 # Valid role strings — used for MAP-029's role-not-name mention fallback (see
@@ -221,7 +221,7 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
             run.status = "running"
             run.started_at = _now()
             agent.status = "working"
-            if ticket.status == "todo":
+            if ticket.status in ("backlog", "todo"):
                 # docs/03-agent-design.md §5: "todo -> in_progress | otomatis saat run
                 # dimulai, owner" — a system-driven transition (like _block_ticket's
                 # any -> blocked), not routed through can_transition's role matrix,
@@ -229,14 +229,21 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
                 # state_machine.py and test_state_machine.py's
                 # test_owner_may_do_todo_to_in_progress). Needed so MAP-030's
                 # auto-scheduled tickets[] children (created at status="todo") can run
-                # to completion without a human PATCH in between.
+                # to completion without a human PATCH in between. Also covers a ticket
+                # still at "backlog" (never manually moved to todo first) — found via
+                # real dogfooding: a ticket created and run immediately has no
+                # (backlog, in_progress) entry in can_transition for any role, so its
+                # otherwise-valid report would get bounced.
+                old_status = ticket.status
                 ticket.status = "in_progress"
                 await _write_system_comment(
-                    session, ticket.id, "Status changed from todo to in_progress (run started)"
+                    session,
+                    ticket.id,
+                    f"Status changed from {old_status} to in_progress (run started)",
                 )
             await session.commit()
 
-            prompt = await _build_prompt_for(session, workspace, agent, ticket)
+            prompt = await _build_prompt_for(session, workspace, agent, ticket, run.trigger)
 
             await event_bus.publish(
                 session,
@@ -355,7 +362,21 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
             _CANCEL_EVENTS.pop(run_id, None)
 
 
-async def _build_prompt_for(session, workspace: Workspace, agent: Agent, ticket: Ticket) -> str:
+# Shown to a PM only when directly mentioned (not an automatic/scheduled run): lets the
+# owner brainstorm conversationally before committing to a tickets[] breakdown, since
+# the parser already treats a same-status "in_progress" report with no tickets[] as a
+# no-op (MAP-030) — this is purely a prompt hint, no parser/state-machine change needed.
+_PM_MENTION_EXTRA_INSTRUCTIONS = (
+    "Ini pesan langsung dari owner (bukan run otomatis). Kalau idenya belum cukup jelas "
+    "buat dipecah jadi tickets[], BOLEH balas cuma dengan pertanyaan klarifikasi di "
+    "summary, status: in_progress, TANPA tickets[] — lanjutkan obrolan sampai kamu "
+    "cukup yakin baru pecah jadi sub-tiket."
+)
+
+
+async def _build_prompt_for(
+    session, workspace: Workspace, agent: Agent, ticket: Ticket, trigger: str
+) -> str:
     roster = (
         await session.scalars(select(Agent).where(Agent.workspace_id == workspace.id))
     ).all()
@@ -418,6 +439,10 @@ async def _build_prompt_for(session, workspace: Workspace, agent: Agent, ticket:
         description=ticket.description or "",
     )
 
+    extra_instructions = (
+        _PM_MENTION_EXTRA_INSTRUCTIONS if agent.role == "pm" and trigger == "mention" else None
+    )
+
     return build_prompt(
         agent_info,
         workspace.repo_path,
@@ -428,6 +453,7 @@ async def _build_prompt_for(session, workspace: Workspace, agent: Agent, ticket:
         previous_summaries=previous_summaries,
         review_round=review_round,
         previous_review_feedback=previous_review_feedback,
+        extra_instructions=extra_instructions,
     )
 
 
@@ -531,6 +557,76 @@ async def _finish_run(
     run.status = "done"
     old_status = ticket.status
     ticket.status = parsed.status
+
+    # `updates:` (v1, narrow by design): let this report modify OTHER existing tickets'
+    # status/priority/assignee. Never schedules a run on the target — changing another
+    # ticket's fields via updates: is deliberately not forward momentum for that ticket;
+    # the target's own next run (if any) is triggered the normal way. Computed here,
+    # before run.report is built and flushed below, so the "updates" summary is
+    # complete on first write — JSON columns aren't mutation-tracked, so mutating a
+    # nested list in place after a flush wouldn't be picked up by a later commit.
+    _VALID_PRIORITIES = {"low", "medium", "high", "urgent"}
+    updates_report: list[dict] = []
+    source_skip_notes: list[str] = []
+    for draft in parsed.updates:
+        target = await session.scalar(
+            select(Ticket).where(
+                Ticket.workspace_id == ticket.workspace_id, Ticket.key == draft.ticket_key
+            )
+        )
+        if target is None:
+            source_skip_notes.append(f"{draft.ticket_key}: tiket tidak ditemukan di workspace ini")
+            continue
+
+        applied: list[str] = []
+        skipped: list[str] = []
+
+        if draft.status is not None:
+            if draft.status not in STATUSES:
+                skipped.append(f"status '{draft.status}' tidak dikenal")
+            else:
+                allowed, reason = can_transition(target.status, draft.status, agent.role)
+                if not allowed:
+                    skipped.append(f"status -> {draft.status} ditolak: {reason}")
+                else:
+                    target.status = draft.status
+                    applied.append(f"status → {draft.status}")
+
+        if draft.priority is not None:
+            if draft.priority not in _VALID_PRIORITIES:
+                skipped.append(f"priority '{draft.priority}' tidak valid")
+            else:
+                target.priority = draft.priority
+                applied.append(f"priority → {draft.priority}")
+
+        if draft.assignee is not None:
+            assignee_agent = await session.scalar(
+                select(Agent).where(
+                    Agent.workspace_id == target.workspace_id, Agent.name == draft.assignee
+                )
+            )
+            if assignee_agent is None:
+                skipped.append(f"assignee '{draft.assignee}' tidak ditemukan")
+            else:
+                target.assignee_id = assignee_agent.id
+                applied.append(f"assignee → {assignee_agent.name}")
+
+        if applied:
+            await _write_system_comment(
+                session,
+                target.id,
+                f"Diperbarui oleh {agent.name} lewat laporan {ticket.key}: " + ", ".join(applied),
+            )
+        for s in skipped:
+            source_skip_notes.append(f"{draft.ticket_key}: {s}")
+
+        updates_report.append({"ticket": draft.ticket_key, "applied": applied, "skipped": skipped})
+
+    if source_skip_notes:
+        await _write_system_comment(
+            session, ticket.id, "Beberapa updates diabaikan: " + "; ".join(source_skip_notes)
+        )
+
     run.report = {
         "status": parsed.status,
         "summary": parsed.summary,
@@ -545,6 +641,7 @@ async def _finish_run(
             }
             for t in parsed.tickets
         ],
+        "updates": updates_report,
     }
 
     comment = Comment(

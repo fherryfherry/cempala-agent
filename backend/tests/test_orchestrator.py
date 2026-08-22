@@ -453,6 +453,292 @@ exit 1""",
     assert run["id"] not in [r["id"] for r in resp.json()]
 
 
+# ---------------------------------------------------------------------------
+# backlog/todo run-start auto-transition
+# ---------------------------------------------------------------------------
+
+_PM_IN_PROGRESS_SCRIPT = '''
+import json
+text = """working on it
+
+```map
+status: in_progress
+mention: []
+summary: |
+  breakdown in progress
+```
+"""
+print(json.dumps({"type": "assistant_text", "text": text, "session_id": "sess-backlog"}))
+'''
+
+
+def test_run_from_backlog_auto_transitions_and_completes(client, tmp_path, monkeypatch):
+    """A ticket created and run immediately (never dragged to todo first) must not get
+    its otherwise-valid report bounced by the state machine (found via MAP-033
+    dogfooding: can_transition has no (backlog, in_progress) entry for any role)."""
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    ticket = _make_ticket(client, ws_id)
+    assert ticket["status"] == "backlog"
+
+    script = _write_python_binary(tmp_path / "opencode", _PM_IN_PROGRESS_SCRIPT)
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": pm_id})
+    assert resp.status_code == 201, resp.text
+    run = resp.json()
+
+    final = _wait_for_run(client, run["id"])
+    assert final["status"] == "done", final
+    assert final["report"]["status"] == "in_progress"
+
+    # The report itself was accepted (run "done", not bounced by the state machine) —
+    # that's the fix under test. What happens next (handoff blocks it since PM reported
+    # a non-final status with no mention/tickets[]) is unrelated existing behavior.
+    detail = client.get(f"/api/tickets/{ticket['key']}").json()
+    bodies = [c["body"] for c in detail["comments"] if c["is_system"]]
+    assert any("Status changed from backlog to in_progress" in b for b in bodies)
+
+
+def test_run_from_todo_still_auto_transitions_and_completes(client, tmp_path, monkeypatch):
+    """Regression coverage: a ticket already manually moved to todo still works
+    identically to before this change."""
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    ticket = _make_ticket(client, ws_id)
+    _set_status(client, ticket["key"], "todo")
+
+    script = _write_python_binary(tmp_path / "opencode", _PM_IN_PROGRESS_SCRIPT)
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": pm_id})
+    assert resp.status_code == 201, resp.text
+    run = resp.json()
+
+    final = _wait_for_run(client, run["id"])
+    assert final["status"] == "done", final
+
+    detail = client.get(f"/api/tickets/{ticket['key']}").json()
+    bodies = [c["body"] for c in detail["comments"] if c["is_system"]]
+    assert any("Status changed from todo to in_progress" in b for b in bodies)
+
+
+# ---------------------------------------------------------------------------
+# extra_instructions: PM mention-triggered runs only
+# ---------------------------------------------------------------------------
+
+_MARKER = "BOLEH balas cuma dengan pertanyaan klarifikasi"
+
+
+def test_extra_instructions_marker_present_only_for_pm_mention_trigger(
+    client, tmp_path, monkeypatch
+):
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+    ticket = _make_ticket(client, ws_id)
+
+    script = _write_python_binary(tmp_path / "opencode", _PM_IN_PROGRESS_SCRIPT)
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    # trigger="manual" via direct run endpoint, PM role -> no marker.
+    resp = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": pm_id})
+    run = resp.json()
+    _wait_for_run(client, run["id"])
+    detail = client.get(f"/api/runs/{run['id']}").json()
+    prompt = detail["events"][0]["payload"]["prompt"]
+    assert _MARKER not in prompt
+
+    # trigger="mention" via owner comment mentioning pm-1 -> marker present. (Comments
+    # don't care about ticket status, so no need to touch it here even if the first
+    # run above left it blocked via the handoff engine.)
+    resp = client.post(
+        f"/api/tickets/{ticket['key']}/comments", json={"body": "@pm-1 thoughts?"}
+    )
+    assert resp.status_code == 201, resp.text
+
+    # Find the (only) mention-triggered run for pm-1 on this ticket.
+    runs = client.get(f"/api/workspaces/{ws_id}/runs").json()
+    mention_run = next(r for r in runs if r["agent_id"] == pm_id and r["trigger"] == "mention")
+    _wait_for_run(client, mention_run["id"])
+    detail2 = client.get(f"/api/runs/{mention_run['id']}").json()
+    prompt2 = detail2["events"][0]["payload"]["prompt"]
+    assert _MARKER in prompt2
+
+    # trigger="mention" but engineer role -> no marker.
+    resp = client.post(
+        f"/api/tickets/{ticket['key']}/comments", json={"body": "@eng-1 thoughts?"}
+    )
+    assert resp.status_code == 201, resp.text
+    runs = client.get(f"/api/workspaces/{ws_id}/runs").json()
+    eng_mention_run = next(r for r in runs if r["agent_id"] == eng_id and r["trigger"] == "mention")
+    _wait_for_run(client, eng_mention_run["id"])
+    detail3 = client.get(f"/api/runs/{eng_mention_run['id']}").json()
+    prompt3 = detail3["events"][0]["payload"]["prompt"]
+    assert _MARKER not in prompt3
+
+
+# ---------------------------------------------------------------------------
+# updates[]: a report modifying OTHER existing tickets
+# ---------------------------------------------------------------------------
+
+
+def _updates_script(entries_yaml: str, status: str = "in_progress") -> str:
+    return f'''
+import json
+text = """working
+
+```map
+status: {status}
+mention: []
+summary: |
+  handled updates
+updates:
+{entries_yaml}
+```
+"""
+print(json.dumps({{"type": "assistant_text", "text": text}}))
+'''
+
+
+def test_updates_legal_status_change_applies_to_target(client, tmp_path, monkeypatch):
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    source = _make_ticket(client, ws_id, "source")
+    target = _make_ticket(client, ws_id, "target")
+    # legal transition for pm role: in_progress -> done
+    _set_status(client, target["key"], "todo")
+    _set_status(client, target["key"], "in_progress")
+
+    entries = f"  - ticket: {target['key']}\n    status: done\n"
+    script = _write_python_binary(tmp_path / "opencode", _updates_script(entries))
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.post(f"/api/tickets/{source['key']}/run", json={"agent_id": pm_id})
+    run = resp.json()
+    final = _wait_for_run(client, run["id"])
+    assert final["status"] == "done", final
+    assert final["report"]["updates"] == [{"ticket": target["key"], "applied": ["status → done"], "skipped": []}]
+
+    target_detail = client.get(f"/api/tickets/{target['key']}").json()
+    assert target_detail["status"] == "done"
+    system_bodies = [c["body"] for c in target_detail["comments"] if c["is_system"]]
+    assert any(source["key"] in b and "pm-1" in b for b in system_bodies)
+
+
+def test_updates_illegal_status_change_skipped_with_note(client, tmp_path, monkeypatch):
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    source = _make_ticket(client, ws_id, "source")
+    target = _make_ticket(client, ws_id, "target")
+    # target stays at backlog; (backlog, done) has no allowed role -> illegal for pm
+    assert target["status"] == "backlog"
+
+    entries = f"  - ticket: {target['key']}\n    status: done\n"
+    script = _write_python_binary(tmp_path / "opencode", _updates_script(entries))
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.post(f"/api/tickets/{source['key']}/run", json={"agent_id": pm_id})
+    run = resp.json()
+    final = _wait_for_run(client, run["id"])
+    assert final["status"] == "done", final
+    assert final["report"]["updates"][0]["applied"] == []
+    assert final["report"]["updates"][0]["skipped"]
+
+    target_detail = client.get(f"/api/tickets/{target['key']}").json()
+    assert target_detail["status"] == "backlog"
+
+    source_detail = client.get(f"/api/tickets/{source['key']}").json()
+    system_bodies = [c["body"] for c in source_detail["comments"] if c["is_system"]]
+    assert any("Beberapa updates diabaikan" in b for b in system_bodies)
+
+
+def test_updates_unknown_or_wrong_workspace_ticket_skipped_cleanly(client, tmp_path, monkeypatch):
+    ws_id = _make_workspace(client, tmp_path, key="MAPA")
+    other_ws_id = _make_workspace(client, tmp_path, key="MAPB")
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    source = _make_ticket(client, ws_id, "source")
+    other_ticket = _make_ticket(client, other_ws_id, "other")
+
+    entries = (
+        "  - ticket: NOPE-999\n    priority: high\n"
+        f"  - ticket: {other_ticket['key']}\n    priority: high\n"
+    )
+    script = _write_python_binary(tmp_path / "opencode", _updates_script(entries))
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.post(f"/api/tickets/{source['key']}/run", json={"agent_id": pm_id})
+    run = resp.json()
+    final = _wait_for_run(client, run["id"])
+    assert final["status"] == "done", final
+
+    # The report itself was accepted (run "done"); the source ticket then gets blocked
+    # by the (unrelated) handoff engine since a non-final status with no mention/
+    # tickets[] always gets blocked so it doesn't hang — not a concern of this test.
+    source_detail = client.get(f"/api/tickets/{source['key']}").json()
+    system_bodies = [c["body"] for c in source_detail["comments"] if c["is_system"]]
+    assert any("Beberapa updates diabaikan" in b for b in system_bodies)
+
+    other_detail = client.get(f"/api/tickets/{other_ticket['key']}").json()
+    assert other_detail["priority"] == "medium"  # untouched
+
+
+def test_updates_priority_and_assignee_only_never_touch_can_transition(client, tmp_path, monkeypatch):
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    eng2_id = _make_agent(client, ws_id, "engineer", "eng-2")
+    source = _make_ticket(client, ws_id, "source")
+    target = _make_ticket(client, ws_id, "target")  # stays at backlog
+
+    entries = f"  - ticket: {target['key']}\n    priority: urgent\n    assignee: eng-2\n"
+    script = _write_python_binary(tmp_path / "opencode", _updates_script(entries))
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.post(f"/api/tickets/{source['key']}/run", json={"agent_id": pm_id})
+    run = resp.json()
+    final = _wait_for_run(client, run["id"])
+    assert final["status"] == "done", final
+    assert final["report"]["updates"][0]["skipped"] == []
+
+    target_detail = client.get(f"/api/tickets/{target['key']}").json()
+    assert target_detail["status"] == "backlog"  # untouched, no state-machine check ran
+    assert target_detail["priority"] == "urgent"
+    assert target_detail["assignee_id"] == eng2_id
+
+
+def test_updates_multiple_entries_mixed_success_and_failure_independent(client, tmp_path, monkeypatch):
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    source = _make_ticket(client, ws_id, "source")
+    ok_target = _make_ticket(client, ws_id, "ok-target")
+    bad_target = _make_ticket(client, ws_id, "bad-target")
+
+    entries = (
+        f"  - ticket: {ok_target['key']}\n    priority: high\n"
+        f"  - ticket: {bad_target['key']}\n    status: qa\n"  # illegal for pm from backlog
+        "  - ticket: GHOST-1\n    priority: low\n"
+    )
+    script = _write_python_binary(tmp_path / "opencode", _updates_script(entries))
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.post(f"/api/tickets/{source['key']}/run", json={"agent_id": pm_id})
+    run = resp.json()
+    final = _wait_for_run(client, run["id"])
+    assert final["status"] == "done", final
+
+    ok_detail = client.get(f"/api/tickets/{ok_target['key']}").json()
+    assert ok_detail["priority"] == "high"
+
+    bad_detail = client.get(f"/api/tickets/{bad_target['key']}").json()
+    assert bad_detail["status"] == "backlog"
+
+    source_detail = client.get(f"/api/tickets/{source['key']}").json()
+    system_bodies = [c["body"] for c in source_detail["comments"] if c["is_system"]]
+    diagnostic = next(b for b in system_bodies if "Beberapa updates diabaikan" in b)
+    assert "bad-target" in diagnostic or bad_target["key"] in diagnostic
+    assert "GHOST-1" in diagnostic
+
+
 def test_get_run_includes_events(client, tmp_path, monkeypatch):
     ws_id = _make_workspace(client, tmp_path)
     eng_id = _make_agent(client, ws_id, "engineer", "eng-1")

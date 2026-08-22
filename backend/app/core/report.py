@@ -42,6 +42,14 @@ class TicketDraft:
 
 
 @dataclass
+class TicketUpdateDraft:
+    ticket_key: str
+    status: str | None = None
+    priority: str | None = None
+    assignee: str | None = None
+
+
+@dataclass
 class ParseResult:
     ok: bool
     reason: str | None = None
@@ -53,6 +61,9 @@ class ParseResult:
     tickets: list[TicketDraft] = field(default_factory=list)
     tickets_dropped: bool = False
     tickets_dropped_reason: str | None = None
+    updates: list[TicketUpdateDraft] = field(default_factory=list)
+    updates_dropped: bool = False
+    updates_dropped_reason: str | None = None
 
 
 def _invalid(reason: str) -> ParseResult:
@@ -143,6 +154,33 @@ def parse_report(
                     )
                 )
 
+    updates: list[TicketUpdateDraft] = []
+    updates_dropped = False
+    updates_dropped_reason = None
+    updates_raw = data.get("updates")
+    if updates_raw:
+        if actor_role not in ROLES_ALLOWED_TICKETS:
+            updates_dropped = True
+            updates_dropped_reason = (
+                f"role '{actor_role}' is not allowed to declare updates[] "
+                f"(allowed: {sorted(ROLES_ALLOWED_TICKETS)}); dropped"
+            )
+        elif not isinstance(updates_raw, list):
+            updates_dropped = True
+            updates_dropped_reason = "'updates' must be a list; dropped"
+        else:
+            for item in updates_raw:
+                if not isinstance(item, dict) or not item.get("ticket"):
+                    continue  # skip malformed entries, don't fail whole parse
+                updates.append(
+                    TicketUpdateDraft(
+                        ticket_key=str(item["ticket"]),
+                        status=str(item["status"]) if item.get("status") else None,
+                        priority=str(item["priority"]) if item.get("priority") else None,
+                        assignee=str(item["assignee"]) if item.get("assignee") else None,
+                    )
+                )
+
     return ParseResult(
         ok=True,
         status=status,
@@ -153,4 +191,7 @@ def parse_report(
         tickets=tickets,
         tickets_dropped=tickets_dropped,
         tickets_dropped_reason=tickets_dropped_reason,
+        updates=updates,
+        updates_dropped=updates_dropped,
+        updates_dropped_reason=updates_dropped_reason,
     )

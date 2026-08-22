@@ -191,3 +191,61 @@ def test_not_a_mapping_yaml():
     text = _wrap("- just\n- a\n- list\n")
     result = parse_report(text, "engineer", VALID_AGENTS)
     assert result.ok is False
+
+
+def test_updates_from_authorized_role_parsed():
+    text = _wrap(
+        "status: in_progress\n"
+        "summary: |\n"
+        "  found cross-ticket impact\n"
+        "updates:\n"
+        "  - ticket: MAP-002\n"
+        "    status: blocked\n"
+        "    priority: high\n"
+        "  - ticket: MAP-003\n"
+        "    assignee: eng-2\n"
+    )
+    result = parse_report(text, "pm", VALID_AGENTS)
+    assert result.ok is True
+    assert result.updates_dropped is False
+    assert len(result.updates) == 2
+    assert result.updates[0].ticket_key == "MAP-002"
+    assert result.updates[0].status == "blocked"
+    assert result.updates[0].priority == "high"
+    assert result.updates[0].assignee is None
+    assert result.updates[1].ticket_key == "MAP-003"
+    assert result.updates[1].assignee == "eng-2"
+    assert result.updates[1].status is None
+
+
+def test_update_missing_ticket_key_is_skipped():
+    text = _wrap(
+        "status: in_progress\n"
+        "summary: |\n"
+        "  breakdown\n"
+        "updates:\n"
+        "  - priority: high\n"
+        "  - ticket: MAP-004\n"
+        "    priority: low\n"
+    )
+    result = parse_report(text, "qa", VALID_AGENTS)
+    assert result.ok is True
+    assert len(result.updates) == 1
+    assert result.updates[0].ticket_key == "MAP-004"
+
+
+def test_updates_from_unauthorized_role_dropped_and_recorded():
+    text = _wrap(
+        "status: review\n"
+        "summary: |\n"
+        "  implemented feature\n"
+        "updates:\n"
+        "  - ticket: MAP-002\n"
+        "    priority: high\n"
+    )
+    result = parse_report(text, "engineer", VALID_AGENTS)
+    assert result.ok is True
+    assert result.updates == []
+    assert result.updates_dropped is True
+    assert result.updates_dropped_reason is not None
+    assert "engineer" in result.updates_dropped_reason
