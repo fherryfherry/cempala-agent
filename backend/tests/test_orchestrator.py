@@ -147,9 +147,19 @@ print(json.dumps({
 
 
 def test_valid_map_block_transitions_ticket_and_records_mentions(client, tmp_path, monkeypatch):
+    """This test predates MAP-029's handoff engine: a valid `mention` to a real,
+    enabled agent now automatically schedules a follow-up run for them. Since the
+    fake binary here is shared and always reports `status: review` (only legal for
+    engineer/designer), a real lead-1 follow-up run would deterministically fail its
+    own role check and re-block the ticket — racily, depending on whether that async
+    follow-up finishes before this test's assertions run. Disabling lead-1 keeps this
+    test focused on MAP-023's original concern (single run -> parse -> apply) by making
+    the handoff resolve synchronously to "agent nonaktif" with no second subprocess."""
     ws_id = _make_workspace(client, tmp_path)
     eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
-    _make_agent(client, ws_id, "lead", "lead-1")
+    lead_id = _make_agent(client, ws_id, "lead", "lead-1")
+    resp = client.patch(f"/api/agents/{lead_id}", json={"enabled": False})
+    assert resp.status_code == 200, resp.text
     ticket = _make_ticket(client, ws_id)
     _set_status(client, ticket["key"], "todo")
     _set_status(client, ticket["key"], "in_progress")
@@ -167,12 +177,16 @@ def test_valid_map_block_transitions_ticket_and_records_mentions(client, tmp_pat
     assert final["report"]["status"] == "review"
     assert final["report"]["mention"] == ["lead-1"]
 
+    # lead-1 is disabled, so the handoff engine can't schedule a follow-up run for the
+    # mention; per docs/03-agent-design.md §6 that's recorded as "agent X nonaktif", and
+    # since "review" isn't a final status with no valid target, the ticket is blocked.
     detail = client.get(f"/api/tickets/{ticket['key']}").json()
-    assert detail["status"] == "review"
+    assert detail["status"] == "blocked"
     bodies = [c["body"] for c in detail["comments"]]
     mentions = next(c["mentions"] for c in detail["comments"] if not c["is_system"])
     assert any("Implemented the thing" in b for b in bodies)
     assert mentions == ["lead-1"]
+    assert any("lead-1" in b and "nonaktif" in b for b in bodies)
 
     agent = client.get(f"/api/workspaces/{ws_id}/agents").json()
     eng = next(a for a in agent if a["id"] == eng_id)
