@@ -3,6 +3,7 @@
 import asyncio
 import stat
 import subprocess
+import time
 
 import pytest
 
@@ -194,12 +195,18 @@ def test_cancel_actually_kills_child_process(tmp_path, monkeypatch):
 
         consume_task = asyncio.create_task(_consume())
 
-        # Give the subprocess a moment to actually spawn `sleep 30`.
-        await asyncio.sleep(0.3)
-        found = subprocess.run(
-            ["pgrep", "-f", "sleep 30"], capture_output=True, text=True
-        ).stdout.split()
-        pids = [int(p) for p in found]
+        # Poll for the subprocess to actually spawn `sleep 30` rather than a fixed
+        # sleep — under full-suite load a fixed delay isn't always long enough,
+        # which was a real source of flakiness.
+        deadline = time.monotonic() + 5
+        pids: list[int] = []
+        while time.monotonic() < deadline and not pids:
+            found = subprocess.run(
+                ["pgrep", "-f", "sleep 30"], capture_output=True, text=True
+            ).stdout.split()
+            pids = [int(p) for p in found]
+            if not pids:
+                await asyncio.sleep(0.05)
 
         ctx.cancel_event.set()
         events = await consume_task
