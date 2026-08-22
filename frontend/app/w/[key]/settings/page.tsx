@@ -155,8 +155,10 @@ function WorkspaceInfoForm({ workspace }: { workspace: Workspace }) {
             />
             {repoPathError && <p className="text-xs text-red-600">{repoPathError}</p>}
             <p className="text-xs text-zinc-500">
-              Agents run in this folder with full permissions. Validation here is a convenience
-              check, not a security boundary.
+              Doesn&apos;t exist yet? It&apos;ll be created — at that exact path if absolute, or
+              under <code className="font-mono">workspaces/&lt;name&gt;</code> if you just type a
+              name. Agents run in this folder with full permissions. Validation here is a
+              convenience check, not a security boundary.
             </p>
           </div>
 

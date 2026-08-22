@@ -146,7 +146,7 @@ function CreateWorkspaceForm() {
             <Label htmlFor="ws-repo-path">Repo path</Label>
             <Input
               id="ws-repo-path"
-              placeholder="/absolute/path/to/repo"
+              placeholder="/absolute/path/to/repo, or just a name to create one"
               value={repoPath}
               onChange={(e) => {
                 setRepoPath(e.target.value);
@@ -155,6 +155,11 @@ function CreateWorkspaceForm() {
               aria-invalid={repoPathError ? true : undefined}
               required
             />
+            <p className="text-xs text-zinc-500">
+              Doesn&apos;t exist yet? It&apos;ll be created — at that exact path if absolute, or
+              under <code className="font-mono">workspaces/&lt;name&gt;</code> if you just type a
+              name.
+            </p>
             {repoPathError && (
               <p className="text-xs text-red-600">{repoPathError}</p>
             )}
