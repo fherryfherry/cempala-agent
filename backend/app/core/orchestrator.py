@@ -139,6 +139,47 @@ async def _block_ticket(
     await _write_system_comment(session, ticket.id, reason_body)
 
 
+async def recover_interrupted_runs(session_factory: async_sessionmaker) -> int:
+    """Startup recovery — docs/02-tsd.md §4.5, ADR-004, MAP-026.
+
+    No in-memory orchestrator state (`RUNNING`/`_PENDING`/`_BUSY`) survives a process
+    restart, so any `Run` row still `running`/`queued` in the DB is orphaned: nothing
+    will ever execute or finish it. Mark those `interrupted`, free their agents back to
+    `idle`, and leave one system comment per affected ticket. Returns the count of runs
+    recovered (0 on a clean shutdown — the common case).
+    """
+    async with session_factory() as session:
+        result = await session.execute(select(Run).where(Run.status.in_(("running", "queued"))))
+        runs = list(result.scalars())
+        if not runs:
+            return 0
+
+        now = _now()
+        agent_ids: set[str] = set()
+        runs_by_ticket: dict[str, list[Run]] = defaultdict(list)
+        for run in runs:
+            run.status = "interrupted"
+            run.ended_at = now
+            agent_ids.add(run.agent_id)
+            runs_by_ticket[run.ticket_id].append(run)
+
+        if agent_ids:
+            agents = await session.execute(select(Agent).where(Agent.id.in_(agent_ids)))
+            for agent in agents.scalars():
+                agent.status = "idle"
+
+        for ticket_id, ticket_runs in runs_by_ticket.items():
+            run_ids = ", ".join(r.id for r in ticket_runs)
+            body = (
+                f"Backend restarted while {len(ticket_runs)} run(s) were in flight "
+                f"({run_ids}). Marked `interrupted`."
+            )
+            await _write_system_comment(session, ticket_id, body)
+
+        await session.commit()
+        return len(runs)
+
+
 async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
     async with session_factory() as session:
         run = await session.get(Run, run_id)

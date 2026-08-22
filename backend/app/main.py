@@ -16,11 +16,14 @@ from app.api.runs import runs_router, ticket_run_router, workspace_runs_router
 from app.api.tickets import tickets_router, workspace_tickets_router
 from app.api.workspaces import router as workspaces_router
 from app.config import settings
+from app.core.orchestrator import recover_interrupted_runs
+from app.db import session as db_session
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Schema is managed by Alembic migrations (`make migrate`), not created here.
+    await recover_interrupted_runs(db_session.async_session)
     yield
 
 
