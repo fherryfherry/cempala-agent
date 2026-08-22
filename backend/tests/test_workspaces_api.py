@@ -92,6 +92,10 @@ def test_create_invalid_key_format_422(client, tmp_path):
         json={"name": "Acme", "key": "acm", "repo_path": str(tmp_path)},
     )
     assert resp.status_code == 422
+    # Pydantic validation errors must use the same uniform {"error": {...}} shape as AppError.
+    body = resp.json()
+    assert "error" in body
+    assert "code" in body["error"] and "message" in body["error"]
 
 
 def test_get_list_patch_delete_happy_path(client, tmp_path):

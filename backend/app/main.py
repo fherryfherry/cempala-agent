@@ -3,9 +3,10 @@ import subprocess
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.errors import AppError, app_error_handler
+from app.api.errors import AppError, app_error_handler, validation_error_handler
 from app.api.workspaces import router as workspaces_router
 from app.config import settings
 
@@ -26,6 +27,7 @@ app.add_middleware(
 )
 
 app.add_exception_handler(AppError, app_error_handler)
+app.add_exception_handler(RequestValidationError, validation_error_handler)
 app.include_router(workspaces_router, prefix="/api")
 
 
