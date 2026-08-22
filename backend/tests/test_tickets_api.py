@@ -223,8 +223,13 @@ def test_get_nonexistent_ticket_404(client):
     assert resp.status_code == 404
 
 
-async def test_concurrent_creates_get_unique_sequential_keys(tmp_path):
-    """~20 concurrent POSTs against the same workspace must yield 20 unique keys."""
+@pytest.mark.parametrize("n", [20, 100])
+async def test_concurrent_creates_get_unique_sequential_keys(tmp_path, n):
+    """N concurrent POSTs against the same workspace must yield N unique, sequential keys.
+
+    MAP-016 AC requires the 100-way case specifically (stress level beyond MAP-009's
+    original 20-way check, kept here as a parametrize case for regression coverage).
+    """
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
 
     @event.listens_for(engine.sync_engine, "connect")
@@ -252,8 +257,6 @@ async def test_concurrent_creates_get_unique_sequential_keys(tmp_path):
                 json={"name": "Map", "key": "MAP", "repo_path": str(tmp_path)},
             )
             ws_id = resp.json()["id"]
-
-            n = 20
 
             async def _create(i):
                 return await ac.post(
