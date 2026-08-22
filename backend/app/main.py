@@ -1,0 +1,46 @@
+import shutil
+import subprocess
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.config import settings
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # DB wiring lands in MAP-003.
+    yield
+
+
+app = FastAPI(title="Multi-Agent Portal", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins_list,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def _opencode_version() -> str | None:
+    if shutil.which(settings.OPENCODE_BIN) is None:
+        return None
+    try:
+        result = subprocess.run(
+            [settings.OPENCODE_BIN, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+@app.get("/api/health")
+async def health():
+    return {"status": "ok", "opencode": _opencode_version()}
