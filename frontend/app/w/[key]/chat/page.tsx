@@ -202,6 +202,9 @@ function ThreadPanel({
   }
 
   const comments: Comment[] = (ticket.data?.comments ?? []).filter((c) => !c.is_system);
+  const pmIsTyping = (ticket.data?.runs ?? []).some(
+    (r) => r.agent_id === pm.id && (r.status === "running" || r.status === "queued"),
+  );
 
   return (
     <Card className="flex h-full flex-col gap-4 p-4">
@@ -216,7 +219,7 @@ function ThreadPanel({
         )}
         {isTicket && ticket.data && (
           <div className="flex flex-col gap-3">
-            {comments.length === 0 && (
+            {comments.length === 0 && !pmIsTyping && (
               <p className="text-sm text-zinc-400">No messages yet.</p>
             )}
             {comments.map((c) => {
@@ -239,6 +242,21 @@ function ThreadPanel({
                 </div>
               );
             })}
+            {pmIsTyping && (
+              <div className="flex justify-start">
+                <div className="max-w-[75%] rounded-lg bg-zinc-100 px-3 py-2 text-sm text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+                  <p className="mb-0.5 text-[10px] font-medium opacity-70">{pm.name}</p>
+                  <span className="inline-flex items-center gap-1">
+                    Sedang mengetik
+                    <span className="flex gap-0.5">
+                      <span className="h-1 w-1 animate-bounce rounded-full bg-current [animation-delay:-0.3s]" />
+                      <span className="h-1 w-1 animate-bounce rounded-full bg-current [animation-delay:-0.15s]" />
+                      <span className="h-1 w-1 animate-bounce rounded-full bg-current" />
+                    </span>
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
