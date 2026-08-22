@@ -85,3 +85,8 @@ class EventBus:
                 yield await queue.get()
         finally:
             self.unsubscribe(workspace_id, queue)
+
+
+# Single shared bus for the whole app process — the orchestrator (publisher)
+# and the SSE endpoint (subscriber) both import this instance.
+event_bus = EventBus()

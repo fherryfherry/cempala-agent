@@ -10,6 +10,7 @@ from app.api.agents import agents_router, workspace_agents_router
 from app.api.attachments import attachments_router, ticket_attachments_router
 from app.api.comments import comments_router
 from app.api.errors import AppError, app_error_handler, validation_error_handler
+from app.api.events import router as events_router
 from app.api.models import router as models_router
 from app.api.tickets import tickets_router, workspace_tickets_router
 from app.api.workspaces import router as workspaces_router
@@ -42,6 +43,7 @@ app.include_router(tickets_router, prefix="/api")
 app.include_router(comments_router, prefix="/api")
 app.include_router(ticket_attachments_router, prefix="/api")
 app.include_router(attachments_router, prefix="/api")
+app.include_router(events_router, prefix="/api")
 
 
 def _opencode_version() -> str | None:
