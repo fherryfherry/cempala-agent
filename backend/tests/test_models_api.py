@@ -1,0 +1,103 @@
+"""API tests for MAP-007 GET /api/models."""
+
+import os
+import stat
+import subprocess
+
+import pytest
+from fastapi.testclient import TestClient
+
+import app.api.models as models_mod
+from app.config import settings
+from app.main import app
+
+
+def _write_script(path, body):
+    path.write_text(f"#!/bin/sh\n{body}\n")
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+    return str(path)
+
+
+@pytest.fixture(autouse=True)
+def _reset_cache():
+    models_mod._cache = None
+    yield
+    models_mod._cache = None
+
+
+@pytest.fixture
+def client():
+    with TestClient(app) as c:
+        yield c
+
+
+def test_successful_parse(tmp_path, monkeypatch, client):
+    script = _write_script(
+        tmp_path / "opencode",
+        'printf "opencode/big-pickle\\nollama/qwen3-coder:480b-cloud\\n\\n"',
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.get("/api/models")
+
+    assert resp.status_code == 200
+    assert resp.json() == ["opencode/big-pickle", "ollama/qwen3-coder:480b-cloud"]
+
+
+def test_nonzero_exit_returns_503(tmp_path, monkeypatch, client):
+    script = _write_script(tmp_path / "opencode", "exit 1")
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.get("/api/models")
+
+    assert resp.status_code == 503
+    assert "opencode auth login" in resp.json()["error"]["message"]
+
+
+def test_empty_output_returns_503(tmp_path, monkeypatch, client):
+    script = _write_script(tmp_path / "opencode", "printf ''")
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.get("/api/models")
+
+    assert resp.status_code == 503
+    assert "opencode auth login" in resp.json()["error"]["message"]
+
+
+def test_binary_not_found_returns_503(monkeypatch, client):
+    monkeypatch.setattr(settings, "OPENCODE_BIN", "/nonexistent/opencode-binary")
+
+    resp = client.get("/api/models")
+
+    assert resp.status_code == 503
+    assert "opencode auth login" in resp.json()["error"]["message"]
+
+
+def test_timeout_returns_503(tmp_path, monkeypatch, client):
+    monkeypatch.setattr(subprocess, "run", _raise_timeout)
+
+    resp = client.get("/api/models")
+
+    assert resp.status_code == 503
+    assert "opencode auth login" in resp.json()["error"]["message"]
+
+
+def _raise_timeout(*args, **kwargs):
+    raise subprocess.TimeoutExpired(cmd="opencode models", timeout=30)
+
+
+def test_cache_avoids_second_invocation(tmp_path, monkeypatch, client):
+    counter_file = tmp_path / "count"
+    script = _write_script(
+        tmp_path / "opencode",
+        f'echo x >> "{counter_file}"\nprintf "opencode/big-pickle\\n"',
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    first = client.get("/api/models")
+    second = client.get("/api/models")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert os.path.exists(counter_file)
+    assert counter_file.read_text().count("x") == 1
