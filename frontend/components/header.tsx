@@ -29,23 +29,34 @@ export function Header() {
         </Link>
 
         {activeKey && (
-          <Select
-            value={activeKey}
-            onValueChange={(value) => {
-              window.location.href = `/w/${value}/agents`;
-            }}
-          >
-            <SelectTrigger size="sm">
-              <SelectValue placeholder={activeKey} />
-            </SelectTrigger>
-            <SelectContent>
-              {(workspaces.data ?? []).map((ws) => (
-                <SelectItem key={ws.id} value={ws.key}>
-                  {ws.name} ({ws.key})
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <>
+            <Select
+              value={activeKey}
+              onValueChange={(value) => {
+                window.location.href = `/w/${value}/agents`;
+              }}
+            >
+              <SelectTrigger size="sm">
+                <SelectValue placeholder={activeKey} />
+              </SelectTrigger>
+              <SelectContent>
+                {(workspaces.data ?? []).map((ws) => (
+                  <SelectItem key={ws.id} value={ws.key}>
+                    {ws.name} ({ws.key})
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+
+            <nav className="flex items-center gap-3 text-sm text-zinc-600 dark:text-zinc-400">
+              <Link href={`/w/${activeKey}/board`} className="hover:text-foreground">
+                Board
+              </Link>
+              <Link href={`/w/${activeKey}/agents`} className="hover:text-foreground">
+                Agents
+              </Link>
+            </nav>
+          </>
         )}
       </div>
     </header>

@@ -111,3 +111,65 @@ export function createAgent(workspaceId: string, body: AgentCreate): Promise<Age
 export function getModels(): Promise<string[]> {
   return apiFetch<string[]>("/models");
 }
+
+export type TicketStatus =
+  | "backlog"
+  | "todo"
+  | "in_progress"
+  | "review"
+  | "qa"
+  | "security"
+  | "done"
+  | "blocked";
+export type TicketPriority = "low" | "medium" | "high" | "urgent";
+
+export interface Ticket {
+  id: string;
+  workspace_id: string;
+  key: string;
+  title: string;
+  description: string | null;
+  status: TicketStatus;
+  priority: TicketPriority;
+  assignee_id: string | null;
+  parent_id: string | null;
+  cost_used: number;
+  handoff_depth: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TicketCreate {
+  title: string;
+  description?: string;
+  priority?: TicketPriority;
+  assignee_id?: string;
+  parent_id?: string;
+}
+
+export interface TicketUpdate {
+  title?: string;
+  description?: string;
+  priority?: TicketPriority;
+  assignee_id?: string;
+  status?: TicketStatus;
+  actor_agent_id?: string;
+}
+
+export function listTickets(workspaceId: string): Promise<Ticket[]> {
+  return apiFetch<Ticket[]>(`/workspaces/${workspaceId}/tickets`);
+}
+
+export function createTicket(workspaceId: string, body: TicketCreate): Promise<Ticket> {
+  return apiFetch<Ticket>(`/workspaces/${workspaceId}/tickets`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function updateTicket(key: string, body: TicketUpdate): Promise<Ticket> {
+  return apiFetch<Ticket>(`/tickets/${key}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
