@@ -19,6 +19,9 @@ node_modules/
 # Attachments (runtime data, not source)
 storage/*
 !storage/.gitkeep
+!storage/attachments/
+storage/attachments/*
+!storage/attachments/.gitkeep
 
 # OS / editor
 .DS_Store
