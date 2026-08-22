@@ -26,5 +26,9 @@ storage/attachments/*
 # Git worktrees
 .worktrees/
 
+# Auto-created repo_path targets (workspaces created with a bare/relative
+# repo_path get a folder here, relative to the backend process's cwd)
+backend/workspaces/
+
 # OS / editor
 .DS_Store

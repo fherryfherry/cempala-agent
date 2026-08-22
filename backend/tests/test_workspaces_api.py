@@ -69,21 +69,67 @@ def test_create_duplicate_key_409(client, tmp_path):
     assert resp2.json()["error"]["code"] == "duplicate_key"
 
 
-def test_create_bad_repo_path_422(client):
+def test_create_missing_absolute_repo_path_is_auto_created(client, tmp_path):
+    target = tmp_path / "does" / "not" / "exist" / "yet"
+    assert not target.exists()
+
     resp = client.post(
         "/api/workspaces",
-        json={"name": "Acme", "key": "ACM", "repo_path": "/definitely/not/a/real/path/xyz"},
+        json={"name": "Acme", "key": "ACM", "repo_path": str(target)},
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["repo_path"] == str(target)
+    assert target.is_dir()
+
+
+def test_create_repo_path_that_is_a_file_422(client, tmp_path):
+    bad = tmp_path / "not-a-dir"
+    bad.write_text("x")
+
+    resp = client.post(
+        "/api/workspaces",
+        json={"name": "Acme", "key": "ACM", "repo_path": str(bad)},
     )
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "invalid_repo_path"
 
 
-def test_create_relative_repo_path_422(client):
+def test_create_relative_repo_path_created_under_workspaces_dir(client):
+    import shutil
+    from pathlib import Path
+
+    name = "test-bare-name-workspace"
+    target = Path("workspaces") / name
+    shutil.rmtree(target, ignore_errors=True)
+    try:
+        resp = client.post(
+            "/api/workspaces",
+            json={"name": "Acme", "key": "ACM", "repo_path": name},
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["repo_path"] == str(target.resolve())
+        assert target.is_dir()
+    finally:
+        shutil.rmtree(target, ignore_errors=True)
+
+
+def test_create_repo_path_traversal_flattened(client):
+    import shutil
+    from pathlib import Path
+
     resp = client.post(
         "/api/workspaces",
-        json={"name": "Acme", "key": "ACM", "repo_path": "relative/path"},
+        json={"name": "Acme", "key": "ACM", "repo_path": "../../etc/passwd-lookalike"},
     )
-    assert resp.status_code == 422
+    assert resp.status_code == 201, resp.text
+    target = Path("workspaces") / "passwd-lookalike"
+    try:
+        assert resp.json()["repo_path"] == str(target.resolve())
+        assert target.is_dir()
+        # never escaped workspaces/
+        assert Path("workspaces").resolve() in Path(resp.json()["repo_path"]).parents
+    finally:
+        shutil.rmtree(target, ignore_errors=True)
 
 
 def test_create_invalid_key_format_422(client, tmp_path):

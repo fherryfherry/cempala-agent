@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
@@ -12,14 +13,41 @@ from app.schemas.workspace import DEFAULT_GUARDRAILS, WorkspaceCreate, Workspace
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
+# Bare/relative repo_path values are created here instead of being rejected —
+# relative to the backend process's cwd (backend/ under `make dev`), mirroring how
+# STORAGE_DIR's default ("../storage") is also resolved relative to that same cwd.
+_WORKSPACES_DIR = Path("workspaces")
 
-def _validate_repo_path(repo_path: str) -> None:
-    if not os.path.isabs(repo_path):
-        raise AppError(422, "invalid_repo_path", "repo_path must be an absolute path")
-    if not os.path.exists(repo_path):
-        raise AppError(422, "invalid_repo_path", f"repo_path does not exist: {repo_path}")
-    if not os.path.isdir(repo_path):
-        raise AppError(422, "invalid_repo_path", f"repo_path is not a directory: {repo_path}")
+
+def _resolve_repo_path(repo_path: str) -> str:
+    """Validate/create repo_path, returning the absolute path to use.
+
+    - Absolute + exists as a directory: used as-is.
+    - Absolute + doesn't exist: created at that exact path (mkdir -p).
+    - Absolute + exists but isn't a directory: rejected.
+    - Not absolute (bare name / relative): sanitized to a flat directory name (no
+      traversal, same flattening approach as attachment filename sanitization) and
+      created under _WORKSPACES_DIR, e.g. "myproject" -> "<cwd>/workspaces/myproject".
+    """
+    if not repo_path or not repo_path.strip():
+        raise AppError(422, "invalid_repo_path", "repo_path is required")
+
+    if os.path.isabs(repo_path):
+        if os.path.exists(repo_path):
+            if not os.path.isdir(repo_path):
+                raise AppError(422, "invalid_repo_path", f"repo_path is not a directory: {repo_path}")
+            return repo_path
+        os.makedirs(repo_path, exist_ok=True)
+        return repo_path
+
+    name = os.path.basename(repo_path.rstrip("/\\"))
+    if not name or name in (".", ".."):
+        raise AppError(422, "invalid_repo_path", f"invalid repo_path: {repo_path}")
+    target = (_WORKSPACES_DIR / name).resolve()
+    if target.exists() and not target.is_dir():
+        raise AppError(422, "invalid_repo_path", f"repo_path is not a directory: {target}")
+    target.mkdir(parents=True, exist_ok=True)
+    return str(target)
 
 
 async def _get_workspace_or_404(session: AsyncSession, workspace_id: str) -> Workspace:
@@ -37,12 +65,12 @@ async def list_workspaces(session: AsyncSession = Depends(get_session)):
 
 @router.post("", response_model=WorkspaceOut, status_code=201)
 async def create_workspace(body: WorkspaceCreate, session: AsyncSession = Depends(get_session)):
-    _validate_repo_path(body.repo_path)
+    repo_path = _resolve_repo_path(body.repo_path)
 
     ws = Workspace(
         name=body.name,
         key=body.key,
-        repo_path=body.repo_path,
+        repo_path=repo_path,
         guardrails=dict(DEFAULT_GUARDRAILS),
         ticket_counter=0,
     )
@@ -68,8 +96,7 @@ async def update_workspace(
     ws = await _get_workspace_or_404(session, workspace_id)
 
     if body.repo_path is not None:
-        _validate_repo_path(body.repo_path)
-        ws.repo_path = body.repo_path
+        ws.repo_path = _resolve_repo_path(body.repo_path)
     if body.name is not None:
         ws.name = body.name
     if body.guardrails is not None:
