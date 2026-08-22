@@ -1,25 +1,29 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   ApiError,
+  attachmentUrl,
   createComment,
   createTicket,
+  deleteAttachment,
   getTicket,
   listAgents,
   listTickets,
   listWorkspaces,
   updateTicket,
+  uploadAttachment,
   type Comment,
 } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
+import { PaperclipIcon, XIcon } from "lucide-react";
 
 /** Derive a short title from the opening chat message: first ~50 chars, cut at a word boundary. */
 function deriveTitle(message: string): string {
@@ -155,6 +159,8 @@ function ThreadPanel({
 }) {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState("");
+  const [stagedFile, setStagedFile] = useState<File | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const isTicket = mode.type === "ticket";
   const ticketKey = isTicket ? mode.key : null;
@@ -170,8 +176,9 @@ function ThreadPanel({
   });
 
   const sendMutation = useMutation({
-    mutationFn: async (message: string) => {
+    mutationFn: async ({ message, file }: { message: string; file: File | null }) => {
       const body = `@${pm.name} ${message}`;
+      let key: string;
       if (mode.type === "draft") {
         const newTicket = await createTicket(workspaceId, {
           title: deriveTitle(message),
@@ -179,14 +186,19 @@ function ThreadPanel({
           assignee_id: pm.id,
         });
         await updateTicket(newTicket.key, { status: "todo" });
-        await createComment(newTicket.key, { body });
-        return newTicket.key;
+        key = newTicket.key;
+      } else {
+        key = mode.key;
       }
-      await createComment(mode.key, { body });
-      return mode.key;
+      // Attachments are ticket-level (not per-comment) — the next run picks up
+      // whatever's on the ticket via `-f`, so upload before/independent of the comment.
+      if (file) await uploadAttachment(key, file);
+      await createComment(key, { body });
+      return key;
     },
     onSuccess: (key) => {
       setDraft("");
+      setStagedFile(null);
       queryClient.invalidateQueries({ queryKey: ["ticket", key] });
       if (mode.type === "draft") onCreated(key);
     },
@@ -195,13 +207,24 @@ function ThreadPanel({
     },
   });
 
+  const deleteAttachmentMutation = useMutation({
+    mutationFn: (id: string) => deleteAttachment(id),
+    onSuccess: () => {
+      if (ticketKey) queryClient.invalidateQueries({ queryKey: ["ticket", ticketKey] });
+    },
+    onError: (err: unknown) => {
+      toast.error(err instanceof ApiError ? err.message : "Failed to remove attachment");
+    },
+  });
+
   function handleSend() {
     const message = draft.trim();
     if (!message || sendMutation.isPending) return;
-    sendMutation.mutate(message);
+    sendMutation.mutate({ message, file: stagedFile });
   }
 
   const comments: Comment[] = (ticket.data?.comments ?? []).filter((c) => !c.is_system);
+  const attachments = ticket.data?.attachments ?? [];
   const pmIsTyping = (ticket.data?.runs ?? []).some(
     (r) => r.agent_id === pm.id && (r.status === "running" || r.status === "queued"),
   );
@@ -261,6 +284,29 @@ function ThreadPanel({
         )}
       </div>
 
+      {isTicket && attachments.length > 0 && (
+        <div className="flex flex-wrap gap-2 border-t border-black/5 pt-3 dark:border-white/5">
+          {attachments.map((a) => (
+            <div
+              key={a.id}
+              className="flex items-center gap-1.5 rounded-full border border-black/10 py-1 pr-1 pl-2.5 text-xs dark:border-white/10"
+            >
+              <a href={attachmentUrl(a.id)} className="max-w-40 truncate hover:underline">
+                {a.filename}
+              </a>
+              <button
+                type="button"
+                onClick={() => deleteAttachmentMutation.mutate(a.id)}
+                className="rounded-full p-0.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800"
+                aria-label={`Remove ${a.filename}`}
+              >
+                <XIcon className="size-3" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       <form
         className="flex flex-col gap-2 border-t border-black/5 pt-4 dark:border-white/5"
         onSubmit={(e) => {
@@ -268,6 +314,19 @@ function ThreadPanel({
           handleSend();
         }}
       >
+        {stagedFile && (
+          <div className="flex w-fit items-center gap-1.5 rounded-full border border-black/10 py-1 pr-1 pl-2.5 text-xs dark:border-white/10">
+            <span className="max-w-48 truncate">{stagedFile.name}</span>
+            <button
+              type="button"
+              onClick={() => setStagedFile(null)}
+              className="rounded-full p-0.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800"
+              aria-label="Remove attachment"
+            >
+              <XIcon className="size-3" />
+            </button>
+          </div>
+        )}
         <Textarea
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
@@ -275,9 +334,31 @@ function ThreadPanel({
           autoFocus
           disabled={sendMutation.isPending}
         />
-        <Button type="submit" disabled={!draft.trim() || sendMutation.isPending} className="self-start">
-          {sendMutation.isPending ? "Sending…" : "Send"}
-        </Button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) setStagedFile(file);
+            e.target.value = "";
+          }}
+        />
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={sendMutation.isPending}
+            aria-label="Attach a file"
+          >
+            <PaperclipIcon className="size-4" />
+          </Button>
+          <Button type="submit" disabled={!draft.trim() || sendMutation.isPending}>
+            {sendMutation.isPending ? "Sending…" : "Send"}
+          </Button>
+        </div>
       </form>
     </Card>
   );
