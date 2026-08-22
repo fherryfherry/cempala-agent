@@ -173,3 +173,91 @@ export function updateTicket(key: string, body: TicketUpdate): Promise<Ticket> {
     body: JSON.stringify(body),
   });
 }
+
+export interface Comment {
+  id: string;
+  ticket_id: string;
+  author_agent_id: string | null;
+  is_system: boolean;
+  body: string;
+  created_at: string;
+  mentions: string[];
+}
+
+export interface CommentCreate {
+  body: string;
+  author_agent_id?: string;
+}
+
+export interface Attachment {
+  id: string;
+  ticket_id: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  path: string;
+  created_at: string;
+}
+
+export interface Run {
+  id: string;
+  ticket_id: string;
+  agent_id: string;
+  status: string;
+  trigger: string;
+  tool_kind: string;
+  model: string;
+  cost: number;
+  started_at: string | null;
+  ended_at: string | null;
+}
+
+export interface TicketDetail extends Ticket {
+  comments: Comment[];
+  attachments: Attachment[];
+  runs: Run[];
+  children: Ticket[];
+}
+
+export function getTicket(key: string): Promise<TicketDetail> {
+  return apiFetch<TicketDetail>(`/tickets/${key}`);
+}
+
+export function listComments(key: string): Promise<Comment[]> {
+  return apiFetch<Comment[]>(`/tickets/${key}/comments`);
+}
+
+export function createComment(key: string, body: CommentCreate): Promise<Comment> {
+  return apiFetch<Comment>(`/tickets/${key}/comments`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function attachmentUrl(id: string): string {
+  return `${API_BASE_URL}/attachments/${id}`;
+}
+
+export async function uploadAttachment(key: string, file: File): Promise<Attachment> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const res = await fetch(`${API_BASE_URL}/tickets/${key}/attachments`, {
+    method: "POST",
+    body: formData,
+  });
+  if (!res.ok) {
+    let message = res.statusText;
+    try {
+      const body = await res.json();
+      message = body?.error?.message ?? message;
+    } catch {
+      // not JSON
+    }
+    throw new ApiError(message, res.status);
+  }
+  return res.json() as Promise<Attachment>;
+}
+
+export function deleteAttachment(id: string): Promise<void> {
+  return apiFetch<void>(`/attachments/${id}`, { method: "DELETE" });
+}

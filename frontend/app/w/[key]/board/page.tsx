@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -148,7 +149,14 @@ export default function BoardPage() {
                   >
                     <CardHeader className="px-3">
                       <CardTitle className="flex items-center justify-between gap-2 text-xs font-mono text-zinc-400">
-                        <span>{t.key}</span>
+                        <Link
+                          href={`/w/${workspaceKey}/ticket/${t.key}`}
+                          className="hover:text-foreground hover:underline"
+                          draggable={false}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          {t.key}
+                        </Link>
                         <Badge variant={PRIORITY_VARIANT[t.priority]}>{t.priority}</Badge>
                       </CardTitle>
                     </CardHeader>
