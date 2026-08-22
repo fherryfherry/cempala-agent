@@ -757,4 +757,155 @@ def test_get_run_includes_events(client, tmp_path, monkeypatch):
     types = [e["type"] for e in detail["events"]]
     assert types[0] == "run_started"
     assert "prompt" in detail["events"][0]["payload"]
-    assert types[-1] == "run_ended"
+    # run_ended is the adapter's terminal streamed event; the orchestrator's own
+    # post-report bookkeeping (the summary `comment` event, here) is appended after it.
+    assert "run_ended" in types
+    assert types.index("run_ended") < types.index("comment")
+
+
+# ---------------------------------------------------------------------------
+# Live SSE events for comments/status changes emitted from `_finish_run` — the
+# `comment`/`status_change` events a toast notification is built from on the
+# frontend. Verified here via GET /api/runs/{id} (same technique as
+# test_get_run_includes_events above), since these events are persisted to the
+# `event` table before anything else, same as every other event type.
+# ---------------------------------------------------------------------------
+
+
+def test_successful_report_publishes_comment_and_status_change_events(
+    client, tmp_path, monkeypatch
+):
+    ws_id = _make_workspace(client, tmp_path)
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+    lead_id = _make_agent(client, ws_id, "lead", "lead-1")
+    # disabled, same as test_valid_map_block_transitions_ticket_and_records_mentions,
+    # so the mention resolves synchronously with no second subprocess/run.
+    client.patch(f"/api/agents/{lead_id}", json={"enabled": False})
+    ticket = _make_ticket(client, ws_id)
+    _set_status(client, ticket["key"], "todo")
+    _set_status(client, ticket["key"], "in_progress")
+
+    script = _write_python_binary(tmp_path / "opencode", _VALID_MAP_SCRIPT)
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    run = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": eng_id}).json()
+    _wait_for_run(client, run["id"])
+
+    events = client.get(f"/api/runs/{run['id']}").json()["events"]
+
+    comment_events = [e for e in events if e["type"] == "comment"]
+    summary_comment = next(e for e in comment_events if not e["payload"]["is_system"])
+    assert summary_comment["payload"]["ticket_key"] == ticket["key"]
+    assert summary_comment["payload"]["author"] == "eng-1"
+    assert "Implemented the thing" in summary_comment["payload"]["body_preview"]
+
+    status_events = [e for e in events if e["type"] == "status_change"]
+    main_transition = next(e for e in status_events if e["payload"]["to"] == "review")
+    assert main_transition["payload"]["ticket_key"] == ticket["key"]
+    assert main_transition["payload"]["from"] == "in_progress"
+    assert main_transition["payload"]["actor"] == "eng-1"
+
+
+def test_blocked_run_publishes_comment_event(client, tmp_path, monkeypatch):
+    ws_id = _make_workspace(client, tmp_path)
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+    ticket = _make_ticket(client, ws_id)
+    _set_status(client, ticket["key"], "todo")
+    _set_status(client, ticket["key"], "in_progress")
+
+    script = _write_python_binary(tmp_path / "opencode", _GARBAGE_SCRIPT)
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    run = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": eng_id}).json()
+    _wait_for_run(client, run["id"])
+
+    events = client.get(f"/api/runs/{run['id']}").json()["events"]
+    comment_events = [e for e in events if e["type"] == "comment"]
+    assert comment_events, "blocked run must leave a comment event for the block reason"
+    block_comment = comment_events[-1]
+    assert block_comment["payload"]["is_system"] is True
+    assert block_comment["payload"]["ticket_key"] == ticket["key"]
+    assert "Blok ```map hilang/rusak" in block_comment["payload"]["body_preview"]
+
+
+_PM_TICKETS_SCRIPT = '''
+import json
+text = """breaking it down
+
+```map
+status: in_progress
+mention: []
+summary: |
+  split into one sub-ticket
+tickets:
+  - title: "Sub-ticket A"
+    description: "do the sub-thing"
+    priority: medium
+```
+"""
+print(json.dumps({"type": "assistant_text", "text": text, "session_id": "sess-pm"}))
+'''
+
+
+def test_tickets_child_creation_publishes_status_change_event(client, tmp_path, monkeypatch):
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    epic = _make_ticket(client, ws_id, "Epic")
+    _set_status(client, epic["key"], "todo")
+    _set_status(client, epic["key"], "in_progress")
+
+    script = _write_python_binary(tmp_path / "opencode", _PM_TICKETS_SCRIPT)
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    run = client.post(f"/api/tickets/{epic['key']}/run", json={"agent_id": pm_id}).json()
+    _wait_for_run(client, run["id"])
+
+    events = client.get(f"/api/runs/{run['id']}").json()["events"]
+    creation_events = [
+        e for e in events if e["type"] == "status_change" and e["payload"]["from"] is None
+    ]
+    assert len(creation_events) == 1
+    payload = creation_events[0]["payload"]
+    assert payload["to"] == "todo"
+    assert payload["ticket_title"] == "Sub-ticket A"
+    assert payload["ticket_key"] != epic["key"]
+
+
+def test_updates_target_change_publishes_status_change_and_comment_events(
+    client, tmp_path, monkeypatch
+):
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    source = _make_ticket(client, ws_id, "source")
+    target = _make_ticket(client, ws_id, "target")
+    _set_status(client, target["key"], "todo")
+    _set_status(client, target["key"], "in_progress")  # legal for pm: in_progress -> done
+
+    entries = f"  - ticket: {target['key']}\n    status: done\n"
+    script = _write_python_binary(tmp_path / "opencode", _updates_script(entries))
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    run = client.post(f"/api/tickets/{source['key']}/run", json={"agent_id": pm_id}).json()
+    _wait_for_run(client, run["id"])
+
+    events = client.get(f"/api/runs/{run['id']}").json()["events"]
+
+    target_status_events = [
+        e
+        for e in events
+        if e["type"] == "status_change" and e["payload"]["ticket_key"] == target["key"]
+    ]
+    assert any(
+        e["payload"]["from"] == "in_progress" and e["payload"]["to"] == "done"
+        for e in target_status_events
+    )
+
+    target_comment_events = [
+        e
+        for e in events
+        if e["type"] == "comment" and e["payload"]["ticket_key"] == target["key"]
+    ]
+    assert any(
+        e["payload"]["is_system"] and "Diperbarui oleh pm-1" in e["payload"]["body_preview"]
+        for e in target_comment_events
+    )

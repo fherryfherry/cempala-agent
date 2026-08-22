@@ -46,16 +46,27 @@ def guardrail_limit(guardrails: dict, key: str):
 _limit = guardrail_limit
 
 
-async def check_guardrails(session, ticket: Ticket, guardrails: dict) -> None:
-    """Schedule-time checks. Raises `GuardrailBlocked` on the first failing check."""
+async def check_guardrails(
+    session, ticket: Ticket, guardrails: dict, *, exclude_run_id: str | None = None
+) -> None:
+    """Schedule-time checks. Raises `GuardrailBlocked` on the first failing check.
+
+    `exclude_run_id`: the run whose own report-processing (handoff / tickets[] /
+    updates:) is *calling* this (still DB-status "running" until its `_finish_run`
+    fully wraps up) shouldn't count against `max_concurrent_runs` for follow-ups it
+    is itself scheduling — it's practically done, just finishing bookkeeping.
+    """
 
     max_concurrent = _limit(guardrails, "max_concurrent_runs")
-    running = await session.scalar(
+    query = (
         select(func.count())
         .select_from(Run)
         .join(Ticket, Run.ticket_id == Ticket.id)
         .where(Ticket.workspace_id == ticket.workspace_id, Run.status == "running")
     )
+    if exclude_run_id is not None:
+        query = query.where(Run.id != exclude_run_id)
+    running = await session.scalar(query)
     if running >= max_concurrent:
         raise GuardrailBlocked(
             "max_concurrent_runs",

@@ -76,12 +76,20 @@ async def schedule(
     agent: Agent,
     trigger: str,
     parent_run_id: str | None = None,
+    exclude_run_id: str | None = None,
 ) -> Run:
     """Create a queued Run row, then either start it now or leave it queued.
 
     `session` is used for the create; `session_factory` is handed to the
     background task so it can open its own session (the request's session
     closes when the endpoint returns, long before the run finishes).
+
+    `exclude_run_id`: passed straight through to `check_guardrails` — set by callers
+    scheduling a follow-up (handoff / tickets[] / epic-close) from *inside* another
+    run's own `_finish_run`, so that still-"running" run doesn't count against
+    `max_concurrent_runs` for the follow-up it's itself producing. Also used as the
+    event-bus `run_id` for a guardrail-block's comment/status_change, since it's a
+    real persisted run already in scope at that call site.
     """
     workspace = await session.get(Workspace, ticket.workspace_id)
     if workspace is not None and workspace.paused:
@@ -89,12 +97,19 @@ async def schedule(
 
     guardrails = (workspace.guardrails if workspace else None) or {}
     try:
-        await check_guardrails(session, ticket, guardrails)
+        await check_guardrails(session, ticket, guardrails, exclude_run_id=exclude_run_id)
         cycle = await detect_loop(session, ticket, guardrails, agent.id)
         if cycle is not None:
             raise GuardrailBlocked("loop_threshold", cycle)
     except GuardrailBlocked as exc:
-        await _block_ticket(session, ticket, agent, str(exc))
+        await _block_ticket(
+            session,
+            ticket,
+            agent,
+            str(exc),
+            run_id=exclude_run_id,
+            workspace_id=ticket.workspace_id if exclude_run_id else None,
+        )
         await session.commit()
         raise
 
@@ -154,17 +169,74 @@ def _accumulate_text(buffer: list[str], ev: AdapterEvent) -> None:
         buffer.append(text)
 
 
-async def _write_system_comment(session: AsyncSession, ticket_id: str, body: str) -> None:
+def _comment_preview(body: str, limit: int = 100) -> str:
+    return body[:limit]
+
+
+async def _write_system_comment(
+    session: AsyncSession,
+    ticket_id: str,
+    body: str,
+    *,
+    ticket_key: str | None = None,
+    run_id: str | None = None,
+    workspace_id: str | None = None,
+) -> None:
     session.add(Comment(ticket_id=ticket_id, author_agent_id=None, is_system=True, body=body))
+    # ponytail: publishing needs a persisted run/workspace to satisfy the Event FK —
+    # callers with no run in scope (e.g. recover_interrupted_runs) just skip the toast,
+    # nobody's watching a live feed for a restart-time recovery comment anyway.
+    if run_id is not None and workspace_id is not None and ticket_key is not None:
+        await event_bus.publish(
+            session,
+            run_id=run_id,
+            workspace_id=workspace_id,
+            type="comment",
+            payload={
+                "ticket_id": ticket_id,
+                "ticket_key": ticket_key,
+                "is_system": True,
+                "author": "system",
+                "body_preview": _comment_preview(body),
+            },
+        )
 
 
 async def _block_ticket(
-    session: AsyncSession, ticket: Ticket, agent: Agent, reason_body: str
+    session: AsyncSession,
+    ticket: Ticket,
+    agent: Agent,
+    reason_body: str,
+    *,
+    run_id: str | None = None,
+    workspace_id: str | None = None,
 ) -> None:
     """System-driven transition to `blocked` — always legal (any -> blocked, any role)."""
     if ticket.status != "blocked":
+        old_status = ticket.status
         ticket.status = "blocked"
-    await _write_system_comment(session, ticket.id, reason_body)
+        if run_id is not None and workspace_id is not None:
+            await event_bus.publish(
+                session,
+                run_id=run_id,
+                workspace_id=workspace_id,
+                type="status_change",
+                payload={
+                    "ticket_id": ticket.id,
+                    "ticket_key": ticket.key,
+                    "from": old_status,
+                    "to": "blocked",
+                    "actor": agent.name,
+                },
+            )
+    await _write_system_comment(
+        session,
+        ticket.id,
+        reason_body,
+        ticket_key=ticket.key,
+        run_id=run_id,
+        workspace_id=workspace_id,
+    )
 
 
 async def recover_interrupted_runs(session_factory: async_sessionmaker) -> int:
@@ -221,6 +293,7 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
             run.status = "running"
             run.started_at = _now()
             agent.status = "working"
+            auto_transition_old_status: str | None = None
             if ticket.status in ("backlog", "todo"):
                 # docs/03-agent-design.md §5: "todo -> in_progress | otomatis saat run
                 # dimulai, owner" — a system-driven transition (like _block_ticket's
@@ -234,13 +307,12 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
                 # real dogfooding: a ticket created and run immediately has no
                 # (backlog, in_progress) entry in can_transition for any role, so its
                 # otherwise-valid report would get bounced.
-                old_status = ticket.status
+                auto_transition_old_status = ticket.status
                 ticket.status = "in_progress"
-                await _write_system_comment(
-                    session,
-                    ticket.id,
-                    f"Status changed from {old_status} to in_progress (run started)",
-                )
+                # Event publishing is deferred until after run_started below (kept
+                # seq=1 for run_started, matching every consumer's "events[0] is
+                # run_started with the prompt" assumption) — the DB row commit here
+                # doesn't depend on that ordering, only the SSE/event-bus fan-out does.
             await session.commit()
 
             prompt = await _build_prompt_for(session, workspace, agent, ticket, run.trigger)
@@ -252,6 +324,30 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
                 type="run_started",
                 payload={"prompt": prompt},
             )
+
+            if auto_transition_old_status is not None:
+                await event_bus.publish(
+                    session,
+                    run_id=run.id,
+                    workspace_id=workspace.id,
+                    type="status_change",
+                    payload={
+                        "ticket_id": ticket.id,
+                        "ticket_key": ticket.key,
+                        "from": auto_transition_old_status,
+                        "to": "in_progress",
+                        "actor": agent.name,
+                    },
+                )
+                await _write_system_comment(
+                    session,
+                    ticket.id,
+                    f"Status changed from {auto_transition_old_status} to in_progress (run started)",
+                    ticket_key=ticket.key,
+                    run_id=run.id,
+                    workspace_id=workspace.id,
+                )
+                await session.commit()
 
             attachments = (
                 await session.scalars(
@@ -354,7 +450,12 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
             run.error = str(exc)
             run.ended_at = _now()
             await _block_ticket(
-                session, ticket, agent, f"Run gagal karena error internal: {exc}"
+                session,
+                ticket,
+                agent,
+                f"Run gagal karena error internal: {exc}",
+                run_id=run.id,
+                workspace_id=ticket.workspace_id,
             )
             agent.status = "idle"
             await session.commit()
@@ -468,12 +569,16 @@ async def _finish_run(
     *,
     session_factory: async_sessionmaker | None = None,
 ) -> None:
+    workspace_id = ticket.workspace_id
+
     if terminal is None:
         # Adapter misbehaved: no run_ended event at all. Treat like a failure.
         run.status = "failed"
         run.error = "adapter finished without a run_ended event"
         run.ended_at = _now()
-        await _block_ticket(session, ticket, agent, f"Run gagal: {run.error}")
+        await _block_ticket(
+            session, ticket, agent, f"Run gagal: {run.error}", run_id=run.id, workspace_id=workspace_id
+        )
         agent.status = "idle"
         await session.commit()
         return
@@ -489,7 +594,14 @@ async def _finish_run(
     if status == "cancelled":
         run.status = "cancelled"
         if guardrail_cancel_reason is not None:
-            await _write_system_comment(session, ticket.id, guardrail_cancel_reason)
+            await _write_system_comment(
+                session,
+                ticket.id,
+                guardrail_cancel_reason,
+                ticket_key=ticket.key,
+                run_id=run.id,
+                workspace_id=workspace_id,
+            )
         agent.status = "idle"
         await session.commit()
         return
@@ -497,7 +609,14 @@ async def _finish_run(
     if status == "failed":
         run.status = "failed"
         run.error = terminal.payload.get("error") or "run failed"
-        await _block_ticket(session, ticket, agent, f"Run gagal: {run.error}")
+        await _block_ticket(
+            session,
+            ticket,
+            agent,
+            f"Run gagal: {run.error}",
+            run_id=run.id,
+            workspace_id=workspace_id,
+        )
         agent.status = "idle"
         await session.commit()
         return
@@ -525,6 +644,8 @@ async def _finish_run(
             ticket,
             agent,
             f"Blok ```map hilang/rusak ({parsed.reason}). Output terakhir agent:\n\n{tail}",
+            run_id=run.id,
+            workspace_id=workspace_id,
         )
         agent.status = "idle"
         await session.commit()
@@ -549,12 +670,21 @@ async def _finish_run(
                 ticket,
                 agent,
                 f"Transisi status dari ```map ditolak state machine: {reason}",
+                run_id=run.id,
+                workspace_id=workspace_id,
             )
             agent.status = "idle"
             await session.commit()
             return
 
-    run.status = "done"
+    # run.status is set to "done" only right before the final commit below (not here) —
+    # event_bus.publish() commits the session immediately (events need durability for
+    # live subscribers), and several publishes happen between here and the end of this
+    # function (comment/status_change for the summary, updates:, tickets[], handoff).
+    # Setting it this early would let a client polling GET /runs/{id} observe "done"
+    # before the handoff/block-ticket side effects below are actually committed —
+    # exactly the race test_valid_map_block_transitions_ticket_and_records_mentions
+    # caught (ticket read back as "review" instead of the handoff engine's "blocked").
     old_status = ticket.status
     ticket.status = parsed.status
 
@@ -589,8 +719,22 @@ async def _finish_run(
                 if not allowed:
                     skipped.append(f"status -> {draft.status} ditolak: {reason}")
                 else:
+                    target_old_status = target.status
                     target.status = draft.status
                     applied.append(f"status → {draft.status}")
+                    await event_bus.publish(
+                        session,
+                        run_id=run.id,
+                        workspace_id=workspace_id,
+                        type="status_change",
+                        payload={
+                            "ticket_id": target.id,
+                            "ticket_key": target.key,
+                            "from": target_old_status,
+                            "to": draft.status,
+                            "actor": agent.name,
+                        },
+                    )
 
         if draft.priority is not None:
             if draft.priority not in _VALID_PRIORITIES:
@@ -616,6 +760,9 @@ async def _finish_run(
                 session,
                 target.id,
                 f"Diperbarui oleh {agent.name} lewat laporan {ticket.key}: " + ", ".join(applied),
+                ticket_key=target.key,
+                run_id=run.id,
+                workspace_id=workspace_id,
             )
         for s in skipped:
             source_skip_notes.append(f"{draft.ticket_key}: {s}")
@@ -624,7 +771,12 @@ async def _finish_run(
 
     if source_skip_notes:
         await _write_system_comment(
-            session, ticket.id, "Beberapa updates diabaikan: " + "; ".join(source_skip_notes)
+            session,
+            ticket.id,
+            "Beberapa updates diabaikan: " + "; ".join(source_skip_notes),
+            ticket_key=ticket.key,
+            run_id=run.id,
+            workspace_id=workspace_id,
         )
 
     run.report = {
@@ -649,10 +801,41 @@ async def _finish_run(
     )
     session.add(comment)
     await session.flush()
+    await event_bus.publish(
+        session,
+        run_id=run.id,
+        workspace_id=workspace_id,
+        type="comment",
+        payload={
+            "ticket_id": ticket.id,
+            "ticket_key": ticket.key,
+            "is_system": False,
+            "author": agent.name,
+            "body_preview": _comment_preview(parsed.summary),
+        },
+    )
 
     if old_status != parsed.status:
+        await event_bus.publish(
+            session,
+            run_id=run.id,
+            workspace_id=workspace_id,
+            type="status_change",
+            payload={
+                "ticket_id": ticket.id,
+                "ticket_key": ticket.key,
+                "from": old_status,
+                "to": parsed.status,
+                "actor": agent.name,
+            },
+        )
         await _write_system_comment(
-            session, ticket.id, f"Status changed from {old_status} to {parsed.status}"
+            session,
+            ticket.id,
+            f"Status changed from {old_status} to {parsed.status}",
+            ticket_key=ticket.key,
+            run_id=run.id,
+            workspace_id=workspace_id,
         )
 
     if parsed.valid_mentions:
@@ -692,6 +875,21 @@ async def _finish_run(
                 parent_id=ticket.id,
             )
             session.add(child)
+            await session.flush()  # populate child.id before publishing
+            await event_bus.publish(
+                session,
+                run_id=run.id,
+                workspace_id=workspace_id,
+                type="status_change",
+                payload={
+                    "ticket_id": child.id,
+                    "ticket_key": child.key,
+                    "ticket_title": child.title,
+                    "from": None,
+                    "to": "todo",
+                    "actor": agent.name,
+                },
+            )
             # MAP-030 AC: "tickets[] dari PM/QA/Pentester langsung terjadwal untuk
             # assignee-nya". No assignee (draft.assignee empty/unresolvable) or a
             # disabled assignee -> leave it at todo, unscheduled (owner can run it
@@ -715,6 +913,7 @@ async def _finish_run(
                     ticket=child,
                     agent=assignee_agent,
                     trigger="auto",
+                    exclude_run_id=run.id,
                 )
             except (GuardrailBlocked, RuntimeError):
                 # schedule() already left the child ticket in a sane state (blocked
@@ -724,13 +923,18 @@ async def _finish_run(
 
     if session_factory is not None:
         await _handoff(session, session_factory, run, ticket, agent, parsed)
-        await _maybe_wake_parent_pm(session, session_factory, ticket)
+        await _maybe_wake_parent_pm(session, session_factory, ticket, run_id=run.id)
 
+    run.status = "done"
     await session.commit()
 
 
 async def _maybe_wake_parent_pm(
-    session: AsyncSession, session_factory: async_sessionmaker, ticket: Ticket
+    session: AsyncSession,
+    session_factory: async_sessionmaker,
+    ticket: Ticket,
+    *,
+    run_id: str | None = None,
 ) -> None:
     """MAP-030: "PM menutup epic saat semua anak done" (docs/03-agent-design.md §4/§8).
 
@@ -767,6 +971,9 @@ async def _maybe_wake_parent_pm(
             session,
             parent.id,
             "Semua sub-tiket selesai, tapi tidak ada agent PM aktif untuk menutup epic ini.",
+            ticket_key=parent.key,
+            run_id=run_id,
+            workspace_id=parent.workspace_id,
         )
         return
     # Bounded by the same max_handoff_depth guardrail as a regular handoff, on the
@@ -777,7 +984,9 @@ async def _maybe_wake_parent_pm(
     # value before creating the Run row.
     parent.handoff_depth = (parent.handoff_depth or 0) + 1
     try:
-        await schedule(session, session_factory, ticket=parent, agent=pm, trigger="auto")
+        await schedule(
+            session, session_factory, ticket=parent, agent=pm, trigger="auto", exclude_run_id=run_id
+        )
     except (GuardrailBlocked, RuntimeError):
         pass  # schedule() already left the parent in a sane state, or workspace paused
 
@@ -895,6 +1104,7 @@ async def _handoff(
                     agent=target,
                     trigger="handoff",
                     parent_run_id=run.id,
+                    exclude_run_id=run.id,
                 )
             except GuardrailBlocked:
                 # schedule() already transitioned the ticket to blocked with a system
@@ -913,7 +1123,14 @@ async def _handoff(
         # auto-scheduled above, in _finish_run) are what carries it forward, not a
         # handoff on the parent. Don't force-block it for "no valid handoff target".
         if notes:
-            await _write_system_comment(session, ticket.id, "Catatan mention: " + "; ".join(notes))
+            await _write_system_comment(
+                session,
+                ticket.id,
+                "Catatan mention: " + "; ".join(notes),
+                ticket_key=ticket.key,
+                run_id=run.id,
+                workspace_id=ticket.workspace_id,
+            )
         return
 
     # Nothing resolved: per docs/03-agent-design.md §6, a non-final status with no
@@ -925,9 +1142,18 @@ async def _handoff(
             ticket,
             agent,
             f"Tidak ada target handoff yang valid ({reason}); tiket diblokir agar tidak menggantung.",
+            run_id=run.id,
+            workspace_id=ticket.workspace_id,
         )
     elif notes:
-        await _write_system_comment(session, ticket.id, "Catatan mention: " + "; ".join(notes))
+        await _write_system_comment(
+            session,
+            ticket.id,
+            "Catatan mention: " + "; ".join(notes),
+            ticket_key=ticket.key,
+            run_id=run.id,
+            workspace_id=ticket.workspace_id,
+        )
 
 
 async def stop(run_id: str) -> bool:
