@@ -1,0 +1,266 @@
+"use client";
+
+import { useState } from "react";
+import Link from "next/link";
+import { useParams } from "next/navigation";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import {
+  ApiError,
+  createComment,
+  createTicket,
+  getTicket,
+  listAgents,
+  listTickets,
+  listWorkspaces,
+  updateTicket,
+  type Comment,
+} from "@/lib/api";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { Textarea } from "@/components/ui/textarea";
+
+/** Derive a short title from the opening chat message: first ~50 chars, cut at a word boundary. */
+function deriveTitle(message: string): string {
+  const trimmed = message.trim();
+  if (trimmed.length <= 50) return trimmed;
+  const cut = trimmed.slice(0, 50);
+  const lastSpace = cut.lastIndexOf(" ");
+  const base = (lastSpace > 0 ? cut.slice(0, lastSpace) : cut).trimEnd();
+  return `${base}…`;
+}
+
+/** The mention prefix that triggers the PM's run is a backend implementation detail — hide it from the owner's own bubble. */
+function stripMentionPrefix(body: string, pmName: string): string {
+  const prefix = `@${pmName} `;
+  return body.startsWith(prefix) ? body.slice(prefix.length) : body;
+}
+
+type Mode = { type: "draft" } | { type: "ticket"; key: string };
+
+export default function ChatPage() {
+  const params = useParams<{ key: string }>();
+  const workspaceKey = params.key;
+  const queryClient = useQueryClient();
+
+  const workspaces = useQuery({ queryKey: ["workspaces"], queryFn: listWorkspaces });
+  const workspace = workspaces.data?.find((ws) => ws.key === workspaceKey);
+
+  const agents = useQuery({
+    queryKey: ["agents", workspace?.id],
+    queryFn: () => listAgents(workspace!.id),
+    enabled: !!workspace,
+  });
+  const pm = agents.data?.find((a) => a.role === "pm" && a.enabled);
+
+  const tickets = useQuery({
+    queryKey: ["tickets", workspace?.id],
+    queryFn: () => listTickets(workspace!.id),
+    enabled: !!workspace && !!pm,
+  });
+
+  const [mode, setMode] = useState<Mode>({ type: "draft" });
+
+  if (workspaces.isLoading) {
+    return <p className="px-6 py-10 text-sm text-zinc-500">Loading workspace…</p>;
+  }
+  if (!workspace) {
+    return (
+      <p className="px-6 py-10 text-sm text-red-600">
+        Workspace &quot;{workspaceKey}&quot; not found.
+      </p>
+    );
+  }
+  if (agents.isLoading) {
+    return <p className="px-6 py-10 text-sm text-zinc-500">Loading agents…</p>;
+  }
+  if (!pm) {
+    return (
+      <div className="px-6 py-10">
+        <p className="text-sm text-zinc-500">
+          No enabled PM agent in this workspace yet. Chat needs a PM to talk to —{" "}
+          <Link href={`/w/${workspaceKey}/agents`} className="underline">
+            create one on the Agents page
+          </Link>
+          .
+        </p>
+      </div>
+    );
+  }
+
+  const conversations = [...(tickets.data ?? [])]
+    .filter((t) => t.assignee_id === pm.id && !t.parent_id)
+    .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+
+  return (
+    <div className="flex w-full flex-1 flex-col gap-6 px-6 py-10">
+      <h1 className="text-2xl font-semibold tracking-tight">{workspace.name} — Chat with PM</h1>
+
+      <div className="grid flex-1 grid-cols-1 gap-6 lg:grid-cols-[320px_1fr]">
+        <Card className="flex flex-col gap-2 p-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setMode({ type: "draft" })}
+            className={mode.type === "draft" ? "bg-zinc-100 dark:bg-zinc-900/60" : ""}
+          >
+            + New conversation
+          </Button>
+          <CardContent className="flex flex-col gap-1 overflow-y-auto p-0">
+            {conversations.length === 0 && (
+              <p className="px-2 py-2 text-xs text-zinc-500">No conversations yet.</p>
+            )}
+            {conversations.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => setMode({ type: "ticket", key: t.key })}
+                className={`flex flex-col gap-1 border-b border-black/5 px-3 py-2 text-left text-xs last:border-b-0 hover:bg-zinc-50 dark:border-white/5 dark:hover:bg-zinc-900/40 ${
+                  mode.type === "ticket" && mode.key === t.key ? "bg-zinc-100 dark:bg-zinc-900/60" : ""
+                }`}
+              >
+                <span className="truncate font-medium text-zinc-800 dark:text-zinc-200">{t.title}</span>
+                <Badge variant="secondary" className="w-fit">
+                  {t.status}
+                </Badge>
+              </button>
+            ))}
+          </CardContent>
+        </Card>
+
+        <ThreadPanel
+          workspaceId={workspace.id}
+          pm={pm}
+          mode={mode}
+          onCreated={(key) => {
+            setMode({ type: "ticket", key });
+            queryClient.invalidateQueries({ queryKey: ["tickets", workspace.id] });
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function ThreadPanel({
+  workspaceId,
+  pm,
+  mode,
+  onCreated,
+}: {
+  workspaceId: string;
+  pm: { id: string; name: string };
+  mode: Mode;
+  onCreated: (key: string) => void;
+}) {
+  const queryClient = useQueryClient();
+  const [draft, setDraft] = useState("");
+
+  const isTicket = mode.type === "ticket";
+  const ticketKey = isTicket ? mode.key : null;
+
+  // ponytail: the backend doesn't publish SSE events for comments/status changes yet (only
+  // run-lifecycle events), so a real fix would have it emit `comment`/`status_change` events.
+  // Until then, poll lightly while a conversation is open — good enough for MVP chat.
+  const ticket = useQuery({
+    queryKey: ["ticket", ticketKey],
+    queryFn: () => getTicket(ticketKey!),
+    enabled: !!ticketKey,
+    refetchInterval: ticketKey ? 2000 : false,
+  });
+
+  const sendMutation = useMutation({
+    mutationFn: async (message: string) => {
+      const body = `@${pm.name} ${message}`;
+      if (mode.type === "draft") {
+        const newTicket = await createTicket(workspaceId, {
+          title: deriveTitle(message),
+          description: message,
+          assignee_id: pm.id,
+        });
+        await updateTicket(newTicket.key, { status: "todo" });
+        await createComment(newTicket.key, { body });
+        return newTicket.key;
+      }
+      await createComment(mode.key, { body });
+      return mode.key;
+    },
+    onSuccess: (key) => {
+      setDraft("");
+      queryClient.invalidateQueries({ queryKey: ["ticket", key] });
+      if (mode.type === "draft") onCreated(key);
+    },
+    onError: (err: unknown) => {
+      toast.error(err instanceof ApiError ? err.message : "Failed to send message");
+    },
+  });
+
+  function handleSend() {
+    const message = draft.trim();
+    if (!message || sendMutation.isPending) return;
+    sendMutation.mutate(message);
+  }
+
+  const comments: Comment[] = (ticket.data?.comments ?? []).filter((c) => !c.is_system);
+
+  return (
+    <Card className="flex h-full flex-col gap-4 p-4">
+      <div className="flex-1 overflow-y-auto">
+        {mode.type === "draft" && (
+          <p className="flex h-full items-center justify-center text-sm text-zinc-400">
+            Start a new conversation with the PM…
+          </p>
+        )}
+        {isTicket && ticket.isLoading && (
+          <p className="text-sm text-zinc-500">Loading conversation…</p>
+        )}
+        {isTicket && ticket.data && (
+          <div className="flex flex-col gap-3">
+            {comments.length === 0 && (
+              <p className="text-sm text-zinc-400">No messages yet.</p>
+            )}
+            {comments.map((c) => {
+              const isOwner = c.author_agent_id === null;
+              const text = isOwner ? stripMentionPrefix(c.body, pm.name) : c.body;
+              return (
+                <div key={c.id} className={`flex ${isOwner ? "justify-end" : "justify-start"}`}>
+                  <div
+                    className={`max-w-[75%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap ${
+                      isOwner
+                        ? "bg-blue-600 text-white"
+                        : "bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100"
+                    }`}
+                  >
+                    <p className="mb-0.5 text-[10px] font-medium opacity-70">
+                      {isOwner ? "You" : pm.name}
+                    </p>
+                    {text}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <form
+        className="flex flex-col gap-2 border-t border-black/5 pt-4 dark:border-white/5"
+        onSubmit={(e) => {
+          e.preventDefault();
+          handleSend();
+        }}
+      >
+        <Textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          placeholder={mode.type === "draft" ? "Start a new conversation with the PM…" : "Reply to the PM…"}
+          autoFocus
+          disabled={sendMutation.isPending}
+        />
+        <Button type="submit" disabled={!draft.trim() || sendMutation.isPending} className="self-start">
+          {sendMutation.isPending ? "Sending…" : "Send"}
+        </Button>
+      </form>
+    </Card>
+  );
+}

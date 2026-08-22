@@ -62,6 +62,9 @@ export function Header() {
               <Link href={`/w/${activeKey}/agents`} className="hover:text-foreground">
                 Agents
               </Link>
+              <Link href={`/w/${activeKey}/chat`} className="hover:text-foreground">
+                Chat
+              </Link>
               <Link href={`/w/${activeKey}/activity`} className="hover:text-foreground">
                 Activity
               </Link>
