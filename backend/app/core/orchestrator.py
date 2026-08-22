@@ -32,6 +32,7 @@ from app.core.guardrails import (
     over_cost_per_run,
     over_run_timeout,
 )
+from app.core.loop_detector import detect_loop
 from app.core.report import parse_report
 from app.core.state_machine import can_transition
 from app.db.models import Agent, Attachment, Comment, CommentMention, Run, Ticket, Workspace
@@ -77,8 +78,12 @@ async def schedule(
     if workspace is not None and workspace.paused:
         raise RuntimeError("workspace paused")
 
+    guardrails = (workspace.guardrails if workspace else None) or {}
     try:
-        await check_guardrails(session, ticket, (workspace.guardrails if workspace else None) or {})
+        await check_guardrails(session, ticket, guardrails)
+        cycle = await detect_loop(session, ticket, guardrails, agent.id)
+        if cycle is not None:
+            raise GuardrailBlocked("loop_threshold", cycle)
     except GuardrailBlocked as exc:
         await _block_ticket(session, ticket, agent, str(exc))
         await session.commit()
