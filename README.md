@@ -40,10 +40,22 @@ sadar (lihat [ADR-010](docs/06-adr.md)).
   Backend shell out ke binary ini untuk setiap agent run dan untuk daftar model. Kredensial LLM
   tidak pernah disimpan oleh portal ini.
 
+## Setup dari nol
+
+1. Install & autentikasi `opencode`: `opencode auth login` (lihat [Prasyarat](#prasyarat)).
+2. Setup backend: `cd backend && uv venv --python 3.12 .venv && uv pip install -e ".[dev]"`
+   (tanpa `uv`: `python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"`).
+3. Setup frontend: `cd frontend && npm install`.
+4. `make migrate` — apply migrasi database.
+5. `make dev` — jalankan backend (`:8000`) dan frontend (`:3000`) bareng, `Ctrl+C` mematikan keduanya.
+
 ## Menjalankan
 
-Repo ini masih pre-implementation (lihat [`CLAUDE.md`](CLAUDE.md)). Belum ada `make dev`,
-`make migrate`, atau `make test` — target-target itu baru dibuat di MAP-005.
+```
+make dev       # backend (uvicorn :8000) + frontend (next dev :3000)
+make migrate   # alembic upgrade head
+make test      # pytest
+```
 
 ## Struktur
 
