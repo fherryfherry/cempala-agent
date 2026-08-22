@@ -33,21 +33,23 @@ import {
 } from "@/components/ui/select";
 
 const ROLES: Role[] = ["pm", "lead", "engineer", "designer", "qa", "pentester"];
-const ROLE_SLUGS: Record<Role, string> = {
-  pm: "pm",
-  lead: "lead",
-  engineer: "eng",
-  designer: "designer",
-  qa: "qa",
-  pentester: "pentester",
-};
 
-function suggestAgentName(role: Role, existingNames: string[]): string {
-  const slug = ROLE_SLUGS[role];
+// Common Indonesian first names, used to suggest a natural agent name instead of a
+// role-number slug (e.g. "Budi" instead of "eng-1").
+const NAME_POOL = [
+  "Budi", "Siti", "Andi", "Dewi", "Rian", "Putri", "Agus", "Rina", "Dedi", "Yuni",
+  "Fajar", "Wulan", "Hendra", "Lestari", "Bayu", "Sari", "Eka", "Novi", "Wahyu", "Indah",
+  "Rizky", "Ayu", "Teguh", "Fitri", "Arif", "Maya", "Dimas", "Ratna", "Yoga", "Citra",
+];
+
+function suggestAgentName(existingNames: string[]): string {
   const taken = new Set(existingNames);
-  let n = 1;
-  while (taken.has(`${slug}-${n}`)) n++;
-  return `${slug}-${n}`;
+  const free = NAME_POOL.find((n) => !taken.has(n));
+  if (free) return free;
+  // pool exhausted — fall back to numbered variants of the first name.
+  let n = 2;
+  while (taken.has(`${NAME_POOL[0]}${n}`)) n++;
+  return `${NAME_POOL[0]}${n}`;
 }
 const TOOL_KINDS: { value: ToolKind; enabled: boolean }[] = [
   { value: "opencode", enabled: true },
@@ -127,7 +129,7 @@ function CreateAgentForm({ workspaceId }: { workspaceId: string }) {
   const [error, setError] = useState<string | null>(null);
 
   const existingNames = agents.data?.map((a) => a.name) ?? [];
-  const suggestedName = suggestAgentName(role, existingNames);
+  const suggestedName = suggestAgentName(existingNames);
   const effectiveName = nameTouched ? name : suggestedName;
 
   const models = useQuery({ queryKey: ["models"], queryFn: getModels, retry: false });
