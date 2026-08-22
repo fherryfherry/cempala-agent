@@ -251,7 +251,10 @@ def test_stop_cancels_running_run_and_kills_process(client, tmp_path, monkeypatc
     _set_status(client, ticket["key"], "todo")
     _set_status(client, ticket["key"], "in_progress")
 
-    script = _write_script(tmp_path / "opencode", "exec sleep 12345\n")
+    # Unique sleep duration per test run so `pgrep -f` can never collide with a
+    # process leaked by an unrelated, unclean prior test run still alive on the box.
+    sleep_marker = f"sleep {uuid.uuid4().int % 900000 + 100000}"
+    script = _write_script(tmp_path / "opencode", f"exec {sleep_marker}\n")
     monkeypatch.setattr(settings, "OPENCODE_BIN", script)
 
     resp = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": eng_id})
@@ -262,12 +265,12 @@ def test_stop_cancels_running_run_and_kills_process(client, tmp_path, monkeypatc
     pids = []
     while time.time() < deadline and not pids:
         found = subprocess.run(
-            ["pgrep", "-f", "sleep 12345"], capture_output=True, text=True
+            ["pgrep", "-f", sleep_marker], capture_output=True, text=True
         ).stdout.split()
         pids = [int(p) for p in found]
         if not pids:
             time.sleep(0.05)
-    assert pids, "expected fake opencode's `sleep 12345` child to have spawned"
+    assert pids, f"expected fake opencode's `{sleep_marker}` child to have spawned"
 
     stop_resp = client.post(f"/api/runs/{run['id']}/stop")
     assert stop_resp.status_code == 200, stop_resp.text

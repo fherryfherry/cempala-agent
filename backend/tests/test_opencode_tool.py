@@ -1,6 +1,7 @@
 """Tests for MAP-020 OpenCodeTool (fake binary as shell script, no real opencode/LLM)."""
 
 import asyncio
+import random
 import stat
 import subprocess
 import time
@@ -180,8 +181,14 @@ python3 -c "import sys, json; print(json.dumps({'type': 'assistant_text', 'text'
 
 
 def test_cancel_actually_kills_child_process(tmp_path, monkeypatch):
-    """Not just internal state — verified via `ps -p <pid>` that the OS process is gone."""
-    script = _write_script(tmp_path / "opencode", "exec sleep 30\n")
+    """Not just internal state — verified via `ps -p <pid>` that the OS process is gone.
+
+    Uses a unique sleep duration per test run (not a fixed literal like "sleep 30")
+    so `pgrep -f` can never collide with a process leaked by an unrelated, unclean
+    prior test run still alive on the machine — a real failure mode hit in practice.
+    """
+    sleep_marker = f"sleep {random.randint(100000, 999999)}"
+    script = _write_script(tmp_path / "opencode", f"exec {sleep_marker}\n")
     monkeypatch.setattr(settings, "OPENCODE_BIN", script)
 
     async def _run_and_cancel():
@@ -195,14 +202,13 @@ def test_cancel_actually_kills_child_process(tmp_path, monkeypatch):
 
         consume_task = asyncio.create_task(_consume())
 
-        # Poll for the subprocess to actually spawn `sleep 30` rather than a fixed
-        # sleep — under full-suite load a fixed delay isn't always long enough,
-        # which was a real source of flakiness.
+        # Poll for the subprocess to actually spawn rather than a fixed sleep — under
+        # full-suite load a fixed delay isn't always long enough.
         deadline = time.monotonic() + 5
         pids: list[int] = []
         while time.monotonic() < deadline and not pids:
             found = subprocess.run(
-                ["pgrep", "-f", "sleep 30"], capture_output=True, text=True
+                ["pgrep", "-f", sleep_marker], capture_output=True, text=True
             ).stdout.split()
             pids = [int(p) for p in found]
             if not pids:
@@ -216,7 +222,7 @@ def test_cancel_actually_kills_child_process(tmp_path, monkeypatch):
 
     assert events[-1].type == "run_ended"
     assert events[-1].payload["status"] == "cancelled"
-    assert pids, "expected to find the spawned `sleep 30` process via pgrep"
+    assert pids, f"expected to find the spawned `{sleep_marker}` process via pgrep"
     for pid in pids:
         result = subprocess.run(["ps", "-p", str(pid)], capture_output=True, text=True)
         assert result.returncode != 0, f"pid {pid} is still alive after cancel"

@@ -131,8 +131,11 @@ def _find_pids(marker):
 
 def _do_pause_kills_three(client, tmp_path, monkeypatch, run_index):
     ws_id = _make_workspace(client, tmp_path, key=f"WK{chr(65 + run_index)}")
-    marker = f"sleep_marker_{run_index}"
-    script = _write_script(tmp_path / f"opencode_{run_index}", f"exec sleep 12345 # {marker}\n")
+    # Unique sleep duration (not a shell comment, which `exec` strips before it ever
+    # reaches the process's argv) so `pgrep -f` can only ever match THIS run's own
+    # processes, never a leaked process from an unrelated prior test run.
+    marker = f"sleep {uuid.uuid4().int % 900000 + 100000}"
+    script = _write_script(tmp_path / f"opencode_{run_index}", f"exec {marker}\n")
     monkeypatch.setattr(settings, "OPENCODE_BIN", script)
 
     agent_ids = [_make_agent(client, ws_id, "engineer", f"eng-{run_index}-{i}") for i in range(3)]
@@ -179,28 +182,26 @@ def test_pause_kills_three_concurrent_processes_within_5s(client, tmp_path, monk
 # (2) queued run cancelled on pause without ever spawning a process.
 # ---------------------------------------------------------------------------
 
-_SLOW_SCRIPT = "exec sleep 12345 # queued_marker\n"
-
-
 def test_pause_cancels_queued_run_without_spawning(client, tmp_path, monkeypatch):
     ws_id = _make_workspace(client, tmp_path)
     eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
-    script = _write_script(tmp_path / "opencode", _SLOW_SCRIPT)
+    marker = f"sleep {uuid.uuid4().int % 900000 + 100000}"
+    script = _write_script(tmp_path / "opencode", f"exec {marker}\n")
     monkeypatch.setattr(settings, "OPENCODE_BIN", script)
 
-    r1 = _run_hanging_ticket(client, ws_id, eng_id, "queued_marker")
+    r1 = _run_hanging_ticket(client, ws_id, eng_id, marker)
 
     # wait for the first run's process to actually be executing
     deadline = time.time() + 5
     pids = []
     while time.time() < deadline and not pids:
-        pids = _find_pids("queued_marker")
+        pids = _find_pids(marker)
         if not pids:
             time.sleep(0.05)
     assert pids, "expected first run's process to have spawned"
 
     # second run for the same busy agent -> queued, not started
-    r2 = _run_hanging_ticket(client, ws_id, eng_id, "queued_marker")
+    r2 = _run_hanging_ticket(client, ws_id, eng_id, marker)
     assert client.get(f"/api/runs/{r2['id']}").json()["status"] == "queued"
 
     resp = client.post(f"/api/workspaces/{ws_id}/pause")
@@ -210,7 +211,7 @@ def test_pause_cancels_queued_run_without_spawning(client, tmp_path, monkeypatch
     assert final2["status"] == "cancelled"
 
     # cleanup: only one process should ever have existed for this marker
-    assert len(_find_pids("queued_marker")) <= 1
+    assert len(_find_pids(marker)) <= 1
 
 
 # ---------------------------------------------------------------------------
