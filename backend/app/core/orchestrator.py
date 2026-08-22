@@ -5,13 +5,16 @@
 end to end: build the prompt, stream adapter events through the event bus,
 then apply the parsed ```map report (or a failure path) to the ticket.
 
-No guardrail checks here yet (MAP-027 hooks in at the marked spot below) and
-no automatic handoff scheduling (MAP-029) — this only runs what it's told.
+Guardrails (MAP-027, `core/guardrails.py`): schedule-time checks (concurrency, cost-per-ticket,
+handoff-depth) run in `schedule()` before a `Run` row exists; runtime checks (timeout,
+cost-per-run) are polled inside `execute()`'s streaming loop and trip `ctx.cancel_event`.
+No automatic handoff scheduling yet (MAP-029) — this only runs what it's told.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 
@@ -22,6 +25,13 @@ from app.agents.base import AdapterEvent, RunContext, TOOLS
 from app.agents.prompts import AgentInfo, CommentInfo, TicketInfo, build_prompt
 from app.api.attachments import _storage_dir
 from app.core.events import event_bus
+from app.core.guardrails import (
+    GuardrailBlocked,
+    check_guardrails,
+    guardrail_limit,
+    over_cost_per_run,
+    over_run_timeout,
+)
 from app.core.report import parse_report
 from app.core.state_machine import can_transition
 from app.db.models import Agent, Attachment, Comment, CommentMention, Run, Ticket, Workspace
@@ -67,8 +77,12 @@ async def schedule(
     if workspace is not None and workspace.paused:
         raise RuntimeError("workspace paused")
 
-    # ponytail: guardrail checks (cost/timeout/handoff-depth/loop-detector) belong here —
-    # MAP-027 hooks in before the Run row is created. Not built yet, skipped entirely.
+    try:
+        await check_guardrails(session, ticket, (workspace.guardrails if workspace else None) or {})
+    except GuardrailBlocked as exc:
+        await _block_ticket(session, ticket, agent, str(exc))
+        await session.commit()
+        raise
 
     run = Run(
         ticket_id=ticket.id,
@@ -244,21 +258,51 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
 
             text_buffer: list[str] = []
             terminal: AdapterEvent | None = None
+            running_cost = 0.0
+            # Set by whichever runtime guardrail (timeout/cost-per-run) trips first, so the
+            # eventual `cancelled` terminal event can be attributed to it instead of being
+            # indistinguishable from a user-initiated stop (see `stop()`, which also just
+            # sets `cancel_event`).
+            guardrail_cancel_reason: str | None = None
 
-            async for ev in tool.run(ctx):
-                if ev.type == "run_ended":
-                    terminal = ev
-                else:
-                    _accumulate_text(text_buffer, ev)
-                await event_bus.publish(
-                    session,
-                    run_id=run.id,
-                    workspace_id=workspace.id,
-                    type=ev.type,
-                    payload=ev.payload,
-                )
+            async def _timeout_watchdog() -> None:
+                nonlocal guardrail_cancel_reason
+                timeout_sec = float(guardrail_limit(ctx.guardrails, "run_timeout_sec"))
+                await asyncio.sleep(timeout_sec)
+                if not ctx.cancel_event.is_set():
+                    guardrail_cancel_reason = over_run_timeout(ctx.guardrails, timeout_sec)
+                    ctx.cancel_event.set()
 
-            await _finish_run(session, run, ticket, agent, terminal, "".join(text_buffer))
+            watchdog_task = asyncio.create_task(_timeout_watchdog())
+            try:
+                async for ev in tool.run(ctx):
+                    if ev.type == "run_ended":
+                        terminal = ev
+                    else:
+                        _accumulate_text(text_buffer, ev)
+                        cost = ev.payload.get("cost")
+                        if cost is not None:
+                            running_cost += float(cost)
+                            if guardrail_cancel_reason is None:
+                                reason = over_cost_per_run(ctx.guardrails, running_cost)
+                                if reason is not None:
+                                    guardrail_cancel_reason = reason
+                                    ctx.cancel_event.set()
+                    await event_bus.publish(
+                        session,
+                        run_id=run.id,
+                        workspace_id=workspace.id,
+                        type=ev.type,
+                        payload=ev.payload,
+                    )
+            finally:
+                watchdog_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await watchdog_task
+
+            await _finish_run(
+                session, run, ticket, agent, terminal, "".join(text_buffer), guardrail_cancel_reason
+            )
 
         except Exception as exc:  # noqa: BLE001 - must never leave run/agent stuck
             await session.rollback()
@@ -360,6 +404,7 @@ async def _finish_run(
     agent: Agent,
     terminal: AdapterEvent | None,
     accumulated_text: str,
+    guardrail_cancel_reason: str | None = None,
 ) -> None:
     if terminal is None:
         # Adapter misbehaved: no run_ended event at all. Treat like a failure.
@@ -381,6 +426,8 @@ async def _finish_run(
 
     if status == "cancelled":
         run.status = "cancelled"
+        if guardrail_cancel_reason is not None:
+            await _write_system_comment(session, ticket.id, guardrail_cancel_reason)
         agent.status = "idle"
         await session.commit()
         return

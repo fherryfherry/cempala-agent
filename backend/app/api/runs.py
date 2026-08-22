@@ -16,6 +16,7 @@ from app.api.errors import AppError
 from app.api.tickets import _get_ticket_or_404
 from app.api.workspaces import _get_workspace_or_404
 from app.core import orchestrator
+from app.core.guardrails import GuardrailBlocked
 from app.db import session as db_session
 from app.db.models import Event, Run, Ticket
 from app.db.session import get_session
@@ -56,6 +57,8 @@ async def start_run(key: str, body: RunCreate, session: AsyncSession = Depends(g
         )
     except RuntimeError as exc:
         raise AppError(409, "workspace_paused", str(exc))
+    except GuardrailBlocked as exc:
+        raise AppError(409, "guardrail_blocked", str(exc))
 
     return run
 
