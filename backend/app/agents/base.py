@@ -51,3 +51,14 @@ class AdapterEvent:
 
 class AgentTool(Protocol):
     async def run(self, ctx: RunContext) -> AsyncIterator[AdapterEvent]: ...
+
+
+def _tools() -> dict[str, type]:
+    """Deferred import to dodge a circular import (opencode_tool/stub_tool import base)."""
+    from app.agents.opencode_tool import OpenCodeTool
+    from app.agents.stub_tool import StubTool
+
+    return {"opencode": OpenCodeTool, "claude": StubTool, "agy": StubTool, "codex": StubTool}
+
+
+TOOLS: dict[str, type] = _tools()
