@@ -1,4 +1,4 @@
-# Task Breakdown — MAP-001 … MAP-033
+# Task Breakdown — MAP-001 … MAP-034
 
 Versi 0.2 · MVP
 Estimasi: **S** ≤ ½ hari · **M** ~1 hari · **L** ~2 hari
@@ -286,3 +286,11 @@ klik Run sekali, biarkan berjalan sampai selesai.
 Pause menghentikan semuanya di tengah jalan; restart backend tidak meninggalkan run menggantung;
 tingkat kepatuhan blok ```map dicatat (berapa run gagal karena format) dan ditulis sebagai
 laporan di `docs/07-dogfood-report.md`.
+
+### MAP-034 · Dashboard workspace · S · Engineer
+`/w/[key]/dashboard`: stat cards (total, done, active, blocked), status tiap agent,
+8 run terbaru, dan alert (blocked, failed, epic belum mulai). Default landing & nav
+pertama. Murni komposisi data dari API existing + SSE invalidation; tanpa endpoint baru.
+**Dep:** MAP-032, MAP-021
+**AC:** dashboard ter-refresh otomatis saat agent bekerja (tanpa reload); setiap alert
+menghubungkan ke tiket terkait; statistik benar untuk workspace kosong (nihil run/agent).
