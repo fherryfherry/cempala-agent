@@ -63,6 +63,26 @@ const SUGGESTIONS: { label: string; message: string }[] = [
     message:
       "Progress sampai mana? Tolong update status pengerjaan semua tiket yang sedang berjalan.",
   },
+  {
+    label: "Rencanakan Sprint Berikutnya",
+    message:
+      "Rencanakan sprint berikutnya: pilih tiket dari backlog yang paling prioritas, buat estimasi, dan susun rencananya.",
+  },
+  {
+    label: "Buat Tiket dari Ide Ini",
+    message:
+      "Aku punya ide fitur: [deskripsi ide]. Pecah jadi tiket-tiket yang bisa dikerjakan tim.",
+  },
+  {
+    label: "Review Kode & Keamanan",
+    message:
+      "Jalankan review menyeluruh: minta Lead Engineer review kode, QA test, dan Pentester cek keamanan. Lapor hasilnya.",
+  },
+  {
+    label: "Rangkum Aktivitas Hari Ini",
+    message:
+      "Rangkum semua aktivitas hari ini: tiket yang selesai, yang masih jalan, dan blocker yang perlu perhatianku.",
+  },
 ];
 
 export default function ChatPage() {
