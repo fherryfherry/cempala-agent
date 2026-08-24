@@ -435,7 +435,7 @@ function ThreadPanel({
         )}
 
         <div
-          className={`absolute right-2 bottom-3 flex flex-col items-end gap-1.5 pt-3 ${
+          className={`absolute right-2 bottom-3 flex flex-col items-end gap-3 pt-3 ${
             suggestionsHovered ? "pointer-events-auto" : "pointer-events-none"
           }`}
           onMouseEnter={handleSuggestionsEnter}
