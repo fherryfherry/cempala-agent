@@ -661,7 +661,7 @@ function ThreadPanel({
             }}
             placeholder={mode.type === "draft" ? "Start a new conversation with the PM…" : "Reply to the PM…"}
             disabled={sendMutation.isPending}
-            className="max-h-48 flex-1 resize-none overflow-y-auto border-0 bg-transparent px-2 pt-3 pb-1 text-sm leading-5 text-zinc-900 outline-none placeholder:text-zinc-400 dark:text-zinc-100 dark:placeholder:text-zinc-500"
+            className="max-h-48 flex-1 resize-none overflow-y-auto border-0 bg-transparent px-2 pt-3.5 pb-0.5 text-sm leading-5 text-zinc-900 outline-none placeholder:text-zinc-400 dark:text-zinc-100 dark:placeholder:text-zinc-500"
           />
 
           <button
