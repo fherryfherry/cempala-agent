@@ -14,51 +14,8 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Markdown } from "@/components/markdown";
 import { formatTimestamp } from "@/lib/datetime";
-
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function isMarkdown(a: ArtifactAttachment): boolean {
-  const name = a.filename.toLowerCase();
-  return (
-    a.content_type === "text/markdown" ||
-    name.endsWith(".md") ||
-    name.endsWith(".markdown")
-  );
-}
-
-function isText(a: ArtifactAttachment): boolean {
-  if (isMarkdown(a)) return true;
-  const name = a.filename.toLowerCase();
-  return (
-    a.content_type.startsWith("text/") ||
-    ["application/json", "application/xml", "application/javascript"].includes(a.content_type) ||
-    [".txt", ".log", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml", ".toml", ".ini"].some(
-      (ext) => name.endsWith(ext),
-    )
-  );
-}
-
-function isImage(a: ArtifactAttachment): boolean {
-  return a.content_type.startsWith("image/");
-}
-
-function isPdf(a: ArtifactAttachment): boolean {
-  return a.content_type === "application/pdf" || a.filename.toLowerCase().endsWith(".pdf");
-}
-
+import { AttachmentPreviewDialog } from "@/components/attachment-preview";
 export default function ArtifactsPage() {
   const params = useParams<{ key: string }>();
   const workspaceKey = params.key;
@@ -261,82 +218,8 @@ export default function ArtifactsPage() {
       </div>
 
       {selected && (
-        <ArtifactPreviewDialog attachment={selected} onClose={() => setSelected(null)} />
+        <AttachmentPreviewDialog attachment={selected} onClose={() => setSelected(null)} />
       )}
     </div>
-  );
-}
-
-function ArtifactPreviewDialog({
-  attachment,
-  onClose,
-}: {
-  attachment: ArtifactAttachment;
-  onClose: () => void;
-}) {
-  const isTextFile = isText(attachment);
-  const textQuery = useQuery({
-    queryKey: ["artifact-content", attachment.id],
-    queryFn: async () => {
-      const res = await fetch(attachmentUrl(attachment.id));
-      if (!res.ok) throw new Error(res.statusText);
-      return res.text();
-    },
-    enabled: isTextFile,
-  });
-
-  return (
-    <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-full sm:max-w-4xl lg:max-w-5xl">
-        <DialogHeader>
-          <DialogTitle className="truncate pr-8">{attachment.filename}</DialogTitle>
-          <DialogDescription className="flex flex-wrap items-center gap-2">
-            <span>{attachment.content_type}</span>
-            <span>·</span>
-            <span>{formatBytes(attachment.size_bytes)}</span>
-            <span>·</span>
-            <span>{attachment.ticket_key}</span>
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="max-h-[70vh] min-h-0 overflow-y-auto">
-          {isMarkdown(attachment) && textQuery.data && (
-            <Markdown>{textQuery.data}</Markdown>
-          )}
-          {isTextFile && !isMarkdown(attachment) && (
-            <pre className="max-h-full whitespace-pre-wrap rounded-md border border-zinc-200 bg-zinc-50 p-3 text-xs leading-relaxed dark:border-zinc-800 dark:bg-zinc-900/60">
-              {textQuery.data ?? "Loading…"}
-            </pre>
-          )}
-          {isImage(attachment) && (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={attachmentUrl(attachment.id, { inline: true })}
-              alt={attachment.filename}
-              className="mx-auto max-h-[55vh] max-w-full object-contain"
-            />
-          )}
-          {isPdf(attachment) && (
-            <iframe
-              src={attachmentUrl(attachment.id, { inline: true })}
-              title={attachment.filename}
-              className="h-[60vh] w-full rounded-md border border-zinc-200 dark:border-zinc-800"
-            />
-          )}
-          {!isTextFile && !isImage(attachment) && !isPdf(attachment) && (
-            <div className="flex flex-col items-center gap-3 py-10 text-sm text-zinc-500">
-              <p>Preview tidak didukung untuk tipe file ini.</p>
-              <Button
-                variant="outline"
-                nativeButton={false}
-                render={<a href={attachmentUrl(attachment.id)} download />}
-              >
-                <DownloadIcon className="mr-1.5 size-3.5" /> Download
-              </Button>
-            </div>
-          )}
-        </div>
-      </DialogContent>
-    </Dialog>
   );
 }

@@ -90,12 +90,12 @@ async def check_guardrails(
             state = (
                 f'sprint "{sprint.name}" (status {sprint.status})'
                 if sprint
-                else "belum masuk sprint manapun (backlog)"
+                else "not in any sprint (backlog)"
             )
             raise GuardrailBlocked(
                 "ticket_not_in_active_sprint",
-                f"Guardrail ticket_not_in_active_sprint: ticket ini {state} — agent "
-                f"hanya bisa mengerjakan ticket yang sudah di sprint aktif",
+                f"This ticket is {state} — agents can only work on tickets "
+                f"in the active sprint",
             )
 
     max_concurrent = _limit(guardrails, "max_concurrent_runs")

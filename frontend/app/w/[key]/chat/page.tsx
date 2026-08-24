@@ -7,7 +7,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   ApiError,
-  attachmentUrl,
   createComment,
   createTicket,
   deleteAttachment,
@@ -19,6 +18,7 @@ import {
   updateTicket,
   uploadAttachment,
   type Agent,
+  type Attachment,
   type Comment,
   type AvatarTemplate,
 } from "@/lib/api";
@@ -30,7 +30,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
-import { ArrowDownIcon, PaperclipIcon, XIcon } from "lucide-react";
+import { ArrowDownIcon, EyeIcon, PaperclipIcon, XIcon } from "lucide-react";
+import { AttachmentPreviewDialog } from "@/components/attachment-preview";
 
 /** Derive a short title from the opening chat message: first ~50 chars, cut at a word boundary. */
 function deriveTitle(message: string): string {
@@ -195,6 +196,7 @@ function ThreadPanel({
   // get yanked back down by an incoming message.
   const stickToBottomRef = useRef(true);
   const [hasNewMessage, setHasNewMessage] = useState(false);
+  const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null);
 
   const isTicket = mode.type === "ticket";
   const ticketKey = isTicket ? mode.key : null;
@@ -371,9 +373,15 @@ function ThreadPanel({
               key={a.id}
               className="flex items-center gap-1.5 rounded-full border border-black/10 py-1 pr-1 pl-2.5 text-xs dark:border-white/10"
             >
-              <a href={attachmentUrl(a.id)} className="max-w-40 truncate hover:underline">
-                {a.filename}
-              </a>
+              <button
+                type="button"
+                onClick={() => setPreviewAttachment(a)}
+                className="flex min-w-0 items-center gap-1 hover:underline"
+                title="Preview file"
+              >
+                <EyeIcon className="size-3 shrink-0 text-zinc-500" />
+                <span className="max-w-40 truncate">{a.filename}</span>
+              </button>
               {a.origin === "agent" ? (
                 <span
                   title="Dipublikasikan agent (artifacts) — tidak bisa dihapus dari chat"
@@ -394,6 +402,13 @@ function ThreadPanel({
             </div>
           ))}
         </div>
+      )}
+
+      {previewAttachment && (
+        <AttachmentPreviewDialog
+          attachment={previewAttachment}
+          onClose={() => setPreviewAttachment(null)}
+        />
       )}
 
       <form

@@ -198,6 +198,12 @@ Kamu bekerja lewat sistem tiket. Aturan yang tidak bisa ditawar:
 - Ringkas. `summary` bukan esai.
 - Kalau kamu selesai, berhenti. Jangan mencari pekerjaan tambahan.
 
+Format penulisan jawabanmu:
+- Selalu terstruktur: pakai pointer/bullet singkat dan sub-judul, jangan paragraf rata yang
+  panjang. Satu ide = satu baris pointer.
+- Emoji tipis boleh untuk memperjelas (maksimal beberapa), jangan berlebihan.
+- Kalau kamu menulis laporan/file markdown di repo, ikuti format yang sama: pointer, rapi, ringkas.
+
 Anggota tim di workspace ini:
 {roster_lines}"""
 

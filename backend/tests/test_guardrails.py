@@ -462,7 +462,7 @@ def test_backlog_ticket_blocks_scheduling_for_non_exempt_role(client, tmp_path):
     assert resp.json()["error"]["code"] == "guardrail_blocked"
 
     bodies = _system_comment_bodies(client, ticket["key"])
-    assert any("ticket_not_in_active_sprint" in b and "backlog" in b for b in bodies)
+    assert any("backlog" in b and "active sprint" in b for b in bodies)
 
     detail = client.get(f"/api/tickets/{ticket['key']}").json()
     assert detail["status"] == "blocked"
@@ -481,9 +481,7 @@ def test_ticket_in_planned_sprint_blocks_scheduling_for_non_exempt_role(client, 
     assert resp.status_code == 409, resp.text
 
     bodies = _system_comment_bodies(client, ticket["key"])
-    assert any(
-        "ticket_not_in_active_sprint" in b and "Sprint 2" in b and "planned" in b for b in bodies
-    )
+    assert any("Sprint 2" in b and "planned" in b and "active sprint" in b for b in bodies)
 
 
 def test_ticket_in_active_sprint_allows_scheduling_for_non_exempt_role(client, tmp_path, monkeypatch):

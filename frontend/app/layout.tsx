@@ -17,7 +17,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Multi-Agent Portal",
+  title: "CEMPALA - Multi Agent",
   description: "Jira-like portal where AI agents work tickets autonomously.",
 };
 
