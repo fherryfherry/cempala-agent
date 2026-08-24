@@ -429,7 +429,7 @@ function ThreadPanel({
               type="button"
               onClick={() => handleSuggestion(s)}
               disabled={sendMutation.isPending}
-              className="pointer-events-auto flex cursor-pointer items-center gap-1.5 rounded-full border border-black/10 bg-white/90 px-3 py-1.5 text-xs text-zinc-600 shadow-sm backdrop-blur hover:bg-zinc-100 disabled:opacity-50 dark:border-white/10 dark:bg-zinc-900/90 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              className="pointer-events-auto flex cursor-pointer items-center gap-1.5 rounded-full border border-black/10 bg-white/60 px-3 py-1.5 text-xs text-zinc-600 shadow-sm backdrop-blur hover:bg-white/90 disabled:opacity-50 dark:border-white/10 dark:bg-zinc-900/60 dark:text-zinc-300 dark:hover:bg-zinc-900/90"
             >
               <s.icon className="size-3.5 shrink-0" />
               {s.label}
