@@ -30,7 +30,19 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
-import { ArrowDownIcon, EyeIcon, PaperclipIcon, XIcon } from "lucide-react";
+import {
+  ArrowDownIcon,
+  EyeIcon,
+  FileTextIcon,
+  LightbulbIcon,
+  ListChecksIcon,
+  PaperclipIcon,
+  ShieldCheckIcon,
+  SparklesIcon,
+  TrendingUpIcon,
+  XIcon,
+  type LucideIcon,
+} from "lucide-react";
 import { AttachmentPreviewDialog } from "@/components/attachment-preview";
 
 /** Derive a short title from the opening chat message: first ~50 chars, cut at a word boundary. */
@@ -52,34 +64,40 @@ function stripMentionPrefix(body: string, pmName: string): string {
 type Mode = { type: "draft" } | { type: "ticket"; key: string };
 
 /** Quick-send suggestions shown above the composer, like ChatGPT suggestion chips. */
-const SUGGESTIONS: { label: string; message: string }[] = [
+const SUGGESTIONS: { label: string; message: string; icon: LucideIcon }[] = [
   {
     label: "Buat Dokumen Teknikal",
+    icon: FileTextIcon,
     message:
       "Tolong buatkan dokumen teknikal lengkap untuk project ini: PRD, TSD, API Spec, dan dokumen pendukung lainnya. Simpan hasilnya sebagai artifact di repo.",
   },
   {
     label: "Progress sampai mana?",
+    icon: TrendingUpIcon,
     message:
       "Progress sampai mana? Tolong update status pengerjaan semua tiket yang sedang berjalan.",
   },
   {
     label: "Rencanakan Sprint Berikutnya",
+    icon: ListChecksIcon,
     message:
       "Rencanakan sprint berikutnya: pilih tiket dari backlog yang paling prioritas, buat estimasi, dan susun rencananya.",
   },
   {
     label: "Buat Tiket dari Ide Ini",
+    icon: LightbulbIcon,
     message:
       "Aku punya ide fitur: [deskripsi ide]. Pecah jadi tiket-tiket yang bisa dikerjakan tim.",
   },
   {
     label: "Review Kode & Keamanan",
+    icon: ShieldCheckIcon,
     message:
       "Jalankan review menyeluruh: minta Lead Engineer review kode, QA test, dan Pentester cek keamanan. Lapor hasilnya.",
   },
   {
     label: "Rangkum Aktivitas Hari Ini",
+    icon: SparklesIcon,
     message:
       "Rangkum semua aktivitas hari ini: tiket yang selesai, yang masih jalan, dan blocker yang perlu perhatianku.",
   },
@@ -464,8 +482,9 @@ function ThreadPanel({
               type="button"
               onClick={() => handleSuggestion(s)}
               disabled={sendMutation.isPending}
-              className="cursor-pointer rounded-full border border-black/10 px-3 py-1.5 text-xs text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              className="flex cursor-pointer items-center gap-1.5 rounded-full border border-black/10 px-3 py-1.5 text-xs text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
+              <s.icon className="size-3.5 shrink-0" />
               {s.label}
             </button>
           ))}
