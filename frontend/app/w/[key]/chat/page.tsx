@@ -452,11 +452,11 @@ function ThreadPanel({
       </div>
 
       {isTicket && attachments.length > 0 && (
-        <div className="flex flex-wrap gap-2 border-t border-black/5 pt-3 dark:border-white/5">
+        <div className="flex flex-wrap gap-1.5 border-t border-black/5 pt-2 dark:border-white/5">
           {attachments.map((a) => (
             <div
               key={a.id}
-              className="flex items-center gap-1.5 rounded-full border border-black/10 py-1 pr-1 pl-2.5 text-xs dark:border-white/10"
+              className="flex items-center gap-1 rounded-full border border-black/10 py-0.5 pr-1 pl-2 text-xs dark:border-white/10"
             >
               <button
                 type="button"
