@@ -294,3 +294,54 @@ pertama. Murni komposisi data dari API existing + SSE invalidation; tanpa endpoi
 **Dep:** MAP-032, MAP-021
 **AC:** dashboard ter-refresh otomatis saat agent bekerja (tanpa reload); setiap alert
 menghubungkan ke tiket terkait; statistik benar untuk workspace kosong (nihil run/agent).
+
+### MAP-035 · Memory per-agent · M · Engineer
+Tabel `agent_memory` (per `agent_id`, bukan per tiket). Field opsional `memory:` di blok
+```map — terbuka untuk semua role, sama seperti `artifacts:` (docs/03-agent-design.md §3) —
+di-parse `core/report.py` dan dipersist orchestrator sebagai baris baru (`origin=agent`,
+`source_ticket_key` terisi). Prompt agent (`agents/prompts.py`) menyertakan catatan
+ter-terakhir agent itu sendiri (dibatasi ~20 entri, docs/05-roadmap.md butir 7) sebelum konteks
+tiket. UI: `/w/[key]/agents` mendapat tombol "Memory" per agent yang membuka daftar catatan,
+dengan form tambah manual (`origin=owner`) dan tombol hapus per entri untuk kurasi owner.
+**Dep:** MAP-018, MAP-019, MAP-023
+**AC:** agent yang melapor `memory:` dalam bloknya punya baris `agent_memory` baru dan run
+berikutnya untuk agent itu (tiket apa pun) membawa catatan itu di prompt; entri manual owner
+juga ikut di-inject; menghapus entri lewat UI membuatnya tidak muncul lagi di prompt
+berikutnya; menghapus agent men-cascade-delete memory-nya.
+
+### MAP-036 · Retry run failed/interrupted · S · Engineer
+`POST /runs/{id}/retry` — hanya untuk run berstatus `failed`/`interrupted`, 409
+`not_retryable` untuk status lain. Menjadwalkan ulang agent+tiket yang sama
+(`trigger=manual`, sama seperti klik Run) lewat `orchestrator.schedule()` yang sudah ada;
+lookup `session_id` di `execute()` sudah status-agnostic sehingga otomatis melanjutkan
+session opencode lama kalau tersedia — tidak ada kode baru untuk itu. Kalau tiket sedang
+`blocked` saat retry, endpoint membersihkan block itu dulu (`blocked_reason=None`,
+`loop_reset_at`, `handoff_depth=0`, pola sama seperti `PATCH /tickets/{key}` di
+`app/api/tickets.py`) supaya histori sebelum kegagalan tidak langsung memicu ulang guardrail
+yang sama. UI: `/w/[key]/activity` — tombol "Retry" di baris daftar run maupun panel detail
+run, untuk run berstatus `failed`/`interrupted`.
+**Dep:** MAP-023, MAP-027
+**AC:** retry pada run `failed` yang tiketnya `blocked` karena `max_handoff_depth`/loop
+lama berhasil terjadwal ulang (bukan langsung 409 lagi); retry pada run `failed` yang punya
+`session_id` tersimpan meneruskan `-s <session_id>` ke opencode di run barunya; retry pada
+run `done`/`running`/`queued`/`cancelled` → 409 `not_retryable`.
+
+### MAP-037 · Epic reuse & sprint/epic decoupling · M · Engineer
+Epic tetap `Ticket` (parent_id NULL), tapi sekarang **reusable** alih-alih container sekali
+pakai (ADR-012). Field baru `tickets[].epic` (```map, `core/report.py`) dan parameter setara
+`create_ticket(epic=...)` (MCP, `app/mcp_server.py`) — agent bisa menempel tiket baru ke epic
+yang sudah ada. Katalog epic (top-level tickets) dan katalog sprint di-inject ke kontrak untuk
+role pm/qa/pentester dengan aturan WAJIB reuse (pola sama seperti katalog Artifact Groups).
+Fix bug: nesting 1-level yang sebelumnya hanya ditegakkan di jalur API manual sekarang juga
+ditegakkan di jalur `tickets[]` agent — tanpa `epic:` eksplisit, tiket baru dari ticket yang
+sudah punya parent menempel ke parent itu (sibling), bukan jadi cucu. Sprint ditegaskan murni
+timebox: instruksi PM yang meminta "fokus tiap sprint" (penyebab nama sprint kebobolan nama
+fitur) diganti "Final plan wajib 5 bagian" (requirement, goal, epic tujuan, breakdown sprint,
+estimasi durasi). Frontend: dropdown Epic di Create Ticket dialog (Board) diperkaya dengan
+jumlah anak tiket.
+**Dep:** MAP-018, MAP-019, MAP-023
+**AC:** `tickets[].epic`/`create_ticket(epic=...)` valid → tiket baru jadi anak epic itu;
+key tak dikenal/bukan epic top-level → di-skip dengan catatan, tidak menggagalkan report;
+QA/Pentester yang melapor bug dari tiket berparent (tanpa `epic:`) → bug jadi sibling di
+bawah epic yang sama, bukan cucu (regression test untuk bug nesting yang ditemukan saat
+audit); prompt PM trigger `mention` memuat kelima bagian final plan.

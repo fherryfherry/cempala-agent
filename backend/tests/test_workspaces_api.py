@@ -11,6 +11,7 @@ from app.db import session as db_session
 from app.db.models import Base
 from app.db.session import get_session
 from app.main import app
+from app.schemas.workspace import DEFAULT_WORKFLOW_PROMPT
 
 
 @pytest.fixture
@@ -55,6 +56,7 @@ def test_create_workspace_success(client, tmp_path):
     assert body["key"] == "ACM"
     assert body["ticket_counter"] == 0
     assert body["paused"] is False
+    assert body["timezone"] == "Asia/Jakarta"
     assert body["guardrails"] == {
         "run_timeout_sec": 1800,
         "max_cost_per_run": 2.0,
@@ -63,6 +65,33 @@ def test_create_workspace_success(client, tmp_path):
         "loop_threshold": 3,
         "max_concurrent_runs": 3,
     }
+    assert body["workflow_prompt"] == DEFAULT_WORKFLOW_PROMPT
+    assert body["description"] is None
+
+
+def test_create_workspace_with_description(client, tmp_path):
+    resp = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Acme",
+            "key": "ACM",
+            "repo_path": str(tmp_path),
+            "description": "Internal billing platform for Acme Corp.",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["description"] == "Internal billing platform for Acme Corp."
+
+
+def test_update_workspace_description(client, tmp_path):
+    resp = client.post(
+        "/api/workspaces", json={"name": "Acme", "key": "ACM", "repo_path": str(tmp_path)}
+    )
+    ws_id = resp.json()["id"]
+
+    resp = client.patch(f"/api/workspaces/{ws_id}", json={"description": "Updated context."})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["description"] == "Updated context."
 
 
 def test_create_duplicate_key_409(client, tmp_path):
@@ -174,6 +203,12 @@ def test_get_list_patch_delete_happy_path(client, tmp_path):
     assert patch_guardrails.status_code == 200
     assert patch_guardrails.json()["guardrails"] == {"max_cost_per_run": 5.0}
 
+    patch_timezone = client.patch(
+        f"/api/workspaces/{ws_id}", json={"timezone": "Asia/Makassar"}
+    )
+    assert patch_timezone.status_code == 200
+    assert patch_timezone.json()["timezone"] == "Asia/Makassar"
+
     delete_resp = client.delete(f"/api/workspaces/{ws_id}")
     assert delete_resp.status_code == 204
 
@@ -199,3 +234,46 @@ def test_delete_does_not_touch_disk(client):
 
         assert os.path.isdir(tmp_dir)
         assert os.path.isfile(marker)
+
+
+def test_reset_requires_paused_409(client, tmp_path):
+    create = client.post(
+        "/api/workspaces", json={"name": "Acme", "key": "ACM", "repo_path": str(tmp_path)}
+    )
+    ws_id = create.json()["id"]
+    client.post(f"/api/workspaces/{ws_id}/tickets", json={"title": "t1", "is_new_epic": True})
+
+    resp = client.post(f"/api/workspaces/{ws_id}/reset")
+    assert resp.status_code == 409
+
+
+def test_reset_wipes_tickets_comments_sprints_and_counter(client, tmp_path):
+    create = client.post(
+        "/api/workspaces", json={"name": "Acme", "key": "ACM", "repo_path": str(tmp_path)}
+    )
+    ws_id = create.json()["id"]
+
+    ticket = client.post(
+        f"/api/workspaces/{ws_id}/tickets", json={"title": "t1", "is_new_epic": True}
+    ).json()
+    client.post(f"/api/tickets/{ticket['key']}/comments", json={"body": "hi"})
+    client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "Sprint 1"})
+
+    pause_resp = client.post(f"/api/workspaces/{ws_id}/pause")
+    assert pause_resp.status_code == 200
+
+    reset_resp = client.post(f"/api/workspaces/{ws_id}/reset")
+    assert reset_resp.status_code == 200
+    body = reset_resp.json()
+    assert body["ticket_counter"] == 0
+    assert body["paused"] is True
+
+    assert client.get(f"/api/workspaces/{ws_id}/tickets").json() == []
+    assert client.get(f"/api/workspaces/{ws_id}/sprints").json() == []
+    assert client.get(f"/api/tickets/{ticket['key']}").status_code == 404
+
+    # counter restarted: the next ticket gets -001 again, not -002
+    new_ticket = client.post(
+        f"/api/workspaces/{ws_id}/tickets", json={"title": "fresh", "is_new_epic": True}
+    ).json()
+    assert new_ticket["key"] == "ACM-001"

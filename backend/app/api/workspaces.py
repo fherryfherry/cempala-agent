@@ -2,14 +2,20 @@ import os
 from pathlib import Path
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.errors import AppError
-from app.db.models import Run, Ticket, Workspace
+from app.db.models import ArtifactGroup, Run, Sprint, Ticket, Workspace
 from app.db.session import get_session
-from app.schemas.workspace import DEFAULT_GUARDRAILS, WorkspaceCreate, WorkspaceOut, WorkspaceUpdate
+from app.schemas.workspace import (
+    DEFAULT_GUARDRAILS,
+    DEFAULT_WORKFLOW_PROMPT,
+    WorkspaceCreate,
+    WorkspaceOut,
+    WorkspaceUpdate,
+)
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 
@@ -71,8 +77,11 @@ async def create_workspace(body: WorkspaceCreate, session: AsyncSession = Depend
         name=body.name,
         key=body.key,
         repo_path=repo_path,
+        description=body.description,
         guardrails=dict(DEFAULT_GUARDRAILS),
+        workflow_prompt=DEFAULT_WORKFLOW_PROMPT,
         ticket_counter=0,
+        sprint_creator_roles=["pm"],
     )
     session.add(ws)
     try:
@@ -82,6 +91,12 @@ async def create_workspace(body: WorkspaceCreate, session: AsyncSession = Depend
         raise AppError(409, "duplicate_key", f"workspace key '{body.key}' already exists")
     await session.refresh(ws)
     return ws
+
+
+@router.get("/workflow-prompt-default")
+async def get_workflow_prompt_default():
+    """The default workflow prompt, for the Settings page's "reset to default" button."""
+    return {"workflow_prompt": DEFAULT_WORKFLOW_PROMPT}
 
 
 @router.get("/{workspace_id}", response_model=WorkspaceOut)
@@ -99,8 +114,18 @@ async def update_workspace(
         ws.repo_path = _resolve_repo_path(body.repo_path)
     if body.name is not None:
         ws.name = body.name
+    if body.description is not None:
+        ws.description = body.description
     if body.guardrails is not None:
         ws.guardrails = body.guardrails
+    if body.workflow_prompt is not None:
+        ws.workflow_prompt = body.workflow_prompt
+    if body.time_unit is not None:
+        ws.time_unit = body.time_unit
+    if body.timezone is not None:
+        ws.timezone = body.timezone
+    if body.sprint_creator_roles is not None:
+        ws.sprint_creator_roles = body.sprint_creator_roles
 
     await session.commit()
     await session.refresh(ws)
@@ -146,6 +171,42 @@ async def pause_workspace(workspace_id: str, session: AsyncSession = Depends(get
 async def resume_workspace(workspace_id: str, session: AsyncSession = Depends(get_session)):
     ws = await _get_workspace_or_404(session, workspace_id)
     ws.paused = False
+    await session.commit()
+    await session.refresh(ws)
+    return ws
+
+
+@router.post("/{workspace_id}/reset", response_model=WorkspaceOut)
+async def reset_workspace(workspace_id: str, session: AsyncSession = Depends(get_session)):
+    """Wipe all tickets (cascades to comments/attachments/runs/events — chat history and
+
+    Activity are just those, per docs/03-agent-design.md: chat = comments on tickets
+    assigned to the PM), sprints, and artifact groups for this workspace, and restart the
+    ticket-key counter. Keeps the workspace itself, its agents, and its settings intact.
+
+    Requires the workspace to already be paused with nothing running/queued, so a
+    background run's own DB writes can't race a delete out from under it — same
+    safety bar as MAP-031's kill switch, just stricter (pause() only signals
+    cancellation; it doesn't wait for the subprocess to actually stop).
+    """
+    ws = await _get_workspace_or_404(session, workspace_id)
+    if not ws.paused:
+        raise AppError(409, "not_paused", "pause the workspace before resetting its data")
+
+    active = await session.scalar(
+        select(Run)
+        .join(Ticket, Run.ticket_id == Ticket.id)
+        .where(Ticket.workspace_id == workspace_id, Run.status.in_(("running", "queued")))
+    )
+    if active is not None:
+        raise AppError(
+            409, "runs_in_progress", "wait for running/queued runs to finish before resetting"
+        )
+
+    await session.execute(delete(Ticket).where(Ticket.workspace_id == workspace_id))
+    await session.execute(delete(Sprint).where(Sprint.workspace_id == workspace_id))
+    await session.execute(delete(ArtifactGroup).where(ArtifactGroup.workspace_id == workspace_id))
+    ws.ticket_counter = 0
     await session.commit()
     await session.refresh(ws)
     return ws

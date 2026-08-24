@@ -219,3 +219,158 @@ repot, untuk aplikasi yang berjalan di laptop pemiliknya sendiri pada repo milik
 
 **Tinjau ulang bila.** Portal dipakai pada repo pihak ketiga, di mesin bersama, atau oleh orang
 selain pemiliknya. Ketiganya langsung membuat sandbox jadi wajib.
+
+---
+
+<a id="adr-011"></a>
+## ADR-011 · MCP server untuk akses tiket/artifacts/memory, bukan untuk coding
+
+**Keputusan.** Setiap run opencode diberi satu MCP server lokal (`app/mcp_server.py`) lewat
+config `opencode.json` per run (`OPENCODE_CONFIG`), yang membuka tool baca/tulis tiket,
+artifacts, dan memory agent ke agent — diproksi ke backend HTTP (`MAP_API_BASE`, default
+`127.0.0.1:8000/api`). Tool yang disediakan: `list_tickets`, `get_ticket`, `post_comment`,
+`create_ticket`, `update_ticket`, `list_artifacts`, `read_artifact`, `get_memory`,
+`create_memory`, `update_memory`.
+
+**Konteks.** Run rutinitas sebelumnya bergantung sepenuhnya pada prompt: agent tidak punya cara
+membaca status tiket (Board) atau menulis komentar follow-up, jadi rutinitas "cek tiket macet
+lalu follow up" gagal — agent menolak menebak status. ADR-009 memilih blok ```map daripada MCP
+karena infrastruktur MCP belum terbukti perlu; kegagalan dogfood membuktikan kebutuhannya.
+
+**Konsekuensi.**
+- MCP server hanya STDIO subprocess per run (bukan TCP) — tidak menambah permukaan jaringan.
+  Server di-spawn opencode sebagai child process dengan env `MAP_WORKSPACE_ID`/`MAP_AGENT_ID`,
+  jadi tiap tool otomatis ter-scope ke workspace dan agent yang sedang berjalan.
+- Semua validasi tetap di backend (state machine, role gate, mention, approval PM). MCP server
+  hanyalah proksi HTTP tipis; tidak ada duplikasi logika bisnis.
+- Tidak ada auth di MCP (ADR-005): MCP server tidak bisa diakses dari luar, hanya bisa di-spawn
+  oleh backend sendiri.
+- `update_ticket`/`post_comment` otomatis dikaitkan ke agent berjalan (`actor_agent_id`/
+  `author_agent_id`) sehingga aktivitas tetap tercatat per agent.
+- `create_ticket` membuat tiket backlog tanpa auto-schedule — agent bebas bikin backlog tanpa
+  memicu run. Tanpa `epic` (parameter opsional, ADR-012) tiket ini jadi epic top-level baru;
+  dengan `epic` diisi, tiket ini nempel sebagai anak epic yang sudah ada.
+- Menggantikan kebutuhan sementara untuk menyuntikkan daftar tiket ke prompt rutinitas
+  (pendekatan yang ditolak karena membengkakkan prompt dan tetap buta terhadap komentar) —
+  prompt rutinitas kembali ringkas, agent membaca Board lewat tool.
+
+**Tinjau ulang bila.** Format MCP di dogfood buruk (agent tidak menemukan/memakai tool) atau
+kebutuhan interaksi tengah-run muncul (saat itu: MCP server yang lebih kaya, bukan heuristik).
+
+---
+
+## ADR-012 · Epic tetap `Ticket` (reusable), sprint murni timebox
+
+**Keputusan.** "Epic" tidak jadi entity baru — tetap `Ticket` dengan `parent_id IS NULL`, sama
+seperti sebelumnya. Yang berubah: epic sekarang **persistent/reusable** secara desain, bukan
+container sekali pakai per request. Tiga mekanisme baru menegakkan ini:
+
+1. Katalog epic (top-level tickets, ~100 terbaru diupdate) dan katalog sprint (semua nama)
+   di-inject ke kontrak ```map untuk role yang boleh `tickets[]` (pm/qa/pentester), dengan aturan
+   WAJIB reuse — pola yang sama persis dengan katalog Artifact Groups (ADR di sekitar
+   `_map_contract_block`'s `groups_rule`, lihat docs/03-agent-design.md §3).
+2. Field baru `tickets[].epic` (blok ```map) dan parameter baru `create_ticket(epic=...)` (MCP
+   tool, ADR-011) — dua-duanya membiarkan agent menempelkan tiket baru ke epic yang sudah ada,
+   bukan selalu jadi anak dari tiket yang sedang dikerjakan.
+3. Sprint ditegaskan sebagai **timebox murni** — instruksi lama yang meminta PM menyebutkan
+   "fokus tiap sprint" dihapus (itu penyebab nama sprint kebobolan nama fitur, mis. "Sprint 2 -
+   Kualitas & Keamanan Artikel"). Scope/fitur sekarang eksklusif urusan epic.
+
+**Konteks.** Sebelum ini: satu-satunya cara membuat tiket top-level adalah `is_new_epic: true`
+(API manual) atau default `tickets[]`/`create_ticket` (agent) — keduanya selalu bikin epic baru,
+tidak pernah reuse. Efeknya, tiap request owner (lewat chat atau lewat MCP) membuat epic
+sendiri-sendiri, dan epic tidak pernah terpakai lagi sebagai parent untuk tiket berikutnya —
+bertentangan dengan model yang diinginkan: workspace/project → epic (area fitur besar,
+reusable) → feature/story/bug/enhancement.
+
+Dua alternatif ditolak:
+- **Epic jadi entity baru** (tabel sendiri, tanpa status/board column) — lebih "benar" secara
+  konsep tapi migrasi besar: tabel baru, API baru, migrasi semua tiket top-level lama, halaman
+  manajemen Epic baru. Ditolak untuk MVP fitur ini — cukup epic tetap `Ticket`, ditambah tooling
+  reuse di atasnya.
+- **Halaman "Epics" baru** (seperti Artifacts) — ditolak, cukup perbaiki dropdown Epic yang
+  sudah ada di Create Ticket dialog + badge yang sudah ada di Board/Timeline.
+
+Aturan reuse ditaruh di kontrak ```map (kode), bukan `workflow_prompt` per-workspace (Settings),
+karena dua alasan: (a) katalog epic/sprint butuh data live yang hanya orchestrator bisa query —
+field teks statis tidak bisa; (b) blok kontrak selalu dirakit PALING TERAKHIR di prompt (setelah
+`workflow_prompt`), jadi aturan ini tidak bisa diam-diam ditimpa oleh workflow_prompt custom
+milik workspace.
+
+Bug yang ditemukan sekaligus ditambal: nesting 1-level (`_validate_parent`, `nesting_too_deep`)
+hanya ditegakkan di jalur API manual, tidak pernah di jalur `tickets[]` agent — QA/Pentester yang
+melapor bug dari tiket yang sudah punya parent (feature/story di bawah epic) diam-diam membuat
+cucu (2 level). Ditambal dengan resolusi default baru: tanpa `epic:` eksplisit, tiket baru
+menempel ke `ticket.parent_id` kalau ada (bukan `ticket.id`) — tetap flat di bawah epic yang sama.
+
+**Konsekuensi.**
+- `TicketDraft.epic` (parser, `core/report.py`) dan helper `_resolve_ticket_parent`/
+  `_resolve_epic_target` (orchestrator) — key tak dikenal atau bukan epic top-level di-skip
+  dengan catatan di komentar sistem, tidak menggagalkan seluruh laporan (toleransi yang sama
+  seperti field lain di blok ```map).
+- PM's "final plan" di fase eksploratif chat (sebelum owner approve) sekarang wajib menyebut
+  epic tujuan secara eksplisit — bagian dari lima bagian wajib (requirement, goal, epic tujuan,
+  breakdown sprint, estimasi durasi), owner request di luar audit awal.
+- `_maybe_wake_parent_pm`'s asumsi "epic selalu ditutup begitu semua anak selesai" dilunakkan di
+  prompt (bukan kode): PM boleh membiarkan epic tetap terbuka kalau memang area fitur besar yang
+  masih akan menerima tiket baru.
+
+**Tinjau ulang bila.** Katalog epic tumbuh sangat besar (ratusan epic) sehingga daftar ~100
+teratas tidak lagi cukup mewakili, atau owner butuh metadata epic yang tidak bisa ditumpangkan ke
+`Ticket` (mis. deskripsi terstruktur, tag, target rilis) — saat itu barulah entity `Epic` terpisah
+masuk akal.
+
+## ADR-013 · Agent hanya boleh dijadwalkan untuk ticket di sprint aktif
+
+**Keputusan.** Guardrail baru, `ticket_not_in_active_sprint`, dicek di `check_guardrails()`
+(`core/guardrails.py`) sebelum `Run` dibuat — di titik ini semua 6 jalur penjadwalan (manual,
+retry, mention, handoff, auto tickets[], wake-parent-PM) sudah lewat. Aturan: ticket yang
+`sprint_id`-nya `NULL` (backlog) atau menunjuk sprint yang bukan `status == "active"` tidak bisa
+dijalankan — kena `blocked` + komentar sistem, sama seperti guardrail lain. **Dikecualikan**: role
+apa pun yang ada di `workspace.sprint_creator_roles` (default hanya `pm`) — role itu bertugas
+merencanakan sprint, jadi harus selalu bisa merespon ticket apa pun (termasuk ticket baru dari
+chat yang belum ditriage ke sprint manapun) untuk melakukan triage tersebut. Guardrail ini selalu
+aktif, tidak ada toggle di `workspace.guardrails`/Settings (permintaan owner: aturan ini adalah
+kebijakan kerja tim, bukan limit yang perlu di-tune per workspace).
+
+**Konteks.** Permintaan owner: PM yang mengatur kapan sprint berikutnya aktif (lewat mekanisme
+`PATCH /sprints/{id}` yang sudah ada, ADR di [03-agent-design.md](03-agent-design.md) §4); agent
+lain hanya boleh mengerjakan apa yang ada di sprint yang sedang aktif itu — supaya tim tidak
+diam-diam mengerjakan ticket dari sprint yang belum waktunya (atau ticket yang belum pernah
+ditriage sama sekali) sementara sprint aktifnya sendiri belum kelar.
+
+Konsekuensi tersembunyi yang ditemukan sekaligus ditambal saat implementasi: alur chat "mulai
+obrolan baru dengan PM" (`frontend/app/w/[key]/chat/page.tsx`) membuat ticket baru **tanpa
+sprint** lalu langsung `@mention` PM — tanpa pengecualian role di atas, PM sendiri akan langsung
+terblokir di percakapan pertama, sebelum sempat mengatur sprint apa pun. Ini alasan langsung
+kenapa pengecualian dilekatkan ke `sprint_creator_roles` (konsep yang sudah ada, dipakai untuk hal
+lain: siapa yang boleh mendeklarasikan `sprints:` di blok ```map) daripada hardcode role `"pm"`.
+
+Dua alternatif ditolak:
+- **Backlog dikecualikan, hanya sprint non-aktif yang diblokir** — lebih sederhana (tidak perlu
+  memikirkan alur chat di atas sama sekali), tapi bertentangan dengan keputusan owner: backlog
+  (belum ditriage ke sprint manapun) *lebih* belum-siap-dikerjakan dibanding sprint yang sudah
+  direncanakan tapi belum aktif, jadi seharusnya ikut diblokir juga, bukan malah dikecualikan.
+- **Guardrail dikonfigurasi per workspace** (field baru di `workspace.guardrails`, toggle di
+  Settings) — mengikuti pola guardrail lain, tapi owner secara eksplisit tidak minta ini bisa
+  dimatikan; menambah toggle untuk sesuatu yang belum diminta opt-out-able cuma menambah
+  permukaan UI/API tanpa kebutuhan nyata.
+
+**Konsekuensi.**
+- `core/orchestrator.py::schedule()` meneruskan `agent.role` dan `workspace.sprint_creator_roles`
+  ke `check_guardrails()` — dua parameter baru, keyword-only, default `None`/`[]` supaya tidak
+  breaking untuk pemanggil lain.
+- Fixture `_make_ticket` di hampir semua file test orkestrator (`test_orchestrator.py`,
+  `test_guardrails.py`, `test_handoff.py`, `test_kill_switch.py`, `test_loop_detector.py`,
+  `test_run_retry_api.py`, `test_agent_memory_orchestrator.py`) sekarang membuat/reuse sprint aktif
+  workspace secara default kecuali `sprint_id` di-override eksplisit — beberapa test yang
+  mengaudit isi list sprint (`test_updates_sprint_and_duration_apply_to_target`,
+  `test_pm_tickets_with_sprint_creates_and_links_sprint`,
+  `test_sprint_creator_roles_setting_gates_sprints_declaration`) disesuaikan supaya tidak
+  terpengaruh sprint bootstrap ini.
+- `_get_or_create_sprint` (orchestrator, agent-facing) tidak berubah — dates/status masih
+  sepenuhnya di luar kendali agent (lihat catatan sprint start/end date terpisah).
+
+**Tinjau ulang bila.** Owner ingin agent lain (bukan hanya `sprint_creator_roles`) bisa merespon
+ticket di luar sprint aktif untuk kasus tertentu (mis. hotfix darurat) — saat itu guardrail ini
+mungkin perlu jalur bypass baru yang eksplisit, bukan pengecualian role yang sudah ada.

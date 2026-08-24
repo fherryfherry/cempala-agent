@@ -157,6 +157,7 @@ def test_live_events_delivered_after_connecting(env):
     assert len(events) == 1
     assert events[0][0] == published["ev"].id
     assert events[0][1]["type"] == "assistant_text"
+    assert isinstance(events[0][1].get("created_at"), str)
 
 
 def test_reconnect_with_since_event_id_replays_only_later_no_dup(env):

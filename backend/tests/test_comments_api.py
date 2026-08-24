@@ -66,7 +66,9 @@ def _make_agent(client, ws_id, name):
 
 
 def _make_ticket(client, ws_id, title="Do the thing"):
-    resp = client.post(f"/api/workspaces/{ws_id}/tickets", json={"title": title})
+    resp = client.post(
+        f"/api/workspaces/{ws_id}/tickets", json={"title": title, "is_new_epic": True}
+    )
     assert resp.status_code == 201, resp.text
     return resp.json()
 
@@ -152,7 +154,13 @@ def test_list_comments_ordered(client, tmp_path):
     resp = client.get(f"/api/tickets/{ticket['key']}/comments")
     assert resp.status_code == 200
     bodies = [c["body"] for c in resp.json()]
-    assert bodies == ["first", "second"]
+    assert bodies == ["second", "first"]  # most recent first
+
+    # Pagination: limit=1 -> only the newest; offset skips it.
+    resp = client.get(f"/api/tickets/{ticket['key']}/comments?limit=1")
+    assert [c["body"] for c in resp.json()] == ["second"]
+    resp = client.get(f"/api/tickets/{ticket['key']}/comments?limit=1&offset=1")
+    assert [c["body"] for c in resp.json()] == ["first"]
 
 
 def test_comment_on_nonexistent_ticket_404(client):

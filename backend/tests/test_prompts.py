@@ -3,9 +3,10 @@ from app.agents.prompts import (
     AgentInfo,
     CommentInfo,
     TicketInfo,
+    WorkspaceTicketSummary,
     build_prompt,
 )
-from app.core.report import ROLE_ALLOWED_STATUSES
+from app.core.report import AGENT_DECLARABLE_STATUSES
 
 ROSTER = [
     AgentInfo(name="pm-1", role="pm"),
@@ -54,17 +55,24 @@ def test_custom_system_prompt_replaces_role_block_not_base_or_contract():
     assert "status: <salah satu dari:" in prompt
 
 
-def test_map_contract_status_list_matches_role_allowed_statuses():
-    for role, allowed in ROLE_ALLOWED_STATUSES.items():
+def test_map_contract_status_list_is_unrestricted_but_excludes_release():
+    expected = ", ".join(sorted(AGENT_DECLARABLE_STATUSES))
+    for role in ("pm", "lead", "engineer", "designer", "qa", "pentester"):
         prompt = build_prompt(_agent(f"{role}-x", role), "/repo", ROSTER, TICKET)
-        expected = ", ".join(sorted(allowed))
         assert f"status: <salah satu dari: {expected}>" in prompt
+        assert "release" not in expected
 
 
 def test_tickets_instruction_present_for_pm_qa_pentester():
     for role in ("pm", "qa", "pentester"):
         prompt = build_prompt(_agent(f"{role}-x", role), "/repo", ROSTER, TICKET)
         assert "tickets:" in prompt
+
+
+def test_tickets_title_guidance_present_for_pm_qa_pentester():
+    for role in ("pm", "qa", "pentester"):
+        prompt = build_prompt(_agent(f"{role}-x", role), "/repo", ROSTER, TICKET)
+        assert "JANGAN cantumkan path file" in prompt
 
 
 def test_tickets_instruction_absent_for_lead_engineer_designer():
@@ -174,3 +182,214 @@ def test_previous_run_summaries_included():
     )
     assert "Menambah endpoint login." in prompt
     assert "Menambah validasi email." in prompt
+
+
+def test_workspace_tickets_block_omitted_when_none():
+    prompt = build_prompt(_agent("pm-1", "pm"), "/repo", ROSTER, TICKET)
+    assert "Tiket lain di workspace ini" not in prompt
+
+
+def test_workspace_tickets_block_included_when_given():
+    tickets = [
+        WorkspaceTicketSummary(
+            key="MAP-002", title="Fitur artikel", status="done", priority="medium",
+            sprint_name="Sprint 1",
+        ),
+        WorkspaceTicketSummary(
+            key="MAP-003", title="Fix bug login", status="blocked", priority="high",
+            sprint_name=None,
+        ),
+    ]
+    prompt = build_prompt(
+        _agent("pm-1", "pm"), "/repo", ROSTER, TICKET, workspace_tickets=tickets,
+    )
+    assert "Tiket lain di workspace ini" in prompt
+    assert "MAP-002 [done] (sprint: Sprint 1) — Fitur artikel" in prompt
+    assert "MAP-003 [blocked] (sprint: tanpa sprint) — Fix bug login" in prompt
+
+
+def test_updates_example_has_sprint_and_duration_fields_for_pm_qa_pentester():
+    for role in ("pm", "qa", "pentester"):
+        prompt = build_prompt(_agent(f"{role}-x", role), "/repo", ROSTER, TICKET)
+        assert "sprint: <opsional, pindahkan tiket ini ke sprint lain>" in prompt
+        assert "duration: <opsional, perbaiki estimasi durasi tiket ini dalam" in prompt
+
+
+def test_existing_artifact_groups_listed_in_contract():
+    prompt = build_prompt(
+        _agent("eng-1", "engineer"),
+        "/repo",
+        ROSTER,
+        TICKET,
+        existing_artifact_groups=["Dokumen Teknis", "Hasil Testing", "Sprint Reports"],
+    )
+    assert "Kelompok yang SUDAH ADA di menu Artifacts workspace ini:" in prompt
+    assert "- Dokumen Teknis" in prompt
+    assert "- Hasil Testing" in prompt
+    assert "- Sprint Reports" in prompt
+    assert "WAJIB pakai salah satu kelompok di atas yang relevan" in prompt
+    assert "JANGAN bikin nama baru kalau ada yang relevan" in prompt
+
+
+def test_no_artifact_groups_tells_agent_they_may_create_first():
+    prompt = build_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, TICKET)
+    assert "kamu boleh membuat kelompok pertama" in prompt
+    assert "Kelompok yang SUDAH ADA" not in prompt
+
+
+def test_existing_epics_listed_in_contract_for_pm():
+    prompt = build_prompt(
+        _agent("pm-1", "pm"),
+        "/repo",
+        ROSTER,
+        TICKET,
+        existing_epics=["AUTH-001 — Authentication", "BILLING-002 — Billing"],
+    )
+    assert "Epic yang SUDAH ADA (tiket top-level) di workspace ini:" in prompt
+    assert "AUTH-001 — Authentication" in prompt
+    assert "BILLING-002 — Billing" in prompt
+    assert "WAJIB isi `epic:`" in prompt
+    assert "epic: <opsional, key epic tujuan dari daftar di atas" in prompt
+
+
+def test_no_existing_epics_tells_agent_first_one_becomes_epic():
+    prompt = build_prompt(_agent("pm-1", "pm"), "/repo", ROSTER, TICKET)
+    assert "akan jadi epic pertama" in prompt
+    assert "Epic yang SUDAH ADA" not in prompt
+
+
+def test_existing_epics_hidden_for_roles_without_tickets():
+    prompt = build_prompt(
+        _agent("eng-1", "engineer"),
+        "/repo",
+        ROSTER,
+        TICKET,
+        existing_epics=["AUTH-001 — Authentication"],
+    )
+    assert "AUTH-001" not in prompt
+    assert "epic:" not in prompt
+
+
+def test_existing_sprints_listed_in_contract_for_pm():
+    prompt = build_prompt(
+        _agent("pm-1", "pm"),
+        "/repo",
+        ROSTER,
+        TICKET,
+        existing_sprints=["Sprint 1", "Sprint 2"],
+    )
+    assert "Sprint yang SUDAH ADA:" in prompt
+    assert "- Sprint 1" in prompt
+    assert "- Sprint 2" in prompt
+    assert "Sprint HANYA timebox" in prompt
+    assert "JANGAN taruh nama fitur/scope di nama sprint" in prompt
+
+
+def test_no_existing_sprints_tells_agent_pure_timebox_naming():
+    prompt = build_prompt(_agent("pm-1", "pm"), "/repo", ROSTER, TICKET)
+    assert "Belum ada sprint di workspace ini" in prompt
+    assert "Sprint yang SUDAH ADA" not in prompt
+
+
+def test_artifact_catalog_block_included_when_given():
+    prompt = build_prompt(
+        _agent("eng-1", "engineer"),
+        "/repo",
+        ROSTER,
+        TICKET,
+        artifact_catalog=[
+            "[Dokumen Teknis] PRD.md (MAP-001) — initial PRD",
+            "[Hasil Testing] evidence.md (MAP-002)",
+        ],
+    )
+    assert "Artifacts di workspace ini (menu Artifacts)" in prompt
+    assert "- [Dokumen Teknis] PRD.md (MAP-001) — initial PRD" in prompt
+    assert "- [Hasil Testing] evidence.md (MAP-002)" in prompt
+
+
+def test_artifact_catalog_block_omitted_when_empty():
+    prompt = build_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, TICKET)
+    assert "Artifacts di workspace ini" not in prompt
+
+
+def test_artifact_updates_contract_present_for_pm_only():
+    pm_prompt = build_prompt(_agent("pm-1", "pm"), "/repo", ROSTER, TICKET)
+    assert "artifact_updates:" in pm_prompt
+    assert "op: rename" in pm_prompt
+    assert "op: merge" in pm_prompt
+    assert "op: move" in pm_prompt
+    assert "op: delete" in pm_prompt
+    assert "HANYA PM" in pm_prompt
+    for role in ("lead", "engineer", "designer", "qa", "pentester"):
+        prompt = build_prompt(_agent(f"{role}-x", role), "/repo", ROSTER, TICKET)
+        assert "artifact_updates:" not in prompt
+
+
+def test_sprints_contract_taught_only_to_sprint_creator_roles():
+    # Default: PM only.
+    pm_prompt = build_prompt(_agent("pm-1", "pm"), "/repo", ROSTER, TICKET)
+    assert "sprints:" in pm_prompt
+    qa_prompt = build_prompt(_agent("qa-1", "qa"), "/repo", ROSTER, TICKET)
+    assert "sprints:" not in qa_prompt
+
+    # Workspace setting widens it: QA gets the sprints: contract too.
+    qa_prompt2 = build_prompt(
+        _agent("qa-1", "qa"), "/repo", ROSTER, TICKET, sprint_creator_roles={"pm", "qa"}
+    )
+    assert "sprints:" in qa_prompt2
+    # And a role outside the allowed set still doesn't see it.
+    eng_prompt = build_prompt(
+        _agent("eng-1", "engineer"), "/repo", ROSTER, TICKET, sprint_creator_roles={"pm", "qa"}
+    )
+    assert "sprints:" not in eng_prompt
+
+
+def test_mcp_tools_block_in_normal_prompt():
+    prompt = build_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, TICKET)
+    assert "list_tickets" in prompt
+    assert "post_comment" in prompt
+    assert "sumber kebenaran status tiket" in prompt
+
+
+def test_mcp_tools_block_in_routine_prompt():
+    from app.agents.prompts import build_routine_prompt
+
+    prompt = build_routine_prompt(
+        _agent("pm-1", "pm"), "/repo", ROSTER, routine_prompt="cek tiket macet"
+    )
+    assert "list_tickets" in prompt
+    assert "jangan menebak status" in prompt
+
+
+def test_agent_memory_block_absent_by_default():
+    prompt = build_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, TICKET)
+    assert "Catatan dari pekerjaanmu sebelumnya" not in prompt
+
+
+def test_agent_memory_block_present_when_given():
+    prompt = build_prompt(
+        _agent("eng-1", "engineer"),
+        "/repo",
+        ROSTER,
+        TICKET,
+        agent_memories=["jangan lupa jalankan migrasi", "repo ini pakai uv"],
+    )
+    assert "Catatan dari pekerjaanmu sebelumnya" in prompt
+    assert "- jangan lupa jalankan migrasi" in prompt
+    assert "- repo ini pakai uv" in prompt
+
+
+def test_agent_memory_block_appears_before_ticket_context():
+    prompt = build_prompt(
+        _agent("eng-1", "engineer"),
+        "/repo",
+        ROSTER,
+        TICKET,
+        agent_memories=["catatan lama"],
+    )
+    assert prompt.index("Catatan dari pekerjaanmu sebelumnya") < prompt.index("Tiket saat ini:")
+
+
+def test_map_contract_mentions_memory_field():
+    prompt = build_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, TICKET)
+    assert "memory:" in prompt

@@ -33,7 +33,13 @@ _POLL_SECONDS = 1
 
 
 def _sse(ev: Event) -> str:
-    payload = {"id": ev.id, "run_id": ev.run_id, "type": ev.type, "payload": ev.payload}
+    payload = {
+        "id": ev.id,
+        "run_id": ev.run_id,
+        "type": ev.type,
+        "created_at": ev.created_at.isoformat() if ev.created_at else None,
+        "payload": ev.payload,
+    }
     return f"id: {ev.id}\ndata: {json.dumps(payload)}\n\n"
 
 

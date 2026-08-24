@@ -162,3 +162,79 @@ def test_list_and_patch_happy_path(client, tmp_path):
     body = patch_resp.json()
     assert body["enabled"] is False
     assert body["model"] == "gpt-5"
+
+
+def test_create_agent_with_avatar(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    payload = _agent_payload()
+    payload["avatar_template"] = "person-3"
+    payload["avatar_color"] = "#10b981"
+    resp = client.post(f"/api/workspaces/{ws_id}/agents", json=payload)
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["avatar_template"] == "person-3"
+    assert body["avatar_color"] == "#10b981"
+
+
+def test_patch_agent_avatar(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    agent_id = client.post(f"/api/workspaces/{ws_id}/agents", json=_agent_payload()).json()["id"]
+
+    resp = client.patch(
+        f"/api/agents/{agent_id}",
+        json={"avatar_template": "person-1", "avatar_color": "#6366f1"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["avatar_template"] == "person-1"
+    assert body["avatar_color"] == "#6366f1"
+
+    # Explicit null clears back to plain initials.
+    resp = client.patch(f"/api/agents/{agent_id}", json={"avatar_template": None, "avatar_color": None})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["avatar_template"] is None
+    assert body["avatar_color"] is None
+
+
+def test_create_agent_invalid_avatar_422(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+
+    bad_template = client.post(
+        f"/api/workspaces/{ws_id}/agents", json={**_agent_payload(), "avatar_template": "robot-99"}
+    )
+    assert bad_template.status_code == 422
+
+    bad_color = client.post(
+        f"/api/workspaces/{ws_id}/agents", json={**_agent_payload(), "avatar_color": "red"}
+    )
+    assert bad_color.status_code == 422
+    assert bad_color.json()["error"]["code"] == "validation_error"
+
+
+def test_list_agents_memory_count_zero_for_fresh_agent(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    agent_id = client.post(f"/api/workspaces/{ws_id}/agents", json=_agent_payload()).json()["id"]
+
+    list_resp = client.get(f"/api/workspaces/{ws_id}/agents")
+    assert list_resp.status_code == 200
+    listed = next(a for a in list_resp.json() if a["id"] == agent_id)
+    assert listed["memory_count"] == 0
+
+
+def test_list_agents_memory_count_reflects_notes(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    agent_a = client.post(f"/api/workspaces/{ws_id}/agents", json=_agent_payload("Alice")).json()["id"]
+    agent_b = client.post(f"/api/workspaces/{ws_id}/agents", json=_agent_payload("Bob")).json()["id"]
+
+    for note in ("first", "second", "third"):
+        resp = client.post(f"/api/agents/{agent_a}/memory", json={"note": note})
+        assert resp.status_code == 201, resp.text
+    resp = client.post(f"/api/agents/{agent_b}/memory", json={"note": "only one"})
+    assert resp.status_code == 201, resp.text
+
+    list_resp = client.get(f"/api/workspaces/{ws_id}/agents")
+    assert list_resp.status_code == 200
+    by_id = {a["id"]: a for a in list_resp.json()}
+    assert by_id[agent_a]["memory_count"] == 3
+    assert by_id[agent_b]["memory_count"] == 1

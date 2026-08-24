@@ -134,5 +134,8 @@ Urutan berdasarkan nilai per usaha, bukan komitmen:
 4. **Sandbox (Docker)** — kalau portal dipakai pada repo yang tidak sepenuhnya dipercaya.
 5. **Sub-tiket lebih dari 1 level.**
 6. **Auth & multi-user** — saat portal keluar dari laptop. Sebelum itu, jangan expose ke jaringan.
-7. **Memori agent lintas tiket** — retrieval dari tiket lama; berguna, tapi mudah jadi sumber
-   halusinasi kalau dipasang terlalu dini.
+7. ~~**Memori agent lintas tiket**~~ — **dikerjakan sebagai MAP-035**, lebih sempit dari yang
+   dibayangkan di sini untuk menghindari risiko halusinasi yang disebutkan: bukan retrieval dari
+   tiket lama, melainkan catatan verbatim yang agent tulis sendiri lewat blok ```map `memory:`
+   (docs/03-agent-design.md §3), dibatasi jumlahnya saat di-inject ke prompt berikutnya, dan bisa
+   dikurasi (dihapus) manual oleh owner lewat Agents → Memory.

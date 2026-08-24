@@ -1,55 +1,56 @@
-# Multi-Agent Portal (MAP)
+# CEMPALA
 
-Portal Jira-like untuk menjalankan satu "tim software" yang seluruhnya diisi agent AI (PM, Lead
-Engineer, Engineer, Designer, QA, Pentester). Kamu bikin tiket, tim agent mengerjakannya secara
-otonom di dalam folder repo lokal, dan kamu memantau semuanya real-time lewat activity feed dan
-streaming output.
+A Jira-like portal for running a "software team" made entirely of AI agents (PM, Lead Engineer,
+Engineer, Designer, QA, Pentester). You create tickets, the agent team works them autonomously
+inside a local repo folder, and you watch everything happen in real time through an activity feed
+and streaming output.
 
-Portal ini tidak membangun coding agent sendiri — ia merakit prompt, melempar ke coding tool
-eksternal (`opencode`), dan menerima hasilnya lewat blok ` ```map ` di akhir jawaban agent.
+The portal does not build its own coding agent — it assembles a prompt, hands it to an external
+coding tool (`opencode`), and receives the result via a ` ```map ` block at the end of the agent's
+reply.
 
-Lihat [`docs/00-overview.md`](docs/00-overview.md) untuk pitch lengkap, dan
-[`docs/02-tsd.md`](docs/02-tsd.md) untuk arsitektur teknis.
+See [`docs/00-overview.md`](docs/00-overview.md) for the full pitch and
+[`docs/02-tsd.md`](docs/02-tsd.md) for the technical architecture.
 
-## ⚠️ Peringatan keamanan — baca sebelum menjalankan
+## ⚠️ Security warning — read before running
 
-- `opencode` dijalankan dengan flag **`--auto`**, yang berarti agent **menyetujui sendiri semua
-  permission** — tidak ada manusia yang mengonfirmasi dialog izin apa pun.
-- `--dir <repo_path>` hanya menetapkan **working directory**, **BUKAN sandbox**. Tidak ada yang
-  mencegah agent menyentuh file di luar folder tersebut.
-- Konsekuensinya: agent bisa menjalankan **perintah apa pun** dengan hak akses user yang
-  menjalankan backend ini.
-- Karena itu:
-  - Backend **wajib** bind ke `127.0.0.1` saja. **Jangan pernah** mengekspos portal ini ke
-    jaringan — itu sama dengan membuka remote code execution.
-  - Jalankan hanya pada repo yang kamu percayai, di mesin yang kamu kendalikan.
-  - **Jangan** menaruh secret produksi di dalam `repo_path`.
-  - Validasi `repo_path` di API adalah kenyamanan, bukan batas keamanan.
+- `opencode` is run with the **`--auto`** flag, meaning the agent **approves all permissions
+  itself** — no human confirms any permission dialog.
+- `--dir <repo_path>` only sets the **working directory**, it is **NOT a sandbox**. Nothing stops
+  the agent from touching files outside that folder.
+- Consequence: the agent can run **any command** with the privileges of the user running the
+  backend.
+- Therefore:
+  - The backend **must** bind to `127.0.0.1` only. **Never** expose this portal to a network —
+    that is the same as opening remote code execution.
+  - Run it only on repos you trust, on a machine you control.
+  - **Do not** put production secrets inside `repo_path`.
+  - The `repo_path` validation in the API is a convenience, not a security boundary.
 
-Ini bukan detail implementasi yang bisa diabaikan — ini konsekuensi arsitektur yang diterima
-sadar (lihat [ADR-010](docs/06-adr.md)).
+This is not an implementation detail you can ignore — it is a consciously accepted architectural
+consequence (see [ADR-010](docs/06-adr.md)).
 
-## Prasyarat
+## Prerequisites
 
-- Binary [`opencode`](https://opencode.ai) terinstal dan terautentikasi:
+- The [`opencode`](https://opencode.ai) binary installed and authenticated:
 
   ```
   opencode auth login
   ```
 
-  Backend shell out ke binary ini untuk setiap agent run dan untuk daftar model. Kredensial LLM
-  tidak pernah disimpan oleh portal ini.
+  The backend shells out to this binary for every agent run and for the model list. LLM
+  credentials are never stored by this portal.
 
-## Setup dari nol
+## Setup from scratch
 
-1. Install & autentikasi `opencode`: `opencode auth login` (lihat [Prasyarat](#prasyarat)).
-2. Setup backend: `cd backend && uv venv --python 3.12 .venv && uv pip install -e ".[dev]"`
-   (tanpa `uv`: `python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"`).
-3. Setup frontend: `cd frontend && npm install`.
-4. `make migrate` — apply migrasi database.
-5. `make dev` — jalankan backend (`:8000`) dan frontend (`:3000`) bareng, `Ctrl+C` mematikan keduanya.
+1. Install & authenticate `opencode`: `opencode auth login` (see [Prerequisites](#prerequisites)).
+2. Set up the backend: `cd backend && uv venv --python 3.12 .venv && uv pip install -e ".[dev]"`
+   (without `uv`: `python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"`).
+3. Set up the frontend: `cd frontend && npm install`.
+4. `make migrate` — apply database migrations.
+5. `make dev` — run backend (`:8000`) and frontend (`:3000`) together; `Ctrl+C` stops both.
 
-## Menjalankan
+## Running
 
 ```
 make dev       # backend (uvicorn :8000) + frontend (next dev :3000)
@@ -57,11 +58,11 @@ make migrate   # alembic upgrade head
 make test      # pytest
 ```
 
-## Struktur
+## Layout
 
 ```
 backend/    FastAPI + SQLite (via SQLAlchemy/Alembic)
 frontend/   Next.js App Router
-storage/    Attachment (di luar repo_path agent, bukan source code)
-docs/       Spesifikasi — baca ini duluan
+storage/    Attachments (outside the agent repo_path, not source code)
+docs/       Specification — read this first
 ```

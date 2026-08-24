@@ -1,6 +1,7 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
+@plugin "@tailwindcss/typography";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -127,4 +128,16 @@
   html {
     @apply font-sans;
   }
+}
+
+/* Timeline Gantt: vertical grid lines every PX_PER_UNIT (48px, see timeline/page.tsx).
+   `repeating-linear-gradient` carries the right edge of the last cell for free. */
+@utility gantt-grid-lines {
+  background-image: repeating-linear-gradient(
+    to right,
+    transparent 0,
+    transparent calc(48px - 1px),
+    color-mix(in oklab, var(--border) 100%, transparent) calc(48px - 1px),
+    color-mix(in oklab, var(--border) 100%, transparent) 48px
+  );
 }

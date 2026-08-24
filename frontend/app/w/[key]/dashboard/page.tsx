@@ -110,10 +110,10 @@ export default function DashboardPage() {
   }
   for (const r of recentRuns) {
     if (r.status === "failed") {
-      const t = ticketById.get(r.ticket_id);
+      const t = r.ticket_id ? ticketById.get(r.ticket_id) : undefined;
       alerts.push({
         kind: "error",
-        text: `${t?.key ?? r.ticket_id} failed${r.error ? `: ${r.error}` : ""}`,
+        text: `${t?.key ?? r.ticket_id ?? "rutinitas"} failed${r.error ? `: ${r.error}` : ""}`,
         href: t ? `/w/${workspaceKey}/ticket/${t.key}` : `/w/${workspaceKey}/activity`,
       });
     }
@@ -227,18 +227,31 @@ export default function DashboardPage() {
               <p className="px-4 py-3 text-xs text-zinc-500">No runs yet.</p>
             )}
             {recentRuns.map((r) => {
-              const t = ticketById.get(r.ticket_id);
+              const t = r.ticket_id ? ticketById.get(r.ticket_id) : undefined;
               const agent = agentById.get(r.agent_id);
+              // Routine runs have no ticket — show them as "Rutinitas" with the run's
+              // summary as title instead of a blank "—" row.
+              const isRoutine = !t;
+              const keyLabel = t?.key ?? "Rutinitas";
+              const title =
+                t?.title ??
+                (typeof r.report?.summary === "string"
+                  ? r.report.summary.slice(0, 80)
+                  : "Rutinitas");
               return (
                 <Link
                   key={r.id}
                   href={t ? `/w/${workspaceKey}/ticket/${t.key}` : `/w/${workspaceKey}/activity`}
                   className="flex items-center gap-2.5 border-b border-black/5 px-4 py-2 text-sm last:border-b-0 hover:bg-zinc-50 dark:border-white/5 dark:hover:bg-zinc-900/40"
                 >
-                  <span className="w-16 shrink-0 font-mono text-xs text-zinc-500">
-                    {t?.key ?? "—"}
+                  <span
+                    className={`w-16 shrink-0 font-mono text-xs ${
+                      isRoutine ? "text-zinc-400" : "text-zinc-500"
+                    }`}
+                  >
+                    {keyLabel}
                   </span>
-                  <span className="min-w-0 flex-1 truncate">{t?.title ?? "—"}</span>
+                  <span className="min-w-0 flex-1 truncate">{title}</span>
                   <span className="hidden shrink-0 items-center gap-1.5 sm:flex">
                     {agent && (
                       <AgentAvatar

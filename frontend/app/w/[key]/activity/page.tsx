@@ -6,16 +6,21 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   ApiError,
+  formatAgentName,
   getRun,
   listAgents,
   listRuns,
   listTickets,
   listWorkspaces,
+  retryRun,
   stopRun,
+  type Agent,
   type Run,
   type RunEvent,
 } from "@/lib/api";
 import { useWorkspaceEvents, type EventType, type WorkspaceEvent } from "@/components/events-context";
+import { AgentAvatar } from "@/components/agent-avatar";
+import { formatTimestamp } from "@/lib/datetime";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -54,6 +59,7 @@ const EVENT_PAGE_LIMIT = 500;
 export default function ActivityPage() {
   const params = useParams<{ key: string }>();
   const workspaceKey = params.key;
+  const queryClient = useQueryClient();
 
   const workspaces = useQuery({ queryKey: ["workspaces"], queryFn: listWorkspaces });
   const workspace = workspaces.data?.find((ws) => ws.key === workspaceKey);
@@ -78,15 +84,53 @@ export default function ActivityPage() {
 
   const { status: sseStatus, events } = useWorkspaceEvents();
   const [typeFilter, setTypeFilter] = useState<EventType | "all">("all");
+  const [agentFilter, setAgentFilter] = useState<string>("all");
+  // null -> auto-select the latest run (so the page opens on the newest activity).
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  // Infinite-scroll pagination: 20 visible at a time, more revealed on scroll.
+  const PAGE_SIZE = 20;
+  const [runLimit, setRunLimit] = useState(PAGE_SIZE);
+  const [feedLimit, setFeedLimit] = useState(PAGE_SIZE);
 
   const filteredEvents = useMemo(
     () => (typeFilter === "all" ? events : events.filter((e) => e.type === typeFilter)),
     [events, typeFilter],
   );
 
-  const agentName = (id: string) => agents.data?.find((a) => a.id === id)?.name ?? id;
-  const ticketKey = (id: string) => tickets.data?.find((t) => t.id === id)?.key ?? id;
+  function handleRunsScroll(e: React.UIEvent<HTMLDivElement>) {
+    const el = e.currentTarget;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 8) {
+      setRunLimit((n) => Math.min(n + PAGE_SIZE, agentFilteredRuns.length));
+    }
+  }
+
+  function handleFeedScroll(e: React.UIEvent<HTMLDivElement>) {
+    const el = e.currentTarget;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 8) {
+      setFeedLimit((n) => Math.min(n + PAGE_SIZE, filteredEvents.length));
+    }
+  }
+
+  const agentName = (id: string) => {
+    const a = agents.data?.find((x) => x.id === id);
+    return a ? formatAgentName(a.name, a.role) : id;
+  };
+  const agentOf = (id: string | null) => agents.data?.find((x) => x.id === id);
+  const ticketKey = (id: string | null) =>
+    id ? tickets.data?.find((t) => t.id === id)?.key ?? id : "rutinitas";
+
+  const retryFromList = useMutation({
+    mutationFn: (oldRunId: string) => retryRun(oldRunId),
+    onSuccess: (newRun) => {
+      queryClient.invalidateQueries({ queryKey: ["runs"] });
+      queryClient.invalidateQueries({ queryKey: ["tickets", workspace?.id] });
+      setSelectedRunId(newRun.id);
+      toast.success("Retrying — new run started");
+    },
+    onError: (err: unknown) => {
+      toast.error(err instanceof ApiError ? err.message : "Unexpected error");
+    },
+  });
 
   if (workspaces.isLoading) {
     return <p className="px-6 py-10 text-sm text-zinc-500">Loading workspace…</p>;
@@ -102,12 +146,23 @@ export default function ActivityPage() {
   const sortedRuns = [...(runs.data ?? [])].sort((a, b) =>
     (b.started_at ?? "").localeCompare(a.started_at ?? ""),
   );
+  const agentFilteredRuns =
+    agentFilter === "all" ? sortedRuns : sortedRuns.filter((r) => r.agent_id === agentFilter);
+
+  // Auto-open the latest run on page load (unless the user already picked one).
+  const effectiveSelectedRunId = selectedRunId ?? agentFilteredRuns[0]?.id ?? null;
+
+  // Reset the pagination window when the filter changes, so the top of the list
+  // (the newest runs) is always visible first.
+  if (runLimit !== PAGE_SIZE && agentFilteredRuns.length < runLimit) {
+    setRunLimit(PAGE_SIZE);
+  }
 
   return (
     <div className="flex w-full flex-1 flex-col gap-6 px-6 py-10">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">{workspace.name} — Activity</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Activity</h1>
           <p className="mt-1 text-sm text-zinc-500">
             SSE: <span className={sseStatus === "open" ? "text-green-600" : "text-zinc-400"}>{sseStatus}</span>
           </p>
@@ -117,29 +172,88 @@ export default function ActivityPage() {
       <div className="grid flex-1 grid-cols-1 gap-6 lg:grid-cols-[320px_1fr]">
         <div className="flex flex-col gap-4">
           <Card>
-            <CardHeader>
+            <CardHeader className="flex flex-row items-center justify-between gap-2">
               <CardTitle className="text-sm">Runs</CardTitle>
+              <Select value={agentFilter} onValueChange={(v) => setAgentFilter(v ?? "all")}>
+                <SelectTrigger size="sm">
+                  <SelectValue placeholder="All agents" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All agents</SelectItem>
+                  {(agents.data ?? []).map((a) => (
+                    <SelectItem key={a.id} value={a.id}>
+                      {formatAgentName(a.name, a.role)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </CardHeader>
-            <CardContent className="flex max-h-80 flex-col gap-1 overflow-y-auto p-0">
+            <CardContent
+              className="flex max-h-80 flex-col gap-1 overflow-y-auto p-0"
+              onScroll={handleRunsScroll}
+            >
               {runs.isLoading && <p className="px-3 py-2 text-xs text-zinc-500">Loading…</p>}
-              {sortedRuns.length === 0 && (
+              {agentFilteredRuns.length === 0 && (
                 <p className="px-3 py-2 text-xs text-zinc-500">No runs yet.</p>
               )}
-              {sortedRuns.map((r) => (
-                <button
-                  key={r.id}
-                  onClick={() => setSelectedRunId(r.id)}
-                  className={`flex flex-col gap-1 border-b border-black/5 px-3 py-2 text-left text-xs last:border-b-0 hover:bg-zinc-50 dark:border-white/5 dark:hover:bg-zinc-900/40 ${
-                    selectedRunId === r.id ? "bg-zinc-100 dark:bg-zinc-900/60" : ""
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-mono text-zinc-500">{ticketKey(r.ticket_id)}</span>
-                    <Badge variant={RUN_STATUS_VARIANT[r.status] ?? "outline"}>{r.status}</Badge>
+              {agentFilteredRuns.slice(0, runLimit).map((r) => {
+                const retryable = r.status === "failed" || r.status === "interrupted";
+                const retrying = retryFromList.isPending && retryFromList.variables === r.id;
+                return (
+                  <div
+                    key={r.id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setSelectedRunId(r.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") setSelectedRunId(r.id);
+                    }}
+                    className={`flex flex-col gap-1 border-b border-black/5 px-3 py-2 text-left text-xs last:border-b-0 hover:bg-zinc-50 dark:border-white/5 dark:hover:bg-zinc-900/40 ${
+                      effectiveSelectedRunId === r.id ? "bg-zinc-100 dark:bg-zinc-900/60" : ""
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-mono text-zinc-500">{ticketKey(r.ticket_id)}</span>
+                      <div className="flex items-center gap-1">
+                        <Badge variant={RUN_STATUS_VARIANT[r.status] ?? "outline"}>{r.status}</Badge>
+                        {retryable && (
+                          <Button
+                            variant="ghost"
+                            size="xs"
+                            className="h-5 px-1.5 text-[10px]"
+                            disabled={retrying}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              retryFromList.mutate(r.id);
+                            }}
+                          >
+                            {retrying ? "Retrying…" : "Retry"}
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                    <span className="flex items-center gap-1.5 text-zinc-500">
+                      {agentOf(r.agent_id) && (
+                        <AgentAvatar
+                          name={agentOf(r.agent_id)!.name}
+                          template={agentOf(r.agent_id)!.avatar_template}
+                          color={agentOf(r.agent_id)!.avatar_color}
+                          size={16}
+                        />
+                      )}
+                      {agentName(r.agent_id)}
+                    </span>
+                    <span className="text-[10px] text-zinc-400">
+                      {r.started_at ? formatTimestamp(r.started_at, workspace.timezone) : "—"}
+                    </span>
                   </div>
-                  <span className="text-zinc-500">{agentName(r.agent_id)}</span>
-                </button>
-              ))}
+                );
+              })}
+              {agentFilteredRuns.length > runLimit && (
+                <p className="px-3 py-1.5 text-center text-[10px] text-zinc-400">
+                  Scroll untuk lebih banyak…
+                </p>
+              )}
             </CardContent>
           </Card>
 
@@ -160,27 +274,37 @@ export default function ActivityPage() {
                 </SelectContent>
               </Select>
             </CardHeader>
-            <CardContent className="flex max-h-96 flex-col-reverse gap-1 overflow-y-auto p-0">
+            <CardContent
+              className="flex max-h-96 flex-col-reverse gap-1 overflow-y-auto p-0"
+              onScroll={handleFeedScroll}
+            >
               {filteredEvents.length === 0 && (
                 <p className="px-3 py-2 text-xs text-zinc-500">No events yet.</p>
               )}
-              {[...filteredEvents].reverse().map((ev) => (
+              {[...filteredEvents].reverse().slice(0, feedLimit).map((ev) => (
                 <LiveEventRow
                   key={ev.id}
                   event={ev}
                   onClick={() => ev.run_id && setSelectedRunId(ev.run_id)}
                 />
               ))}
+              {filteredEvents.length > feedLimit && (
+                <p className="px-3 py-1.5 text-center text-[10px] text-zinc-400">
+                  Scroll untuk lebih banyak…
+                </p>
+              )}
             </CardContent>
           </Card>
         </div>
 
         <div>
-          {selectedRunId ? (
+          {effectiveSelectedRunId ? (
             <RunDetailPanel
-              runId={selectedRunId}
+              runId={effectiveSelectedRunId}
               agentName={agentName}
+              agentOf={agentOf}
               ticketKey={ticketKey}
+              onRetried={(newRunId) => setSelectedRunId(newRunId)}
             />
           ) : (
             <Card className="flex h-full items-center justify-center">
@@ -229,11 +353,15 @@ function summarizeEvent(event: WorkspaceEvent): string {
 function RunDetailPanel({
   runId,
   agentName,
+  agentOf,
   ticketKey,
+  onRetried,
 }: {
   runId: string;
   agentName: (id: string) => string;
-  ticketKey: (id: string) => string;
+  agentOf: (id: string) => Agent | undefined;
+  ticketKey: (id: string | null) => string;
+  onRetried?: (newRunId: string) => void;
 }) {
   const queryClient = useQueryClient();
   const [extraEvents, setExtraEvents] = useState<RunEvent[]>([]);
@@ -258,6 +386,19 @@ function RunDetailPanel({
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["run", runId] });
       queryClient.invalidateQueries({ queryKey: ["runs"] });
+    },
+    onError: (err: unknown) => {
+      toast.error(err instanceof ApiError ? err.message : "Unexpected error");
+    },
+  });
+
+  const retryMutation = useMutation({
+    mutationFn: () => retryRun(runId),
+    onSuccess: (newRun) => {
+      queryClient.invalidateQueries({ queryKey: ["run", runId] });
+      queryClient.invalidateQueries({ queryKey: ["runs"] });
+      toast.success("Retrying — new run started");
+      onRetried?.(newRun.id);
     },
     onError: (err: unknown) => {
       toast.error(err instanceof ApiError ? err.message : "Unexpected error");
@@ -302,6 +443,7 @@ function RunDetailPanel({
 
   const canLoadMore = events.length > 0 && (events.length === EVENT_PAGE_LIMIT || lastPageFull);
   const canStop = run.status === "running" || run.status === "queued";
+  const canRetry = run.status === "failed" || run.status === "interrupted";
 
   return (
     <Card className="flex h-full flex-col gap-4">
@@ -311,7 +453,15 @@ function RunDetailPanel({
             <span className="font-mono text-sm">{ticketKey(run.ticket_id)}</span>
             <Badge variant={RUN_STATUS_VARIANT[run.status] ?? "outline"}>{run.status}</Badge>
           </CardTitle>
-          <p className="mt-1 text-xs text-zinc-500">
+          <p className="mt-1 flex items-center gap-1.5 text-xs text-zinc-500">
+            {agentOf(run.agent_id) && (
+              <AgentAvatar
+                name={agentOf(run.agent_id)!.name}
+                template={agentOf(run.agent_id)!.avatar_template}
+                color={agentOf(run.agent_id)!.avatar_color}
+                size={16}
+              />
+            )}
             {agentName(run.agent_id)} · {run.model} · {run.tool_kind}
           </p>
         </div>
@@ -323,6 +473,16 @@ function RunDetailPanel({
             onClick={() => stopMutation.mutate()}
           >
             {stopMutation.isPending ? "Stopping…" : "Stop"}
+          </Button>
+        )}
+        {canRetry && (
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={retryMutation.isPending}
+            onClick={() => retryMutation.mutate()}
+          >
+            {retryMutation.isPending ? "Retrying…" : "Retry"}
           </Button>
         )}
       </CardHeader>

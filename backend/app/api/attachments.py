@@ -89,12 +89,21 @@ async def upload_attachment(
 
 
 @attachments_router.get("/{attachment_id}")
-async def download_attachment(attachment_id: str, session: AsyncSession = Depends(get_session)):
+async def download_attachment(
+    attachment_id: str,
+    inline: bool = False,
+    session: AsyncSession = Depends(get_session),
+):
     attachment = await _get_attachment_or_404(session, attachment_id)
     file_path = _storage_dir() / attachment.path
     if not file_path.is_file():
         raise AppError(404, "not_found", "attachment file missing on disk")
-    return FileResponse(file_path, media_type=attachment.content_type, filename=attachment.filename)
+    return FileResponse(
+        file_path,
+        media_type=attachment.content_type,
+        filename=attachment.filename,
+        content_disposition_type="inline" if inline else "attachment",
+    )
 
 
 @attachments_router.delete("/{attachment_id}", status_code=204)

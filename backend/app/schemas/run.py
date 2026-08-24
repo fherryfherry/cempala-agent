@@ -9,11 +9,12 @@ class RunCreate(BaseModel):
 
 class RunOut(BaseModel):
     id: str
-    ticket_id: str
+    ticket_id: str | None
     agent_id: str
     status: str
     trigger: str
     parent_run_id: str | None
+    routine_id: str | None = None
     tool_kind: str
     model: str
     session_id: str | None

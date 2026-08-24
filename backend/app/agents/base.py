@@ -34,7 +34,6 @@ class RunContext:
     guardrails: dict = field(default_factory=dict)
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
 
-
 @dataclass
 class AdapterEvent:
     """Lightweight domain event yielded by an `AgentTool.run()`.

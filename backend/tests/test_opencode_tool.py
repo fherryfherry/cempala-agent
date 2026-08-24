@@ -1,6 +1,8 @@
 """Tests for MAP-020 OpenCodeTool (fake binary as shell script, no real opencode/LLM)."""
 
 import asyncio
+import json
+import os
 import random
 import stat
 import subprocess
@@ -63,6 +65,51 @@ printf '{"type": "tool_result", "output": "ok"}\n'
     assert final.payload["cost"] == pytest.approx(0.01)
 
 
+def test_oversized_line_is_skipped_and_run_continues(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "OPENCODE_STREAM_LIMIT_BYTES", 1024)
+    big = "x" * 8192
+    script = _write_script(
+        tmp_path / "opencode",
+        f"""printf '{{"type": "tool_result", "output": "{big}"}}\\n'
+printf '{{"type": "assistant_text", "text": "after"}}\\n'
+""",
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    events = asyncio.run(_collect(_ctx(tmp_path)))
+
+    errors = [e for e in events if e.type == "error"]
+    assert len(errors) == 1
+    assert "exceeds stream limit" in errors[0].payload["error"]
+    assert [e.type for e in events] == ["error", "assistant_text", "run_ended"]
+    assert events[-1].payload["status"] == "done"
+
+
+def test_oversized_line_does_not_break_surrounding_lines(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "OPENCODE_STREAM_LIMIT_BYTES", 1024)
+    big = "y" * 8192
+    script = _write_script(
+        tmp_path / "opencode",
+        f"""printf '{{"type": "assistant_text", "text": "before"}}\\n'
+printf '{{"type": "tool_result", "output": "{big}"}}\\n'
+printf '{{"type": "assistant_text", "text": "after"}}\\n'
+""",
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    events = asyncio.run(_collect(_ctx(tmp_path)))
+
+    texts = [e.payload.get("text") for e in events if e.type == "assistant_text"]
+    assert texts == ["before", "after"]
+    assert [e.type for e in events] == [
+        "assistant_text",
+        "error",
+        "assistant_text",
+        "run_ended",
+    ]
+    assert events[-1].payload["status"] == "done"
+
+
 def test_binary_not_found_fails_without_crashing(tmp_path):
     ctx = _ctx(tmp_path, repo_path=str(tmp_path))
     # No monkeypatch: OPENCODE_BIN left as an explicitly bogus path via ctx-independent settings.
@@ -118,6 +165,44 @@ exit 1
     assert "boom: something broke" in final.payload["error"]
 
 
+def test_nonzero_exit_strips_ansi_from_stderr(tmp_path, monkeypatch):
+    script = _write_script(
+        tmp_path / "opencode",
+        r"""
+>&2 printf '\033[91m\033[1mError: \033[0mFile not found: whatever\n'
+exit 1
+""",
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    events = asyncio.run(_collect(_ctx(tmp_path)))
+
+    final = events[-1]
+    assert final.payload["status"] == "failed"
+    assert "\x1b" not in final.payload["error"]
+    assert final.payload["error"] == "Error: File not found: whatever"
+
+
+def test_nonzero_exit_truncates_huge_stderr(tmp_path, monkeypatch):
+    script = _write_script(
+        tmp_path / "opencode",
+        r"""
+python3 -c "print('x' * 5000)" 1>&2
+exit 1
+""",
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    events = asyncio.run(_collect(_ctx(tmp_path)))
+
+    final = events[-1]
+    assert final.payload["status"] == "failed"
+    error = final.payload["error"]
+    assert len(error) < 5000
+    assert error.startswith("x" * 100)
+    assert "truncated" in error
+
+
 def test_unknown_event_type_skipped_but_still_run_ended(tmp_path, monkeypatch):
     script = _write_script(
         tmp_path / "opencode",
@@ -160,13 +245,76 @@ python3 -c "import sys, json; print(json.dumps({'type': 'assistant_text', 'text'
     assert "-s sess-prev-1" in assistant.payload["text"]
 
 
-def test_attachment_flags_included(tmp_path, monkeypatch):
+def test_mcp_config_env_and_cleanup(tmp_path, monkeypatch):
+    """MCP wiring (ADR-011): a per-run opencode.json is written, its path is passed
+    via OPENCODE_CONFIG env, and the file is removed when the run finishes."""
     script = _write_script(
         tmp_path / "opencode",
         r"""
-python3 -c "import sys, json; print(json.dumps({'type': 'assistant_text', 'text': ' '.join(sys.argv[1:])}))" "$@"
+python3 -c "import os, json; print(json.dumps({'type': 'assistant_text', 'text': os.environ.get('OPENCODE_CONFIG','')}))" "$@"
 """,
     )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+    monkeypatch.setattr(settings, "MAP_MCP_ENABLED", True)
+
+    ctx = _ctx(tmp_path, workspace_id="ws-mcp", agent_id="agent-mcp")
+    events = asyncio.run(_collect(ctx))
+
+    assistant = next(e for e in events if e.type == "assistant_text")
+    config_path = assistant.payload["text"]
+    assert config_path, "OPENCODE_CONFIG env must be set for the subprocess"
+
+    import json as _json
+
+    # The file is cleaned up after the run — so copy it inside the subprocess first.
+    # Re-run with a script that copies the config before we inspect it.
+    copied = tmp_path / "mcp-config-copy.json"
+    script2 = _write_script(
+        tmp_path / "opencode",
+        f"""
+python3 -c "import os, shutil, json; shutil.copy(os.environ['OPENCODE_CONFIG'], {str(copied)!r}); print(json.dumps({{'type': 'assistant_text', 'text': os.environ.get('OPENCODE_CONFIG','')}}))" "$@"
+""",
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script2)
+    ctx2 = _ctx(tmp_path, workspace_id="ws-mcp", agent_id="agent-mcp")
+    events2 = asyncio.run(_collect(ctx2))
+    assistant2 = next(e for e in events2 if e.type == "assistant_text")
+    path2 = assistant2.payload["text"]
+
+    with open(copied) as f:
+        config = json.load(f)
+    assert "map-tickets" in config["mcp"]
+    assert config["mcp"]["map-tickets"]["env"]["MAP_WORKSPACE_ID"] == "ws-mcp"
+    assert config["mcp"]["map-tickets"]["env"]["MAP_AGENT_ID"] == "agent-mcp"
+
+    # Config file must be cleaned up after the run.
+    assert not os.path.exists(path2)
+    assert not os.path.exists(config_path)
+
+
+def test_mcp_config_disabled_skips_env(tmp_path, monkeypatch):
+    script = _write_script(
+        tmp_path / "opencode",
+        r"""
+python3 -c "import os, json; print(json.dumps({'type': 'assistant_text', 'text': os.environ.get('OPENCODE_CONFIG','NONE')}))" "$@"
+""",
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+    monkeypatch.setattr(settings, "MAP_MCP_ENABLED", False)
+
+    events = asyncio.run(_collect(_ctx(tmp_path)))
+
+    assistant = next(e for e in events if e.type == "assistant_text")
+    assert assistant.payload["text"] == "NONE"
+
+
+_ARGV_ECHO_SCRIPT = r"""
+python3 -c "import sys, json; print(json.dumps({'type': 'assistant_text', 'text': json.dumps(sys.argv[1:])}))" "$@"
+"""
+
+
+def test_attachment_flags_included(tmp_path, monkeypatch):
+    script = _write_script(tmp_path / "opencode", _ARGV_ECHO_SCRIPT)
     monkeypatch.setattr(settings, "OPENCODE_BIN", script)
 
     att1 = str(tmp_path / "a.png")
@@ -175,9 +323,36 @@ python3 -c "import sys, json; print(json.dumps({'type': 'assistant_text', 'text'
     events = asyncio.run(_collect(ctx))
 
     assistant = next(e for e in events if e.type == "assistant_text")
-    text = assistant.payload["text"]
-    assert f"-f {att1}" in text
-    assert f"-f {att2}" in text
+    argv = json.loads(assistant.payload["text"])
+    assert f"--file={att1}" in argv
+    assert f"--file={att2}" in argv
+
+
+def test_prompt_precedes_attachment_flags(tmp_path, monkeypatch):
+    """Regression test: opencode's real CLI parser (yargs) treats both the
+    `message` positional and `--file`/`-f` as array-typed. Once an array-typed
+    flag like `--file` appears on the command line, it keeps consuming every
+    subsequent bare token into its own array — regardless of `--file=value`
+    vs `-f value` form — so a prompt placed *after* `--file` gets swallowed
+    as a "file" instead of becoming the message, and opencode fails with
+    "File not found: <the whole prompt>". Confirmed against the real
+    installed opencode 1.18.18 binary: placing the prompt *before* any
+    `--file` flags fixes it. This fake shell-script binary can't reproduce
+    yargs' parsing itself, but it locks in the argv order our code must keep
+    emitting: the prompt comes before any `--file=...` tokens.
+    """
+    script = _write_script(tmp_path / "opencode", _ARGV_ECHO_SCRIPT)
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    att1 = str(tmp_path / "a.png")
+    ctx = _ctx(tmp_path, attachments=[att1], prompt="do the thing")
+    events = asyncio.run(_collect(ctx))
+
+    assistant = next(e for e in events if e.type == "assistant_text")
+    argv = json.loads(assistant.payload["text"])
+    assert argv.index("do the thing") < argv.index(f"--file={att1}")
+    assert f"--file={att1}" in argv
+    assert not any(token.startswith("-f") and token != f"--file={att1}" for token in argv)
 
 
 def test_cancel_actually_kills_child_process(tmp_path, monkeypatch):

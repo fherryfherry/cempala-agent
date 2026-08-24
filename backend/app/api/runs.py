@@ -7,6 +7,8 @@ in an `asyncio.Task` outside the request/response cycle, using its own DB sessio
 (the request's session closes as soon as the response is sent).
 """
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,9 +20,14 @@ from app.api.workspaces import _get_workspace_or_404
 from app.core import orchestrator
 from app.core.guardrails import GuardrailBlocked
 from app.db import session as db_session
-from app.db.models import Event, Run, Ticket
+from app.db.models import Agent, Event, Routine, Run, Ticket
 from app.db.session import get_session
 from app.schemas.run import EventOut, RunCreate, RunDetail, RunOut
+
+# Run statuses a retry is offered for — the two "stopped without a real terminal
+# report" outcomes. `cancelled` (owner-initiated Stop) and `done` are deliberately
+# excluded: those aren't failures to recover from.
+_RETRYABLE_RUN_STATUSES = frozenset({"failed", "interrupted"})
 
 runs_router = APIRouter(prefix="/runs", tags=["runs"])
 ticket_run_router = APIRouter(prefix="/tickets/{key}/run", tags=["runs"])
@@ -61,6 +68,55 @@ async def start_run(key: str, body: RunCreate, session: AsyncSession = Depends(g
         raise AppError(409, "guardrail_blocked", str(exc))
 
     return run
+
+
+@runs_router.post("/{run_id}/retry", response_model=RunOut, status_code=201)
+async def retry_run(run_id: str, session: AsyncSession = Depends(get_session)):
+    """Re-trigger the same agent on the same ticket a `failed`/`interrupted` run left
+
+    behind. Mechanically identical to pressing "Run" again for that ticket+agent —
+    `orchestrator.execute()`'s session-continuation lookup (status-agnostic) already
+    picks up the old run's `session_id` if one was persisted, so this needs no
+    special-casing to "resume" (docs/02-tsd.md §4.2/§4.5).
+
+    The one thing this endpoint does beyond a plain `schedule()` call: if the ticket
+    is currently `blocked` (the common case after `failed` — see `_block_ticket`
+    call sites in `core/orchestrator.py`), it clears that block the same way
+    `PATCH /tickets/{key}` does when a human moves a ticket off `blocked`
+    (`app/api/tickets.py::update_ticket`) — otherwise stale `handoff_depth`/loop
+    history from *before* the failure could immediately re-trip a guardrail the
+    owner just explicitly asked to move past by clicking Retry.
+    """
+    run = await _get_run_or_404(session, run_id)
+    if run.status not in _RETRYABLE_RUN_STATUSES:
+        raise AppError(
+            409,
+            "not_retryable",
+            f"run {run_id} has status '{run.status}', not failed/interrupted",
+        )
+
+    ticket = await session.get(Ticket, run.ticket_id)
+    agent = await session.get(Agent, run.agent_id)
+
+    if ticket.status == "blocked":
+        ticket.blocked_reason = None
+        ticket.loop_reset_at = datetime.now(timezone.utc)
+        ticket.handoff_depth = 0
+
+    try:
+        new_run = await orchestrator.schedule(
+            session,
+            db_session.async_session,
+            ticket=ticket,
+            agent=agent,
+            trigger="manual",
+        )
+    except RuntimeError as exc:
+        raise AppError(409, "workspace_paused", str(exc))
+    except GuardrailBlocked as exc:
+        raise AppError(409, "guardrail_blocked", str(exc))
+
+    return new_run
 
 
 @runs_router.post("/{run_id}/stop", response_model=RunOut)
@@ -111,8 +167,13 @@ async def list_runs(
 ):
     await _get_workspace_or_404(session, workspace_id)
 
-    stmt = select(Run).join(Ticket, Run.ticket_id == Ticket.id).where(
-        Ticket.workspace_id == workspace_id
+    stmt = (
+        select(Run)
+        .outerjoin(Ticket, Run.ticket_id == Ticket.id)
+        .where(
+            (Ticket.workspace_id == workspace_id)
+            | (Run.routine_id.in_(select(Routine.id).where(Routine.workspace_id == workspace_id)))
+        )
     )
     if status is not None:
         stmt = stmt.where(Run.status == status)

@@ -10,16 +10,22 @@ import {
   attachmentUrl,
   createComment,
   deleteAttachment,
+  formatAgentName,
   getTicket,
   listAgents,
+  listSprints,
   listWorkspaces,
   uploadAttachment,
+  type TicketCategory,
   type TicketPriority,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Markdown } from "@/components/markdown";
+import { AgentAvatar } from "@/components/agent-avatar";
+import { formatTimestamp } from "@/lib/datetime";
 
 const PRIORITY_VARIANT: Record<TicketPriority, "outline" | "secondary" | "destructive" | "default"> = {
   low: "outline",
@@ -27,6 +33,30 @@ const PRIORITY_VARIANT: Record<TicketPriority, "outline" | "secondary" | "destru
   high: "default",
   urgent: "destructive",
 };
+
+const CATEGORY_LABELS: Record<TicketCategory, string> = {
+  feature: "feature",
+  improvement: "improvement",
+  fix: "fix",
+  security: "security",
+  performance: "performance",
+};
+
+const CATEGORY_VARIANT: Record<TicketCategory, "outline" | "secondary" | "destructive" | "default"> = {
+  feature: "default",
+  improvement: "secondary",
+  fix: "destructive",
+  security: "outline",
+  performance: "default",
+};
+
+const UNIT_LABEL: Record<string, string> = { hour: "jam", day: "hari" };
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 export default function TicketDetailPage() {
   const params = useParams<{ key: string; ticketKey: string }>();
@@ -48,8 +78,18 @@ export default function TicketDetailPage() {
     queryFn: () => getTicket(ticketKey),
   });
 
-  const agentName = (id: string | null) =>
-    id ? (agents.data?.find((a) => a.id === id)?.name ?? id) : null;
+  const sprints = useQuery({
+    queryKey: ["sprints", workspace?.id],
+    queryFn: () => listSprints(workspace!.id),
+    enabled: !!workspace,
+  });
+
+  const agentName = (id: string | null) => {
+    const a = agents.data?.find((x) => x.id === id);
+    return a ? formatAgentName(a.name, a.role) : id ? id : null;
+  };
+  const agentOf = (id: string | null) => agents.data?.find((x) => x.id === id);
+  const sprintOf = (id: string | null) => sprints.data?.find((s) => s.id === id);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -101,11 +141,36 @@ export default function TicketDetailPage() {
         <div>
           <p className="font-mono text-xs text-zinc-400">{t.key}</p>
           <h1 className="text-2xl font-semibold tracking-tight">{t.title}</h1>
+          <p className="mt-1 text-xs text-zinc-400">
+            Created {formatTimestamp(t.created_at, workspace.timezone)} · Updated{" "}
+            {formatTimestamp(t.updated_at, workspace.timezone)}
+          </p>
           <div className="mt-2 flex items-center gap-2">
             <Badge variant={PRIORITY_VARIANT[t.priority]}>{t.priority}</Badge>
             <Badge variant="secondary">{t.status}</Badge>
+            {t.category && (
+              <Badge variant={CATEGORY_VARIANT[t.category]}>{CATEGORY_LABELS[t.category]}</Badge>
+            )}
+            {sprintOf(t.sprint_id) && (
+              <Badge variant="outline">{sprintOf(t.sprint_id)!.name}</Badge>
+            )}
+            {t.duration_estimate != null && (
+              <span className="text-xs text-zinc-500">
+                {t.duration_estimate} {UNIT_LABEL[workspace.time_unit] ?? workspace.time_unit}
+              </span>
+            )}
             {agentName(t.assignee_id) && (
-              <span className="text-xs text-zinc-500">{agentName(t.assignee_id)}</span>
+              <span className="flex items-center gap-1.5 text-xs text-zinc-500">
+                {agentOf(t.assignee_id) && (
+                  <AgentAvatar
+                    name={agentOf(t.assignee_id)!.name}
+                    template={agentOf(t.assignee_id)!.avatar_template}
+                    color={agentOf(t.assignee_id)!.avatar_color}
+                    size={16}
+                  />
+                )}
+                {agentName(t.assignee_id)}
+              </span>
             )}
           </div>
         </div>
@@ -121,10 +186,46 @@ export default function TicketDetailPage() {
         <CardHeader>
           <CardTitle className="text-sm">Description</CardTitle>
         </CardHeader>
-        <CardContent className="whitespace-pre-wrap text-sm text-zinc-700 dark:text-zinc-300">
-          {t.description || <span className="text-zinc-400">No description.</span>}
+        <CardContent className="text-sm text-zinc-700 dark:text-zinc-300">
+          {t.description ? (
+            <Markdown>{t.description}</Markdown>
+          ) : (
+            <span className="text-zinc-400">No description.</span>
+          )}
         </CardContent>
       </Card>
+
+      {t.status === "blocked" && (
+        <Card className="border-red-300 bg-red-50 dark:border-red-900 dark:bg-red-950/30">
+          <CardHeader>
+            <CardTitle className="text-sm text-red-700 dark:text-red-400">Blocked reason</CardTitle>
+          </CardHeader>
+          <CardContent className="text-sm text-red-800 dark:text-red-300">
+            {t.blocked_reason ? (
+              <p className="whitespace-pre-wrap">{t.blocked_reason}</p>
+            ) : (
+              <p className="text-red-500">No reason recorded.</p>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {t.parent && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Epic</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <Link
+              href={`/w/${workspaceKey}/ticket/${t.parent.key}`}
+              className="text-sm hover:underline"
+            >
+              <span className="font-mono text-xs text-zinc-400">{t.parent.key}</span>{" "}
+              {t.parent.title}
+            </Link>
+          </CardContent>
+        </Card>
+      )}
 
       {t.children.length > 0 && (
         <Card>
@@ -156,13 +257,18 @@ export default function TicketDetailPage() {
           )}
           {t.attachments.map((a) => (
             <div key={a.id} className="flex items-center justify-between gap-2 text-sm">
-              <a
-                href={attachmentUrl(a.id)}
-                className="truncate hover:underline"
-                download
-              >
-                {a.filename}
-              </a>
+              <div className="flex min-w-0 flex-col gap-0.5">
+                <a
+                  href={attachmentUrl(a.id)}
+                  className="truncate hover:underline"
+                  download
+                >
+                  {a.filename}
+                </a>
+                <span className="text-xs text-zinc-400">
+                  {formatBytes(a.size_bytes)} · {formatTimestamp(a.created_at, workspace.timezone)}
+                </span>
+              </div>
               <Button
                 variant="ghost"
                 size="sm"
@@ -198,6 +304,7 @@ export default function TicketDetailPage() {
       <CommentsSection
         ticketKey={ticketKey}
         workspaceId={workspace.id}
+        timezone={workspace.timezone}
         comments={t.comments}
         agentName={agentName}
       />
@@ -208,11 +315,13 @@ export default function TicketDetailPage() {
 function CommentsSection({
   ticketKey,
   workspaceId,
+  timezone,
   comments,
   agentName,
 }: {
   ticketKey: string;
   workspaceId: string;
+  timezone: string;
   comments: import("@/lib/api").Comment[];
   agentName: (id: string | null) => string | null;
 }) {
@@ -220,6 +329,7 @@ function CommentsSection({
   const agents = useQuery({ queryKey: ["agents", workspaceId], queryFn: () => listAgents(workspaceId) });
   const [body, setBody] = useState("");
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
+  const [visibleCount, setVisibleCount] = useState(15);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const mutation = useMutation({
@@ -239,6 +349,9 @@ function CommentsSection({
           a.name.toLowerCase().startsWith(mentionQuery.toLowerCase()),
         )
       : [];
+  const agentOf = (id: string | null) => agents.data?.find((x) => x.id === id);
+  const visible = comments.slice(-visibleCount);
+  const hiddenCount = comments.length - visible.length;
 
   function handleChange(value: string) {
     setBody(value);
@@ -266,7 +379,16 @@ function CommentsSection({
       <CardContent className="flex flex-col gap-4">
         <div className="flex flex-col gap-3">
           {comments.length === 0 && <p className="text-sm text-zinc-400">No comments yet.</p>}
-          {comments.map((c) => (
+          {hiddenCount > 0 && (
+            <button
+              type="button"
+              className="self-center rounded-md border border-black/10 px-3 py-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:border-white/10 dark:hover:bg-zinc-800"
+              onClick={() => setVisibleCount((n) => n + 15)}
+            >
+              Tampilkan lebih banyak ({hiddenCount} komentar lagi)
+            </button>
+          )}
+          {visible.map((c) => (
             <div
               key={c.id}
               className={
@@ -276,14 +398,22 @@ function CommentsSection({
               }
             >
               <div className="flex items-center justify-between gap-2">
-                <span className="font-medium">
+                <span className="flex items-center gap-1.5 font-medium">
+                  {!c.is_system && agentOf(c.author_agent_id) && (
+                    <AgentAvatar
+                      name={agentOf(c.author_agent_id)!.name}
+                      template={agentOf(c.author_agent_id)!.avatar_template}
+                      color={agentOf(c.author_agent_id)!.avatar_color}
+                      size={16}
+                    />
+                  )}
                   {c.is_system ? "System" : agentName(c.author_agent_id) ?? "Owner"}
                 </span>
                 <span className="text-xs text-zinc-400">
-                  {new Date(c.created_at).toLocaleString()}
+                  {formatTimestamp(c.created_at, timezone)}
                 </span>
               </div>
-              <p className="mt-1 whitespace-pre-wrap">{c.body}</p>
+              <Markdown className="mt-1">{c.body}</Markdown>
               {c.mentions.length > 0 && (
                 <div className="mt-1 flex gap-1">
                   {c.mentions.map((m) => (

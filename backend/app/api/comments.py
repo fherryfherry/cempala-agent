@@ -19,15 +19,38 @@ comments_router = APIRouter(prefix="/tickets/{key}/comments", tags=["comments"])
 # @nama-agent — slug of letters/digits/hyphens, e.g. "@eng-1".
 MENTION_RE = re.compile(r"@([a-zA-Z0-9][a-zA-Z0-9-]*)")
 
+# Owner replies that count as explicit approval of the PM's plan (Bagian B design).
+# Matched against the stripped owner comment, case-insensitive, tolerating the chat's
+# "@pmname " prefix so "oke lanjut" / "Lanjut" / "acc" / "gas" etc. all count.
+APPROVAL_RE = re.compile(
+    r"^\s*(?:@[a-zA-Z0-9][a-zA-Z0-9-]*\s+)?"
+    r"(oke|ok|okay|lanjut|setuju|acc|approved|sip|gas|gass|gaskeun|kerjakan|boleh|silahkan|silakan)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_approval(body: str) -> bool:
+    return bool(APPROVAL_RE.match(body.strip()))
+
 
 @comments_router.get("", response_model=list[CommentOut])
-async def list_comments(key: str, session: AsyncSession = Depends(get_session)):
+async def list_comments(
+    key: str,
+    limit: int | None = None,
+    offset: int = 0,
+    session: AsyncSession = Depends(get_session),
+):
     ticket = await _get_ticket_or_404(session, key)
-    comments = (
-        await session.scalars(
-            select(Comment).where(Comment.ticket_id == ticket.id).order_by(Comment.created_at)
-        )
-    ).all()
+    stmt = (
+        select(Comment)
+        .where(Comment.ticket_id == ticket.id)
+        .order_by(Comment.created_at.desc())  # most recent first
+    )
+    if offset:
+        stmt = stmt.offset(offset)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    comments = (await session.scalars(stmt)).all()
     return [await _to_out(session, c) for c in comments]
 
 
@@ -46,6 +69,21 @@ async def create_comment(key: str, body: CommentCreate, session: AsyncSession = 
     )
     session.add(comment)
     await session.flush()
+
+    # Owner (human) approval of a PM's plan: first explicit approval marks the ticket
+    # as approved, unlocking tickets[] for subsequent PM runs (docs/03-agent-design.md §4).
+    if body.author_agent_id is None and ticket.approved_at is None and _is_approval(body.body.strip()):
+        from datetime import datetime, timezone
+
+        ticket.approved_at = datetime.now(timezone.utc)
+        session.add(
+            Comment(
+                ticket_id=ticket.id,
+                author_agent_id=None,
+                is_system=True,
+                body="Plan disetujui owner — PM boleh membuat sub-tiket.",
+            )
+        )
 
     names = set(MENTION_RE.findall(body.body))
     to_trigger: list[Agent] = []

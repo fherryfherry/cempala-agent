@@ -26,13 +26,28 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
 from typing import AsyncIterator
 
 from app.agents.base import AdapterEvent, RunContext
+from app.agents.mcp_config import mcp_config_path
 from app.config import settings
 
 _KNOWN_EVENT_TYPES = {"assistant_text", "reasoning", "tool_call", "tool_result", "error"}
 _TERMINATE_GRACE_SECONDS = 5
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+_STDERR_MAX_CHARS = 2000
+
+
+def _clean_stderr(text: str) -> str:
+    text = _ANSI_ESCAPE_RE.sub("", text).strip()
+    if len(text) > _STDERR_MAX_CHARS:
+        text = text[:_STDERR_MAX_CHARS] + f"... (truncated, {len(text)} chars total)"
+    return text
 
 
 def _num(value) -> float:
@@ -57,17 +72,37 @@ class OpenCodeTool:
         ]
         if ctx.prev_session_id:
             cmd += ["-s", ctx.prev_session_id]
-        for attachment in ctx.attachments:
-            cmd += ["-f", attachment]
+        # opencode's CLI (yargs) treats `message` and `--file` as array-typed:
+        # once an array-typed flag like `--file` appears, it keeps consuming
+        # subsequent bare tokens into its own array — even in `--file=value`
+        # form — so a prompt placed after `--file` gets swallowed as a
+        # "file" instead of becoming the message (confirmed against the
+        # real 1.18.18 binary). The prompt must come before any `--file`.
         cmd.append(ctx.prompt)
+        for attachment in ctx.attachments:
+            cmd.append(f"--file={attachment}")
+
+        # Per-run MCP config (ADR-011): expose ticket/artifact/memory tools to the
+        # agent via a temp opencode.json. Cleaned up when the run finishes.
+        mcp_config = mcp_config_path(ctx.workspace_id, ctx.agent_id)
+        env = None
+        if mcp_config is not None:
+            env = {**os.environ, "OPENCODE_CONFIG": mcp_config}
 
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=settings.OPENCODE_STREAM_LIMIT_BYTES,
+                env=env,
             )
         except FileNotFoundError:
+            if mcp_config is not None:
+                try:
+                    os.unlink(mcp_config)
+                except OSError:
+                    pass
             yield AdapterEvent(
                 "run_ended",
                 {
@@ -77,6 +112,19 @@ class OpenCodeTool:
             )
             return
 
+        try:
+            async for ev in self._run_stream(proc, ctx):
+                yield ev
+        finally:
+            if mcp_config is not None:
+                try:
+                    os.unlink(mcp_config)
+                except OSError:
+                    pass
+
+    async def _run_stream(
+        self, proc: asyncio.subprocess.Process, ctx: RunContext
+    ) -> AsyncIterator[AdapterEvent]:
         session_id: str | None = None
         tokens_in = 0.0
         tokens_out = 0.0
@@ -85,10 +133,14 @@ class OpenCodeTool:
 
         async def drain_stderr() -> None:
             async for line in proc.stderr:
-                stderr_chunks.append(line)
+                try:
+                    stderr_chunks.append(line)
+                except ValueError:
+                    pass
 
         stderr_task = asyncio.create_task(drain_stderr())
         cancelled = False
+        limit_error_reported = False
 
         try:
             while True:
@@ -104,7 +156,22 @@ class OpenCodeTool:
                     cancelled = True
                     break
                 cancel_task.cancel()
-                line = readline_task.result()
+                try:
+                    line = readline_task.result()
+                except ValueError:
+                    if not limit_error_reported:
+                        limit_error_reported = True
+                        yield AdapterEvent(
+                            "error",
+                            {
+                                "error": (
+                                    "opencode stdout line exceeds stream limit "
+                                    f"({settings.OPENCODE_STREAM_LIMIT_BYTES} bytes); "
+                                    "line skipped, run continues"
+                                )
+                            },
+                        )
+                    continue
                 if not line:
                     break
 
@@ -167,7 +234,7 @@ class OpenCodeTool:
 
         await stderr_task
         returncode = await proc.wait()
-        stderr_text = b"".join(stderr_chunks).decode(errors="replace").strip()
+        stderr_text = _clean_stderr(b"".join(stderr_chunks).decode(errors="replace"))
 
         if returncode != 0:
             yield AdapterEvent(

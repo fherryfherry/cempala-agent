@@ -15,38 +15,88 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import mimetypes
+import uuid
 from collections import defaultdict, deque
 from datetime import datetime, timezone
+from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.base import AdapterEvent, RunContext, TOOLS
-from app.agents.prompts import AgentInfo, CommentInfo, TicketInfo, build_prompt
-from app.api.attachments import _storage_dir
+from app.agents.prompts import (
+    AgentInfo,
+    CommentInfo,
+    TicketInfo,
+    WorkspaceTicketSummary,
+    build_prompt,
+    build_routine_prompt,
+)
+from app.api.attachments import _attachments_dir, _sanitize_filename, _storage_dir
 from app.core.events import event_bus
 from app.core.guardrails import (
     GuardrailBlocked,
     check_guardrails,
+    check_guardrails_routine,
     guardrail_limit,
     over_cost_per_run,
     over_run_timeout,
 )
 from app.core.loop_detector import detect_loop
-from app.core.report import ROLE_ALLOWED_STATUSES, parse_report
-from app.core.state_machine import STATUSES, can_transition
-from app.db.models import Agent, Attachment, Comment, CommentMention, Run, Ticket, Workspace
+from app.core.report import (
+    AGENT_DECLARABLE_STATUSES,
+    ROLES_ALLOWED_TICKETS,
+    ArtifactDraft,
+    ArtifactUpdateDraft,
+    parse_report,
+)
+from app.core.state_machine import ALL_ROLES, STATUSES, can_transition
+from app.db.models import (
+    Agent,
+    AgentMemory,
+    ArtifactGroup,
+    Attachment,
+    Comment,
+    CommentMention,
+    Routine,
+    Run,
+    Sprint,
+    Ticket,
+    Workspace,
+)
 
 # Valid role strings — used for MAP-029's role-not-name mention fallback (see
-# `_resolve_handoff_targets`). Same key set as report.py's per-role status matrix.
-_ROLES = frozenset(ROLE_ALLOWED_STATUSES)
+# `_resolve_handoff_targets`).
+_ROLES = ALL_ROLES
 
 # Statuses that don't expect a follow-up handoff (docs/03-agent-design.md §5/§6): the
 # flow always routes review/qa/security to a specific next reviewer, so only done/blocked
 # count as "final" for the purposes of "no valid mention -> block so it doesn't hang".
-_FINAL_STATUSES = frozenset({"done", "blocked"})
+_FINAL_STATUSES = frozenset({"done", "release", "blocked"})
+
+# Statuses where a report's mentions are informational only — there is no more work to
+# hand off. Deliberately excludes "blocked": an agent reporting blocked *with* a mention
+# is asking that mention to help unblock, which is real forward momentum. Without this,
+# two agents can keep re-confirming an already-"done" ticket to each other forever (each
+# mention scheduling a fresh run with an identical closing report) until the loop
+# detector eventually catches it — a real incident, not a hypothetical.
+_COMPLETION_STATUSES = frozenset({"done", "release"})
 
 _TAIL_CHARS = 2000
+
+# Cap on how many of an agent's own memory notes get injected into its next prompt
+# (docs/05-roadmap.md's hallucination-risk caveat on cross-ticket memory: keep it bounded
+# and verbatim, not open-ended retrieval) — same idea as _PM_CHAT_TICKET_LIST_LIMIT below.
+_AGENT_MEMORY_PROMPT_LIMIT = 20
+
+# Cap on how many artifacts get listed in the prompt's artifact catalog (most recent
+# first) — cheap insurance against unbounded prompt growth on large workspaces.
+_ARTIFACT_CATALOG_LIMIT = 100
+
+# Cap on how many existing epics (top-level tickets) get listed in the ```map contract's
+# reuse catalog — most-recently-updated first, same insurance as _ARTIFACT_CATALOG_LIMIT.
+_EPIC_CATALOG_LIMIT = 100
 
 # run.id -> asyncio.Task, for currently-executing runs (used by the stop endpoint).
 RUNNING: dict[str, asyncio.Task] = {}
@@ -66,6 +116,281 @@ _CANCEL_EVENTS: dict[str, asyncio.Event] = {}
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+async def _get_or_create_sprint(
+    session: AsyncSession,
+    workspace_id: str,
+    name: str,
+    *,
+    goal: str | None = None,
+    duration: float | None = None,
+) -> Sprint:
+    """Get-or-create a Sprint by (workspace, name), case-insensitive.
+
+    Sprints are never created directly by the API for agent flows — PM's ```map
+    `sprints:`/`tickets[].sprint` fields are the only way one comes into being
+    (docs/03-agent-design.md §4). The first sprint ever created for a workspace is
+    bootstrapped `active` so Board/Timeline have something to default to; after
+    that, switching the active sprint is a manual owner/PM action.
+
+    `start_date`/`end_date` are owner/PM-UI-only fields (set via PATCH /sprints/{id},
+    never via a ```map block) and are intentionally left untouched here.
+    """
+    existing = (
+        await session.scalars(select(Sprint).where(Sprint.workspace_id == workspace_id))
+    ).all()
+    for sprint in existing:
+        if sprint.name.strip().lower() == name.strip().lower():
+            if goal:
+                sprint.goal = goal
+            if duration is not None:
+                sprint.duration_estimate = duration
+            return sprint
+
+    next_index = max((s.index for s in existing), default=-1) + 1
+    has_active = any(s.status == "active" for s in existing)
+    sprint = Sprint(
+        workspace_id=workspace_id,
+        name=name,
+        goal=goal,
+        index=next_index,
+        status="planned" if has_active else "active",
+        duration_estimate=duration,
+    )
+    session.add(sprint)
+    await session.flush()
+    return sprint
+
+
+async def _resolve_epic_target(
+    session: AsyncSession, workspace_id: str, epic_key: str | None
+) -> tuple[Ticket | None, str | None]:
+    """Resolve an optional ```map `epic:` key to an existing top-level ticket.
+
+    Returns `(epic_ticket, skip_note)` — exactly one of the pair is non-None-ish:
+    `epic_ticket` set on success, or `skip_note` set (and `epic_ticket` None) when
+    `epic_key` was given but doesn't resolve to a valid epic (unknown key, or a ticket
+    that itself has a parent — the flat 1-level invariant means only a true top-level
+    ticket may be reused as an epic). Both None means `epic_key` was empty — caller
+    falls back to its own default (docs/03-agent-design.md §3).
+    """
+    if not epic_key:
+        return None, None
+    epic = await session.scalar(
+        select(Ticket).where(Ticket.workspace_id == workspace_id, Ticket.key == epic_key)
+    )
+    if epic is None:
+        return None, f"epic '{epic_key}' tidak ditemukan di workspace ini; pakai default"
+    if epic.parent_id is not None:
+        return None, f"'{epic_key}' bukan epic top-level (punya parent sendiri); pakai default"
+    return epic, None
+
+
+async def _get_or_create_artifact_group(
+    session: AsyncSession, workspace_id: str, name: str
+) -> ArtifactGroup:
+    """Get-or-create an ArtifactGroup by (workspace, name), case-insensitive — same pattern as
+
+    `_get_or_create_sprint`. Groups are entirely agent-driven: an agent's ```map `artifacts:`
+    entry names a group freely, reusing an existing one or inventing a new one.
+    """
+    existing = (
+        await session.scalars(select(ArtifactGroup).where(ArtifactGroup.workspace_id == workspace_id))
+    ).all()
+    for group in existing:
+        if group.name.strip().lower() == name.strip().lower():
+            return group
+
+    group = ArtifactGroup(workspace_id=workspace_id, name=name)
+    session.add(group)
+    await session.flush()
+    return group
+
+
+async def _publish_artifacts(
+    session: AsyncSession,
+    workspace: Workspace,
+    ticket: Ticket,
+    artifacts: list[ArtifactDraft],
+) -> tuple[list[dict], list[str]]:
+    """Copy each ```map `artifacts:` entry's declared file into attachment storage.
+
+    Path safety is enforced here (the only place that actually touches the filesystem for this
+    feature): `draft.path` is resolved against `workspace.repo_path` and must stay inside it,
+    since the string comes straight from model output. Files that escape repo_path, don't exist,
+    or aren't regular files are skipped and noted rather than failing the whole report — same
+    tolerance as `updates:`/`tickets:` malformed entries.
+    """
+    published: list[dict] = []
+    skip_notes: list[str] = []
+    repo_root = Path(workspace.repo_path).resolve()
+
+    for draft in artifacts:
+        candidate = (repo_root / draft.path).resolve()
+        if not candidate.is_relative_to(repo_root):
+            skip_notes.append(f"{draft.path}: di luar repo, diabaikan")
+            continue
+        if not candidate.is_file():
+            skip_notes.append(f"{draft.path}: file tidak ditemukan")
+            continue
+        # ponytail: is_file() then read_bytes() below is TOCTOU-able in theory, but the agent
+        # process already has arbitrary code execution inside repo_path for this run's whole
+        # duration (ADR-010) — a swap-to-symlink race here grants nothing it doesn't already
+        # have. Not worth a lock/reopen-by-fd for that non-threat model.
+
+        group = await _get_or_create_artifact_group(session, workspace.id, draft.group)
+
+        dest_dir = _attachments_dir() / ticket.id
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest_path = dest_dir / f"{uuid.uuid4().hex}-{_sanitize_filename(candidate.name)}"
+        data = candidate.read_bytes()
+        dest_path.write_bytes(data)
+
+        content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+        attachment = Attachment(
+            ticket_id=ticket.id,
+            filename=candidate.name,
+            content_type=content_type,
+            size_bytes=len(data),
+            path=str(dest_path.relative_to(_storage_dir())),
+            origin="agent",
+            group_id=group.id,
+            description=draft.description or None,
+        )
+        session.add(attachment)
+        published.append({"path": draft.path, "group": group.name})
+
+    return published, skip_notes
+
+
+async def _persist_memories(
+    session: AsyncSession, agent: Agent, ticket: Ticket | None, notes: list[str]
+) -> list[str]:
+    saved: list[str] = []
+    for note in notes:
+        session.add(
+            AgentMemory(
+                agent_id=agent.id,
+                note=note,
+                origin="agent",
+                source_ticket_key=ticket.key if ticket else None,
+            )
+        )
+        saved.append(note)
+    return saved
+
+
+async def _apply_artifact_updates(
+    session: AsyncSession,
+    workspace_id: str,
+    updates: list[ArtifactUpdateDraft],
+) -> tuple[list[dict], list[str]]:
+    """Execute PM's ```map `artifact_updates:` — organize the Artifacts menu.
+
+    Runs AFTER `_publish_artifacts` in `_finish_run`, so artifacts published by the
+    same report are already in their groups when these operations apply. Semantics:
+    - rename: group -> to. If `to` already exists (case-insensitive), it degrades to a
+      merge (all attachments move into the existing group, source deleted).
+    - merge: from -> into. `into` is get-or-created; `from` is deleted after moving.
+    - move: one attachment (by filename) from `group` to `to` (get-or-created).
+    - delete: only allowed when the group has no attachments left; otherwise rejected.
+    Unknown groups/files are noted and skipped — same tolerance as `updates:`/`tickets:`.
+    Returns (report entries, skip notes) for the system comment and run.report.
+    """
+    report: list[dict] = []
+    skip_notes: list[str] = []
+
+    async def _find_group(name: str) -> ArtifactGroup | None:
+        groups = (
+            await session.scalars(
+                select(ArtifactGroup).where(ArtifactGroup.workspace_id == workspace_id)
+            )
+        ).all()
+        for g in groups:
+            if g.name.strip().lower() == name.strip().lower():
+                return g
+        return None
+
+    async def _get_or_create(name: str) -> ArtifactGroup:
+        existing = await _find_group(name)
+        if existing is not None:
+            return existing
+        group = ArtifactGroup(workspace_id=workspace_id, name=name)
+        session.add(group)
+        await session.flush()
+        return group
+
+    for draft in updates:
+        op = draft.op
+        if op == "rename":
+            group = await _find_group(draft.group)
+            if group is None:
+                skip_notes.append(f"rename: kelompok '{draft.group}' tidak ditemukan")
+                continue
+            target = await _find_group(draft.to)
+            if target is not None and target.id != group.id:
+                # rename onto an existing group -> merge
+                await session.execute(
+                    update(Attachment)
+                    .where(Attachment.group_id == group.id)
+                    .values(group_id=target.id)
+                )
+                await session.delete(group)
+                report.append({"op": "merge", "from": group.name, "into": target.name})
+            else:
+                group.name = draft.to
+                report.append({"op": "rename", "group": draft.group, "to": draft.to})
+        elif op == "merge":
+            source = await _find_group(draft.from_group)
+            if source is None:
+                skip_notes.append(f"merge: kelompok '{draft.from_group}' tidak ditemukan")
+                continue
+            target = await _get_or_create(draft.into)
+            await session.execute(
+                update(Attachment)
+                .where(Attachment.group_id == source.id)
+                .values(group_id=target.id)
+            )
+            await session.delete(source)
+            report.append({"op": "merge", "from": draft.from_group, "into": target.name})
+        elif op == "move":
+            source = await _find_group(draft.group)
+            if source is None:
+                skip_notes.append(f"move: kelompok '{draft.group}' tidak ditemukan")
+                continue
+            attachment = await session.scalar(
+                select(Attachment).where(
+                    Attachment.group_id == source.id, Attachment.filename == draft.file
+                )
+            )
+            if attachment is None:
+                skip_notes.append(
+                    f"move: file '{draft.file}' tidak ditemukan di kelompok '{draft.group}'"
+                )
+                continue
+            target = await _get_or_create(draft.to)
+            attachment.group_id = target.id
+            report.append({"op": "move", "file": draft.file, "from": draft.group, "to": target.name})
+        elif op == "delete":
+            group = await _find_group(draft.group)
+            if group is None:
+                skip_notes.append(f"delete: kelompok '{draft.group}' tidak ditemukan")
+                continue
+            remaining = (
+                await session.scalars(select(Attachment).where(Attachment.group_id == group.id))
+            ).all()
+            if remaining:
+                skip_notes.append(
+                    f"delete: kelompok '{draft.group}' masih berisi {len(remaining)} file, ditolak"
+                )
+                continue
+            await session.delete(group)
+            report.append({"op": "delete", "group": draft.group})
+        else:
+            skip_notes.append(f"op '{op}' tidak dikenal")
+
+    return report, skip_notes
 
 
 async def schedule(
@@ -97,8 +422,16 @@ async def schedule(
 
     guardrails = (workspace.guardrails if workspace else None) or {}
     try:
-        await check_guardrails(session, ticket, guardrails, exclude_run_id=exclude_run_id)
-        cycle = await detect_loop(session, ticket, guardrails, agent.id)
+        await check_guardrails(
+            session,
+            ticket,
+            guardrails,
+            agent_role=agent.role,
+            sprint_creator_roles=workspace.sprint_creator_roles if workspace else [],
+            exclude_run_id=exclude_run_id,
+            trigger=trigger,
+        )
+        cycle = await detect_loop(session, ticket, guardrails, agent.id, trigger=trigger)
         if cycle is not None:
             raise GuardrailBlocked("loop_threshold", cycle)
     except GuardrailBlocked as exc:
@@ -125,6 +458,57 @@ async def schedule(
     session.add(run)
     await session.commit()
     await session.refresh(run)
+
+    async with _LOCK:
+        if agent.id in _BUSY:
+            _PENDING[agent.id].append(run.id)
+        else:
+            _BUSY.add(agent.id)
+            RUNNING[run.id] = asyncio.create_task(_execute_and_advance(session_factory, run.id))
+
+    return run
+
+
+async def schedule_routine_run(
+    session: AsyncSession,
+    session_factory: async_sessionmaker,
+    routine: Routine,
+    agent: Agent,
+) -> Run:
+    """Schedule a routine run (no ticket) — same queue mechanics as `schedule()`.
+
+    Guardrails: only `max_concurrent_runs` applies (routine runs have no ticket, so
+    cost-per-ticket/handoff-depth don't). A guardrail trip leaves the routine at
+    `idle` with `last_run_at` set so the scheduler doesn't retry it every tick.
+    """
+    workspace = await session.get(Workspace, routine.workspace_id)
+    if workspace is not None and workspace.paused:
+        raise RuntimeError("workspace paused")
+
+    guardrails = (workspace.guardrails if workspace else None) or {}
+    try:
+        await check_guardrails_routine(session, workspace.id, guardrails)
+    except GuardrailBlocked as exc:
+        routine.status = "idle"
+        routine.last_run_at = _now()
+        await session.commit()
+        raise
+
+    run = Run(
+        ticket_id=None,
+        agent_id=agent.id,
+        status="queued",
+        trigger="routine",
+        routine_id=routine.id,
+        tool_kind=agent.tool_kind,
+        model=agent.model,
+    )
+    session.add(run)
+    await session.commit()
+    await session.refresh(run)
+
+    routine.status = "waiting"
+    await session.commit()
 
     async with _LOCK:
         if agent.id in _BUSY:
@@ -215,6 +599,7 @@ async def _block_ticket(
     if ticket.status != "blocked":
         old_status = ticket.status
         ticket.status = "blocked"
+        ticket.blocked_reason = reason_body
         if run_id is not None and workspace_id is not None:
             await event_bus.publish(
                 session,
@@ -257,11 +642,15 @@ async def recover_interrupted_runs(session_factory: async_sessionmaker) -> int:
         now = _now()
         agent_ids: set[str] = set()
         runs_by_ticket: dict[str, list[Run]] = defaultdict(list)
+        routine_ids: set[str] = set()
         for run in runs:
             run.status = "interrupted"
             run.ended_at = now
             agent_ids.add(run.agent_id)
-            runs_by_ticket[run.ticket_id].append(run)
+            if run.ticket_id is not None:
+                runs_by_ticket[run.ticket_id].append(run)
+            if run.routine_id is not None:
+                routine_ids.add(run.routine_id)
 
         if agent_ids:
             agents = await session.execute(select(Agent).where(Agent.id.in_(agent_ids)))
@@ -276,6 +665,11 @@ async def recover_interrupted_runs(session_factory: async_sessionmaker) -> int:
             )
             await _write_system_comment(session, ticket_id, body)
 
+        if routine_ids:
+            routines = await session.execute(select(Routine).where(Routine.id.in_(routine_ids)))
+            for routine in routines.scalars():
+                routine.status = "idle"
+
         await session.commit()
         return len(runs)
 
@@ -285,28 +679,28 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
         run = await session.get(Run, run_id)
         if run is None:
             return
-        ticket = await session.get(Ticket, run.ticket_id)
+        ticket = await session.get(Ticket, run.ticket_id) if run.ticket_id else None
         agent = await session.get(Agent, run.agent_id)
-        workspace = await session.get(Workspace, ticket.workspace_id)
+        if ticket is not None:
+            workspace = await session.get(Workspace, ticket.workspace_id)
+        else:
+            routine = await session.get(Routine, run.routine_id) if run.routine_id else None
+            workspace = await session.get(Workspace, routine.workspace_id) if routine else None
 
         try:
             run.status = "running"
             run.started_at = _now()
             agent.status = "working"
             auto_transition_old_status: str | None = None
-            if ticket.status in ("backlog", "todo"):
+            if ticket is not None and ticket.status in ("backlog", "todo"):
                 # docs/03-agent-design.md §5: "todo -> in_progress | otomatis saat run
                 # dimulai, owner" — a system-driven transition (like _block_ticket's
-                # any -> blocked), not routed through can_transition's role matrix,
-                # which deliberately has no agent-role entry for this pair (see
-                # state_machine.py and test_state_machine.py's
-                # test_owner_may_do_todo_to_in_progress). Needed so MAP-030's
-                # auto-scheduled tickets[] children (created at status="todo") can run
-                # to completion without a human PATCH in between. Also covers a ticket
-                # still at "backlog" (never manually moved to todo first) — found via
-                # real dogfooding: a ticket created and run immediately has no
-                # (backlog, in_progress) entry in can_transition for any role, so its
-                # otherwise-valid report would get bounced.
+                # any -> blocked), not attributable to any agent role, so it bypasses
+                # can_transition entirely rather than going through it as some role.
+                # Needed so MAP-030's auto-scheduled tickets[] children (created at
+                # status="todo") can run to completion without a human PATCH in
+                # between. Also covers a ticket still at "backlog" (never manually
+                # moved to todo first).
                 auto_transition_old_status = ticket.status
                 ticket.status = "in_progress"
                 # Event publishing is deferred until after run_started below (kept
@@ -315,7 +709,11 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
                 # doesn't depend on that ordering, only the SSE/event-bus fan-out does.
             await session.commit()
 
-            prompt = await _build_prompt_for(session, workspace, agent, ticket, run.trigger)
+            if ticket is not None:
+                prompt = await _build_prompt_for(session, workspace, agent, ticket, run.trigger)
+            else:
+                routine = await session.get(Routine, run.routine_id)
+                prompt = await _build_routine_prompt_for(session, workspace, agent, routine)
 
             await event_bus.publish(
                 session,
@@ -353,13 +751,13 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
                 await session.scalars(
                     select(Attachment).where(Attachment.ticket_id == ticket.id)
                 )
-            ).all()
+            ).all() if ticket else []
             attachment_paths = [str(_storage_dir() / a.path) for a in attachments]
 
             prev_run = await session.scalar(
                 select(Run)
                 .where(
-                    Run.ticket_id == ticket.id,
+                    Run.ticket_id == ticket.id if ticket else False,
                     Run.agent_id == agent.id,
                     Run.id != run.id,
                     Run.session_id.is_not(None),
@@ -373,7 +771,7 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
                 workspace_id=workspace.id,
                 agent_id=agent.id,
                 agent_model=agent.model,
-                ticket_id=ticket.id,
+                ticket_id=ticket.id if ticket else None,
                 repo_path=workspace.repo_path,
                 prompt=prompt,
                 attachments=attachment_paths,
@@ -444,19 +842,24 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
         except Exception as exc:  # noqa: BLE001 - must never leave run/agent stuck
             await session.rollback()
             run = await session.get(Run, run_id)
-            ticket = await session.get(Ticket, run.ticket_id)
+            ticket = await session.get(Ticket, run.ticket_id) if run.ticket_id else None
             agent = await session.get(Agent, run.agent_id)
             run.status = "failed"
             run.error = str(exc)
             run.ended_at = _now()
-            await _block_ticket(
-                session,
-                ticket,
-                agent,
-                f"Run gagal karena error internal: {exc}",
-                run_id=run.id,
-                workspace_id=ticket.workspace_id,
-            )
+            if ticket is not None:
+                await _block_ticket(
+                    session,
+                    ticket,
+                    agent,
+                    f"Run gagal karena error internal: {exc}",
+                    run_id=run.id,
+                    workspace_id=ticket.workspace_id,
+                )
+            else:
+                routine = await session.get(Routine, run.routine_id) if run.routine_id else None
+                if routine is not None:
+                    routine.status = "idle"
             agent.status = "idle"
             await session.commit()
         finally:
@@ -467,11 +870,42 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
 # owner brainstorm conversationally before committing to a tickets[] breakdown, since
 # the parser already treats a same-status "in_progress" report with no tickets[] as a
 # no-op (MAP-030) — this is purely a prompt hint, no parser/state-machine change needed.
+# The structural gate (no tickets[] before the owner approves) lives in report.py's
+# ticket_approved flag; this text makes the expected behavior explicit to the model.
 _PM_MENTION_EXTRA_INSTRUCTIONS = (
-    "Ini pesan langsung dari owner (bukan run otomatis). Kalau idenya belum cukup jelas "
-    "buat dipecah jadi tickets[], BOLEH balas cuma dengan pertanyaan klarifikasi di "
-    "summary, status: in_progress, TANPA tickets[] — lanjutkan obrolan sampai kamu "
-    "cukup yakin baru pecah jadi sub-tiket."
+    "Ini pesan langsung dari owner (bukan run otomatis). "
+    "ATURAN WAJIB: JANGAN pernah langsung membuat tickets[] di balasan pertama atau "
+    "sebelum owner secara eksplisit menyetujui. Kamu WAJIB bersikap eksploratif dulu: "
+    "gali informasi yang detail dari owner (tujuan, lingkup, kriteria sukses, batasan, "
+    "asumsi yang belum jelas) — tapi jangan berlebihan, cukup yang relevan. Kalau "
+    "idenya belum cukup jelas, balas dengan pertanyaan klarifikasi: status: "
+    "in_progress, TANPA tickets[]. "
+    "Kalau sudah cukup jelas, TAWARKAN FINAL PLAN dulu di summary (status: "
+    "in_progress, TANPA tickets[]) dan minta owner menyetujui — misalnya 'balas "
+    "\"oke lanjut\" untuk menyetujui'. FINAL PLAN ini WAJIB berisi PERSIS LIMA bagian, "
+    "ditulis satu-satu supaya owner mudah membaca sebelum approve: "
+    "(1) Requirement — ringkasan permintaan owner dengan bahasamu sendiri, bukan "
+    "copy-paste chat; "
+    "(2) Goal — tujuan/hasil akhir yang ingin dicapai; "
+    "(3) Epic tujuan — cek katalog epic yang sudah ada di kontrak ```map di bawah; "
+    "WAJIB sebutkan epic mana yang relevan (reuse) kalau ada, atau nyatakan 'epic "
+    "baru: <nama>' HANYA kalau ini benar-benar area fitur besar baru; "
+    "(4) Breakdown sprint — jadi berapa sprint, dan goal singkat tiap sprint (BUKAN "
+    "nama fitur — sprint cuma timebox, nama fitur/scope itu urusan epic di poin 3); "
+    "(5) Estimasi durasi — total dan/atau per sprint, dihitung realistis untuk "
+    "kecepatan kerja agent AI (jauh lebih cepat dari estimasi tim manusia) — jangan "
+    "menyalin rule-of-thumb durasi sprint manusia (mis. '2 minggu per sprint'). "
+    "Kamu juga BOLEH chat owner duluan kapan pun di tengah perjalanan kalau ada hal "
+    "yang butuh klarifikasi. "
+    "Hanya setelah owner menyetujui barulah balasan berikutnya boleh membawa "
+    "tickets[] — sertakan juga `sprints:` (goal & durasi tiap sprint, BUKAN nama "
+    "fitur) dan, di tiap item tickets[], `epic`/`sprint`/`duration` sesuai kontrak "
+    "di bawah (epic yang sudah dijanjikan di FINAL PLAN wajib konsisten dengan "
+    "`epic:` yang benar-benar ditulis di tickets[]). "
+    "Kamu juga bisa melihat daftar tiket LAIN di workspace ini di bawah (bagian "
+    "'Tiket lain di workspace ini') — kalau owner minta kamu review/rapikan sprint "
+    "tiket-tiket yang sudah ada, gunakan `updates:` dengan field `sprint`/`duration` "
+    "per tiket untuk memindahkan/memperbaikinya (tidak perlu tickets[] baru untuk ini)."
 )
 
 
@@ -544,6 +978,93 @@ async def _build_prompt_for(
         _PM_MENTION_EXTRA_INSTRUCTIONS if agent.role == "pm" and trigger == "mention" else None
     )
 
+    workspace_tickets: list[WorkspaceTicketSummary] = []
+    if agent.role == "pm" and trigger == "mention":
+        workspace_tickets = await _workspace_ticket_summaries(session, workspace.id, ticket.id)
+
+    # Existing artifact group names (Artifacts menu) so the agent reuses a relevant
+    # group instead of inventing near-duplicate names.
+    artifact_groups = (
+        await session.scalars(
+            select(ArtifactGroup).where(ArtifactGroup.workspace_id == workspace.id)
+        )
+    ).all()
+    existing_artifact_groups = sorted({g.name for g in artifact_groups})
+
+    # Artifact catalog (Artifacts menu) so every agent can read/search what's already
+    # been published before producing new files — most recent first, bounded.
+    catalog_rows = (
+        await session.execute(
+            select(Attachment, Ticket.key, ArtifactGroup.name)
+            .join(Ticket, Attachment.ticket_id == Ticket.id)
+            .outerjoin(ArtifactGroup, Attachment.group_id == ArtifactGroup.id)
+            .where(Ticket.workspace_id == workspace.id, Attachment.origin == "agent")
+            .order_by(Attachment.created_at.desc())
+            .limit(_ARTIFACT_CATALOG_LIMIT)
+        )
+    ).all()
+    artifact_catalog = [
+        f"[{group_name or 'Ungrouped'}] {a.filename} ({ticket_key})"
+        + (f" — {a.description}" if a.description else "")
+        for a, ticket_key, group_name in catalog_rows
+    ]
+
+    # Existing epics (top-level tickets) so PM/QA/Pentester reuse a relevant one via
+    # `tickets[].epic` instead of spawning a fresh one-off epic every time
+    # (docs/03-agent-design.md §3) — only computed for roles that can declare tickets[]
+    # at all. Existing sprints (pure timeboxes, decoupled from epic/scope) so the same
+    # roles reuse a sprint name exactly instead of drifting into near-duplicates.
+    existing_epics: list[str] = []
+    existing_sprints: list[str] = []
+    if agent.role in ROLES_ALLOWED_TICKETS:
+        epic_rows = (
+            await session.scalars(
+                select(Ticket)
+                .where(Ticket.workspace_id == workspace.id, Ticket.parent_id.is_(None))
+                .order_by(Ticket.updated_at.desc())
+                .limit(_EPIC_CATALOG_LIMIT)
+            )
+        ).all()
+        existing_epics = [f"{e.key} — {e.title}" for e in epic_rows]
+
+        sprint_rows = (
+            await session.scalars(select(Sprint).where(Sprint.workspace_id == workspace.id))
+        ).all()
+        existing_sprints = sorted({s.name for s in sprint_rows})
+
+    # This agent's own cross-ticket memory notes (```map `memory:`, docs/03-agent-design.md
+    # §3) — most recent N, re-ordered chronologically like `previous_summaries` above.
+    memory_rows = (
+        await session.scalars(
+            select(AgentMemory)
+            .where(AgentMemory.agent_id == agent.id)
+            .order_by(AgentMemory.created_at.desc())
+            .limit(_AGENT_MEMORY_PROMPT_LIMIT)
+        )
+    ).all()
+    agent_memories = [m.note for m in reversed(memory_rows)]
+
+    # Workspace description (set at creation, on the homepage form): project/product context
+    # shown to every agent, same mechanism as workflow_prompt below. Empty by default.
+    if workspace.description and workspace.description.strip():
+        description_block = f"Konteks proyek/workspace ini:\n\n{workspace.description.strip()}"
+        extra_instructions = (
+            f"{extra_instructions}\n\n{description_block}"
+            if extra_instructions
+            else description_block
+        )
+
+    # Workspace workflow prompt (Settings page): appended to every agent prompt as an
+    # additional instruction block, before the ```map contract. Empty by default, so
+    # behavior is unchanged unless the owner configured one.
+    if workspace.workflow_prompt and workspace.workflow_prompt.strip():
+        workflow_block = f"Ini alur kerja tim yang ditentukan owner workspace. Ikuti:\n\n{workspace.workflow_prompt.strip()}"
+        extra_instructions = (
+            f"{extra_instructions}\n\n{workflow_block}"
+            if extra_instructions
+            else workflow_block
+        )
+
     return build_prompt(
         agent_info,
         workspace.repo_path,
@@ -555,13 +1076,461 @@ async def _build_prompt_for(
         review_round=review_round,
         previous_review_feedback=previous_review_feedback,
         extra_instructions=extra_instructions,
+        time_unit=workspace.time_unit,
+        workspace_tickets=workspace_tickets,
+        existing_artifact_groups=existing_artifact_groups,
+        agent_memories=agent_memories,
+        artifact_catalog=artifact_catalog,
+        sprint_creator_roles=set(workspace.sprint_creator_roles or ["pm"]),
+        existing_epics=existing_epics,
+        existing_sprints=existing_sprints,
     )
+
+
+async def _build_routine_prompt_for(
+    session, workspace: Workspace, agent: Agent, routine: Routine
+) -> str:
+    """Assemble a routine-run prompt: BASE + role block + routine prompt + workspace
+    context (description/workflow) + artifact catalog + agent memory + routine ```map
+    contract. No ticket context — the routine's own prompt is the task.
+    """
+    roster = (
+        await session.scalars(select(Agent).where(Agent.workspace_id == workspace.id))
+    ).all()
+    team_roster = [AgentInfo(name=a.name, role=a.role) for a in roster]
+    agent_info = AgentInfo(name=agent.name, role=agent.role, system_prompt=agent.system_prompt)
+
+    # Artifact catalog (Artifacts menu) so the agent can read/search what's published.
+    catalog_rows = (
+        await session.execute(
+            select(Attachment, Ticket.key, ArtifactGroup.name)
+            .join(Ticket, Attachment.ticket_id == Ticket.id)
+            .outerjoin(ArtifactGroup, Attachment.group_id == ArtifactGroup.id)
+            .where(Ticket.workspace_id == workspace.id, Attachment.origin == "agent")
+            .order_by(Attachment.created_at.desc())
+            .limit(_ARTIFACT_CATALOG_LIMIT)
+        )
+    ).all()
+    artifact_catalog = [
+        f"[{group_name or 'Ungrouped'}] {a.filename} ({ticket_key})"
+        + (f" — {a.description}" if a.description else "")
+        for a, ticket_key, group_name in catalog_rows
+    ]
+
+    # This agent's own cross-ticket memory notes.
+    memory_rows = (
+        await session.scalars(
+            select(AgentMemory)
+            .where(AgentMemory.agent_id == agent.id)
+            .order_by(AgentMemory.created_at.desc())
+            .limit(_AGENT_MEMORY_PROMPT_LIMIT)
+        )
+    ).all()
+    agent_memories = [m.note for m in reversed(memory_rows)]
+
+    # Same epic/sprint reuse catalogs as ticket runs (docs/03-agent-design.md §3).
+    existing_epics: list[str] = []
+    existing_sprints: list[str] = []
+    if agent.role in ROLES_ALLOWED_TICKETS:
+        epic_rows = (
+            await session.scalars(
+                select(Ticket)
+                .where(Ticket.workspace_id == workspace.id, Ticket.parent_id.is_(None))
+                .order_by(Ticket.updated_at.desc())
+                .limit(_EPIC_CATALOG_LIMIT)
+            )
+        ).all()
+        existing_epics = [f"{e.key} — {e.title}" for e in epic_rows]
+
+        sprint_rows = (
+            await session.scalars(select(Sprint).where(Sprint.workspace_id == workspace.id))
+        ).all()
+        existing_sprints = sorted({s.name for s in sprint_rows})
+
+    extra_instructions: str | None = None
+    if workspace.description and workspace.description.strip():
+        extra_instructions = f"Konteks proyek/workspace ini:\n\n{workspace.description.strip()}"
+    if workspace.workflow_prompt and workspace.workflow_prompt.strip():
+        workflow_block = f"Ini alur kerja tim yang ditentukan owner workspace. Ikuti:\n\n{workspace.workflow_prompt.strip()}"
+        extra_instructions = (
+            f"{extra_instructions}\n\n{workflow_block}"
+            if extra_instructions
+            else workflow_block
+        )
+
+    return build_routine_prompt(
+        agent_info,
+        workspace.repo_path,
+        team_roster,
+        routine_prompt=routine.prompt,
+        extra_instructions=extra_instructions,
+        agent_memories=agent_memories,
+        artifact_catalog=artifact_catalog,
+        sprint_creator_roles=set(workspace.sprint_creator_roles or ["pm"]),
+        existing_epics=existing_epics,
+        existing_sprints=existing_sprints,
+    )
+
+
+# Cap on how many other-tickets get listed in a PM owner-chat prompt (see
+# _workspace_ticket_summaries) — cheap insurance against unbounded prompt growth on
+# large workspaces; most-recently-updated tickets are the ones most likely relevant.
+_PM_CHAT_TICKET_LIST_LIMIT = 60
+
+
+async def _workspace_ticket_summaries(
+    session: AsyncSession, workspace_id: str, exclude_ticket_id: str
+) -> list[WorkspaceTicketSummary]:
+    """Snapshot of the rest of the workspace's tickets for PM's owner-chat prompt
+
+    (see _PM_MENTION_EXTRA_INSTRUCTIONS) so it can review/fix sprint assignment
+    across existing tickets, not just the one it's currently chatting on.
+    """
+    sprints = (
+        await session.scalars(select(Sprint).where(Sprint.workspace_id == workspace_id))
+    ).all()
+    sprint_names = {s.id: s.name for s in sprints}
+
+    tickets = (
+        await session.scalars(
+            select(Ticket)
+            .where(Ticket.workspace_id == workspace_id, Ticket.id != exclude_ticket_id)
+            .order_by(Ticket.updated_at.desc())
+            .limit(_PM_CHAT_TICKET_LIST_LIMIT)
+        )
+    ).all()
+    return [
+        WorkspaceTicketSummary(
+            key=t.key,
+            title=t.title,
+            status=t.status,
+            priority=t.priority,
+            sprint_name=sprint_names.get(t.sprint_id),
+        )
+        for t in tickets
+    ]
+
+
+async def _finish_routine_run(
+    session: AsyncSession,
+    run: Run,
+    agent: Agent,
+    terminal: AdapterEvent | None,
+    accumulated_text: str,
+    guardrail_cancel_reason: str | None = None,
+) -> None:
+    """Finish a routine run (no ticket): parse the ```map block and execute its
+    side-effect actions (comments/tickets/updates/memory/artifacts) — never a status
+    transition, handoff, or block. The routine's own status is synced back to `idle`.
+    """
+    routine = await session.get(Routine, run.routine_id) if run.routine_id else None
+    workspace_id = routine.workspace_id if routine else None
+
+    if terminal is None:
+        run.status = "failed"
+        run.error = "adapter finished without a run_ended event"
+        run.ended_at = _now()
+        if routine is not None:
+            routine.status = "idle"
+        agent.status = "idle"
+        await session.commit()
+        return
+
+    status = terminal.payload.get("status")
+    run.session_id = terminal.payload.get("session_id") or run.session_id
+    run.tokens_in = int(terminal.payload.get("tokens_in") or 0)
+    run.tokens_out = int(terminal.payload.get("tokens_out") or 0)
+    run.cost = float(terminal.payload.get("cost") or 0.0)
+    run.ended_at = _now()
+
+    if status == "cancelled":
+        run.status = "cancelled"
+        if guardrail_cancel_reason is not None:
+            run.error = guardrail_cancel_reason
+        if routine is not None:
+            routine.status = "idle"
+        agent.status = "idle"
+        await session.commit()
+        return
+
+    if status == "failed":
+        run.status = "failed"
+        run.error = terminal.payload.get("error") or "run failed"
+        if routine is not None:
+            routine.status = "idle"
+        agent.status = "idle"
+        await session.commit()
+        return
+
+    valid_names = {
+        a.name
+        for a in (
+            await session.scalars(
+                select(Agent).where(Agent.workspace_id == workspace_id)
+            )
+        ).all()
+    }
+    workspace = await session.get(Workspace, workspace_id)
+    parsed = parse_report(
+        accumulated_text,
+        agent.role,
+        valid_names,
+        actor_name=agent.name,
+        ticket_approved=True,
+        sprint_creator_roles=set((workspace.sprint_creator_roles if workspace else None) or ["pm"]),
+        routine_mode=True,
+    )
+
+    if not parsed.ok:
+        run.status = "failed"
+        run.error = parsed.reason
+        run.report = None
+        tail = accumulated_text[-_TAIL_CHARS:]
+        if routine is not None:
+            routine.status = "idle"
+        agent.status = "idle"
+        await session.commit()
+        return
+
+    # `comments:` — routine-only: comment on other tickets (author = this agent).
+    comments_report: list[dict] = []
+    comment_skip_notes: list[str] = []
+    for draft in parsed.comments:
+        target = await session.scalar(
+            select(Ticket).where(
+                Ticket.workspace_id == workspace_id, Ticket.key == draft.ticket_key
+            )
+        )
+        if target is None:
+            comment_skip_notes.append(f"{draft.ticket_key}: tiket tidak ditemukan di workspace ini")
+            continue
+        comment = Comment(
+            ticket_id=target.id, author_agent_id=agent.id, is_system=False, body=draft.body
+        )
+        session.add(comment)
+        await session.flush()
+        await event_bus.publish(
+            session,
+            run_id=run.id,
+            workspace_id=workspace_id,
+            type="comment",
+            payload={
+                "ticket_id": target.id,
+                "ticket_key": target.key,
+                "is_system": False,
+                "author": agent.name,
+                "body_preview": _comment_preview(draft.body),
+            },
+        )
+        comments_report.append({"ticket": draft.ticket_key, "applied": True})
+
+    if comment_skip_notes:
+        run.error = "; ".join(comment_skip_notes)
+
+    # `updates:` — same semantics as ticket runs (modify other tickets' fields).
+    _VALID_PRIORITIES = {"low", "medium", "high", "urgent"}
+    updates_report: list[dict] = []
+    source_skip_notes: list[str] = []
+    for draft in parsed.updates:
+        target = await session.scalar(
+            select(Ticket).where(
+                Ticket.workspace_id == workspace_id, Ticket.key == draft.ticket_key
+            )
+        )
+        if target is None:
+            source_skip_notes.append(f"{draft.ticket_key}: tiket tidak ditemukan di workspace ini")
+            continue
+
+        applied: list[str] = []
+        skipped: list[str] = []
+
+        if draft.status is not None:
+            if draft.status not in STATUSES:
+                skipped.append(f"status '{draft.status}' tidak dikenal")
+            elif draft.status not in AGENT_DECLARABLE_STATUSES:
+                skipped.append(
+                    f"status '{draft.status}' hanya bisa diset manual oleh owner, bukan lewat "
+                    "laporan agent"
+                )
+            else:
+                allowed, reason = can_transition(target.status, draft.status, agent.role)
+                if not allowed:
+                    skipped.append(f"status -> {draft.status} ditolak: {reason}")
+                else:
+                    target_old_status = target.status
+                    target.status = draft.status
+                    applied.append(f"status → {draft.status}")
+                    await event_bus.publish(
+                        session,
+                        run_id=run.id,
+                        workspace_id=workspace_id,
+                        type="status_change",
+                        payload={
+                            "ticket_id": target.id,
+                            "ticket_key": target.key,
+                            "from": target_old_status,
+                            "to": draft.status,
+                            "actor": agent.name,
+                        },
+                    )
+
+        if draft.priority is not None:
+            if draft.priority not in _VALID_PRIORITIES:
+                skipped.append(f"priority '{draft.priority}' tidak valid")
+            else:
+                target.priority = draft.priority
+                applied.append(f"priority → {draft.priority}")
+
+        if draft.assignee is not None:
+            assignee_agent = await session.scalar(
+                select(Agent).where(
+                    Agent.workspace_id == target.workspace_id, Agent.name == draft.assignee
+                )
+            )
+            if assignee_agent is None:
+                skipped.append(f"assignee '{draft.assignee}' tidak ditemukan")
+            else:
+                target.assignee_id = assignee_agent.id
+                applied.append(f"assignee → {assignee_agent.name}")
+
+        if draft.sprint is not None:
+            sprint = await _get_or_create_sprint(session, target.workspace_id, draft.sprint)
+            target.sprint_id = sprint.id
+            applied.append(f"sprint → {sprint.name}")
+
+        if draft.duration is not None:
+            target.duration_estimate = draft.duration
+            applied.append(f"duration → {draft.duration}")
+
+        if applied:
+            await _write_system_comment(
+                session,
+                target.id,
+                f"Diperbarui oleh {agent.name} lewat rutinitas: " + ", ".join(applied),
+                ticket_key=target.key,
+                run_id=run.id,
+                workspace_id=workspace_id,
+            )
+        for s in skipped:
+            source_skip_notes.append(f"{draft.ticket_key}: {s}")
+
+        updates_report.append({"ticket": draft.ticket_key, "applied": applied, "skipped": skipped})
+
+    if source_skip_notes:
+        run.error = "; ".join(source_skip_notes)
+
+    # `tickets[]` without a parent -> backlog tickets (todo, NOT auto-scheduled).
+    tickets_report: list[dict] = []
+    if parsed.tickets:
+        from app.api.tickets import _next_key  # reuse the same atomic-counter key logic
+
+        for sprint_draft in parsed.sprints:
+            await _get_or_create_sprint(
+                session,
+                workspace_id,
+                sprint_draft.name,
+                goal=sprint_draft.goal,
+                duration=sprint_draft.duration,
+            )
+
+        routine_epic_skip_notes: list[str] = []
+        for draft in parsed.tickets:
+            assignee_id = None
+            if draft.assignee:
+                assignee_agent = await session.scalar(
+                    select(Agent).where(
+                        Agent.workspace_id == workspace_id, Agent.name == draft.assignee
+                    )
+                )
+                assignee_id = assignee_agent.id if assignee_agent else None
+            sprint_id = None
+            if draft.sprint:
+                sprint = await _get_or_create_sprint(session, workspace_id, draft.sprint)
+                sprint_id = sprint.id
+
+            # Same epic resolution as ticket runs (docs/03-agent-design.md §3) — a
+            # routine has no "current ticket" to fall back to, so an unresolved/absent
+            # `epic:` just keeps the old default (top-level, i.e. a fresh epic).
+            epic_target, epic_skip_note = await _resolve_epic_target(
+                session, workspace_id, draft.epic
+            )
+            if epic_skip_note:
+                routine_epic_skip_notes.append(epic_skip_note)
+
+            child = Ticket(
+                workspace_id=workspace_id,
+                key=await _next_key(session, workspace),
+                title=draft.title,
+                description=draft.description,
+                status="todo",
+                priority=draft.priority,
+                assignee_id=assignee_id,
+                parent_id=epic_target.id if epic_target is not None else None,
+                category=draft.category,
+                sprint_id=sprint_id,
+                duration_estimate=draft.duration,
+            )
+            session.add(child)
+            await session.flush()
+            await event_bus.publish(
+                session,
+                run_id=run.id,
+                workspace_id=workspace_id,
+                type="status_change",
+                payload={
+                    "ticket_id": child.id,
+                    "ticket_key": child.key,
+                    "ticket_title": child.title,
+                    "from": None,
+                    "to": "todo",
+                    "actor": agent.name,
+                },
+            )
+            tickets_report.append({"title": draft.title, "key": child.key})
+        if routine_epic_skip_notes:
+            run.error = "Beberapa epic tujuan diabaikan: " + "; ".join(routine_epic_skip_notes)
+
+    # `artifacts:` — needs a ticket (attachment FK + storage folder), so routine runs
+    # can't publish files; noted and skipped.
+    artifacts_report: list[dict] = []
+    if parsed.artifacts:
+        run.error = "artifacts[] tidak didukung di run rutinitas (butuh tiket); diabaikan"
+
+    # `artifact_updates:` — organize the Artifacts menu (PM-only, same as ticket runs).
+    artifact_updates_report: list[dict] = []
+    if parsed.artifact_updates:
+        artifact_updates_report, artifact_update_skip_notes = await _apply_artifact_updates(
+            session, workspace_id, parsed.artifact_updates
+        )
+        if artifact_update_skip_notes:
+            run.error = "; ".join(artifact_update_skip_notes)
+
+    # `memory:` — same as ticket runs.
+    memory_report: list[str] = []
+    if parsed.memories:
+        memory_report = await _persist_memories(session, agent, None, parsed.memories)
+    run.report = {
+        "summary": parsed.summary,
+        "comments": comments_report,
+        "tickets": tickets_report,
+        "updates": updates_report,
+        "artifacts": artifacts_report,
+        "artifact_updates": artifact_updates_report,
+        "memory": memory_report,
+    }
+
+    run.status = "done"
+    if routine is not None:
+        routine.status = "idle"
+        routine.last_run_at = _now()
+    agent.status = "idle"
+    await session.commit()
 
 
 async def _finish_run(
     session: AsyncSession,
     run: Run,
-    ticket: Ticket,
+    ticket: Ticket | None,
     agent: Agent,
     terminal: AdapterEvent | None,
     accumulated_text: str,
@@ -569,6 +1538,12 @@ async def _finish_run(
     *,
     session_factory: async_sessionmaker | None = None,
 ) -> None:
+    if ticket is None:
+        await _finish_routine_run(
+            session, run, agent, terminal, accumulated_text, guardrail_cancel_reason
+        )
+        return
+
     workspace_id = ticket.workspace_id
 
     if terminal is None:
@@ -630,8 +1605,17 @@ async def _finish_run(
             )
         ).all()
     }
+    workspace = await session.get(Workspace, workspace_id)
     parsed = parse_report(
-        accumulated_text, agent.role, valid_names, actor_name=agent.name
+        accumulated_text,
+        agent.role,
+        valid_names,
+        actor_name=agent.name,
+        # Explorative gate applies to owner-chat PM runs only (trigger="mention"):
+        # a manual board run is implicitly approved by the owner pressing Run.
+        ticket_approved=run.trigger != "mention" or ticket.approved_at is not None,
+        # Per-workspace setting (Settings page): which roles may declare `sprints:`.
+        sprint_creator_roles=set((workspace.sprint_creator_roles if workspace else None) or ["pm"]),
     )
 
     if not parsed.ok:
@@ -676,6 +1660,8 @@ async def _finish_run(
             agent.status = "idle"
             await session.commit()
             return
+        if parsed.status == "blocked":
+            ticket.blocked_reason = parsed.summary
 
     # run.status is set to "done" only right before the final commit below (not here) —
     # event_bus.publish() commits the session immediately (events need durability for
@@ -687,6 +1673,8 @@ async def _finish_run(
     # caught (ticket read back as "review" instead of the handoff engine's "blocked").
     old_status = ticket.status
     ticket.status = parsed.status
+    if old_status == "blocked" and parsed.status != "blocked":
+        ticket.blocked_reason = None
 
     # `updates:` (v1, narrow by design): let this report modify OTHER existing tickets'
     # status/priority/assignee. Never schedules a run on the target — changing another
@@ -714,6 +1702,14 @@ async def _finish_run(
         if draft.status is not None:
             if draft.status not in STATUSES:
                 skipped.append(f"status '{draft.status}' tidak dikenal")
+            elif draft.status not in AGENT_DECLARABLE_STATUSES:
+                # Same rule as an agent's own top-level status (report.py): `release`
+                # is never something an agent report sets, whether on its own ticket
+                # or, via updates:, on someone else's.
+                skipped.append(
+                    f"status '{draft.status}' hanya bisa diset manual oleh owner, bukan lewat "
+                    "laporan agent"
+                )
             else:
                 allowed, reason = can_transition(target.status, draft.status, agent.role)
                 if not allowed:
@@ -755,6 +1751,15 @@ async def _finish_run(
                 target.assignee_id = assignee_agent.id
                 applied.append(f"assignee → {assignee_agent.name}")
 
+        if draft.sprint is not None:
+            sprint = await _get_or_create_sprint(session, target.workspace_id, draft.sprint)
+            target.sprint_id = sprint.id
+            applied.append(f"sprint → {sprint.name}")
+
+        if draft.duration is not None:
+            target.duration_estimate = draft.duration
+            applied.append(f"duration → {draft.duration}")
+
         if applied:
             await _write_system_comment(
                 session,
@@ -779,6 +1784,75 @@ async def _finish_run(
             workspace_id=workspace_id,
         )
 
+    artifacts_report: list[dict] = []
+    if parsed.artifacts:
+        workspace_for_artifacts = await session.get(Workspace, workspace_id)
+        artifacts_report, artifact_skip_notes = await _publish_artifacts(
+            session, workspace_for_artifacts, ticket, parsed.artifacts
+        )
+        if artifacts_report:
+            names = ", ".join(f"{a['path']} → {a['group']}" for a in artifacts_report)
+            await _write_system_comment(
+                session,
+                ticket.id,
+                f"Artifact dipublikasikan: {names}",
+                ticket_key=ticket.key,
+                run_id=run.id,
+                workspace_id=workspace_id,
+            )
+        if artifact_skip_notes:
+            await _write_system_comment(
+                session,
+                ticket.id,
+                "Beberapa artifact diabaikan: " + "; ".join(artifact_skip_notes),
+                ticket_key=ticket.key,
+                run_id=run.id,
+                workspace_id=workspace_id,
+            )
+
+    artifact_updates_report: list[dict] = []
+    if parsed.artifact_updates:
+        artifact_updates_report, artifact_update_skip_notes = await _apply_artifact_updates(
+            session, workspace_id, parsed.artifact_updates
+        )
+        if artifact_updates_report:
+            names = "; ".join(
+                f"{u['op']} {u.get('group') or u.get('from') or u.get('file')}"
+                + (f" → {u.get('to') or u.get('into')}" if u.get("to") or u.get("into") else "")
+                for u in artifact_updates_report
+            )
+            await _write_system_comment(
+                session,
+                ticket.id,
+                f"Artifact diorganisir oleh {agent.name}: {names}",
+                ticket_key=ticket.key,
+                run_id=run.id,
+                workspace_id=workspace_id,
+            )
+        if artifact_update_skip_notes:
+            await _write_system_comment(
+                session,
+                ticket.id,
+                "Beberapa artifact_updates diabaikan: " + "; ".join(artifact_update_skip_notes),
+                ticket_key=ticket.key,
+                run_id=run.id,
+                workspace_id=workspace_id,
+            )
+
+    memory_report: list[str] = []
+    if parsed.memories:
+        memory_report = await _persist_memories(session, agent, ticket, parsed.memories)
+        if memory_report:
+            notes_str = "; ".join(memory_report)
+            await _write_system_comment(
+                session,
+                ticket.id,
+                f"Memory disimpan untuk {agent.name}: {notes_str}",
+                ticket_key=ticket.key,
+                run_id=run.id,
+                workspace_id=workspace_id,
+            )
+
     run.report = {
         "status": parsed.status,
         "summary": parsed.summary,
@@ -790,10 +1864,19 @@ async def _finish_run(
                 "description": t.description,
                 "assignee": t.assignee,
                 "priority": t.priority,
+                "category": t.category,
+                "sprint": t.sprint,
+                "duration": t.duration,
             }
             for t in parsed.tickets
         ],
+        "sprints": [
+            {"name": s.name, "goal": s.goal, "duration": s.duration} for s in parsed.sprints
+        ],
         "updates": updates_report,
+        "artifacts": artifacts_report,
+        "artifact_updates": artifact_updates_report,
+        "memory": memory_report,
     }
 
     comment = Comment(
@@ -850,10 +1933,21 @@ async def _finish_run(
             session.add(CommentMention(comment_id=comment.id, agent_id=mentioned_agent.id))
 
     to_auto_schedule: list[tuple[Ticket, Agent]] = []
+    epic_skip_notes: list[str] = []
     if parsed.tickets:
         from app.api.tickets import _next_key  # reuse the same atomic-counter key logic
 
         workspace = await session.get(Workspace, ticket.workspace_id)
+
+        for sprint_draft in parsed.sprints:
+            await _get_or_create_sprint(
+                session,
+                ticket.workspace_id,
+                sprint_draft.name,
+                goal=sprint_draft.goal,
+                duration=sprint_draft.duration,
+            )
+
         for draft in parsed.tickets:
             assignee_id = None
             assignee_agent = None
@@ -864,6 +1958,27 @@ async def _finish_run(
                     )
                 )
                 assignee_id = assignee_agent.id if assignee_agent else None
+            sprint_id = None
+            if draft.sprint:
+                sprint = await _get_or_create_sprint(session, ticket.workspace_id, draft.sprint)
+                sprint_id = sprint.id
+
+            # Epic resolution (docs/03-agent-design.md §3): explicit `epic:` wins if
+            # valid; otherwise attach to THIS ticket's own epic if it has one (keeps
+            # QA/Pentester bug reports flat siblings under the same epic instead of
+            # silently nesting 2 levels deep); otherwise this ticket itself becomes
+            # the epic (unchanged default when there's no parent to inherit).
+            epic_target, epic_skip_note = await _resolve_epic_target(
+                session, ticket.workspace_id, draft.epic
+            )
+            if epic_skip_note:
+                epic_skip_notes.append(epic_skip_note)
+            parent_id = (
+                epic_target.id
+                if epic_target is not None
+                else (ticket.parent_id or ticket.id)
+            )
+
             child = Ticket(
                 workspace_id=ticket.workspace_id,
                 key=await _next_key(session, workspace),
@@ -872,7 +1987,10 @@ async def _finish_run(
                 status="todo",
                 priority=draft.priority,
                 assignee_id=assignee_id,
-                parent_id=ticket.id,
+                parent_id=parent_id,
+                category=draft.category,
+                sprint_id=sprint_id,
+                duration_estimate=draft.duration,
             )
             session.add(child)
             await session.flush()  # populate child.id before publishing
@@ -900,6 +2018,16 @@ async def _finish_run(
                 and assignee_agent.status != "disabled"
             ):
                 to_auto_schedule.append((child, assignee_agent))
+
+    if epic_skip_notes:
+        await _write_system_comment(
+            session,
+            ticket.id,
+            "Beberapa epic tujuan diabaikan: " + "; ".join(epic_skip_notes),
+            ticket_key=ticket.key,
+            run_id=run.id,
+            workspace_id=workspace_id,
+        )
 
     agent.status = "idle"
 
@@ -1094,6 +2222,18 @@ async def _handoff(
             targets.append(resolved)
 
     if targets:
+        if ticket.status in _COMPLETION_STATUSES:
+            await _write_system_comment(
+                session,
+                ticket.id,
+                "Tiket sudah " + ticket.status + " — mention ("
+                + ", ".join(a.name for a in targets)
+                + ") dicatat sebagai info, tidak memicu run baru.",
+                ticket_key=ticket.key,
+                run_id=run.id,
+                workspace_id=ticket.workspace_id,
+            )
+            return
         ticket.handoff_depth = (ticket.handoff_depth or 0) + 1
         for target in targets:
             try:
@@ -1136,6 +2276,21 @@ async def _handoff(
     # Nothing resolved: per docs/03-agent-design.md §6, a non-final status with no
     # valid handoff target must not be left hanging.
     if ticket.status not in _FINAL_STATUSES:
+        # Exploration exception: an owner-chat PM run that is still in the plan phase
+        # (ticket not yet approved) reports "in_progress" with no tickets[] on
+        # purpose — the conversation continues until the owner approves. Blocking it
+        # would make the chat unusable.
+        if agent.role == "pm" and ticket.approved_at is None:
+            await _write_system_comment(
+                session,
+                ticket.id,
+                "Menunggu persetujuan user untuk plan (atau pertanyaan lanjutan). "
+                "Tiket tidak diblokir — obrolan bisa dilanjutkan.",
+                ticket_key=ticket.key,
+                run_id=run.id,
+                workspace_id=ticket.workspace_id,
+            )
+            return
         reason = "; ".join(notes) if notes else "tidak ada mention pada laporan"
         await _block_ticket(
             session,

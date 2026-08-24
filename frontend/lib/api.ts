@@ -45,14 +45,23 @@ export function getHealth(): Promise<HealthResponse> {
   return apiFetch<HealthResponse>("/health");
 }
 
+export type TimeUnit = "hour" | "day";
+
+export type AgentRole = "pm" | "lead" | "engineer" | "designer" | "qa" | "pentester";
+
 export interface Workspace {
   id: string;
   name: string;
   key: string;
   repo_path: string;
+  description: string | null;
   paused: boolean;
   guardrails: Record<string, unknown>;
+  workflow_prompt: string;
   ticket_counter: number;
+  time_unit: TimeUnit;
+  timezone: string;
+  sprint_creator_roles: AgentRole[];
   created_at: string;
 }
 
@@ -60,6 +69,7 @@ export interface WorkspaceCreate {
   name: string;
   key: string;
   repo_path: string;
+  description?: string;
 }
 
 export function listWorkspaces(): Promise<Workspace[]> {
@@ -80,7 +90,12 @@ export function getWorkspace(workspaceId: string): Promise<Workspace> {
 export interface WorkspaceUpdate {
   name?: string;
   repo_path?: string;
+  description?: string;
   guardrails?: Record<string, unknown>;
+  workflow_prompt?: string;
+  time_unit?: TimeUnit;
+  timezone?: string;
+  sprint_creator_roles?: AgentRole[];
 }
 
 export function updateWorkspace(
@@ -101,8 +116,33 @@ export function resumeWorkspace(workspaceId: string): Promise<Workspace> {
   return apiFetch<Workspace>(`/workspaces/${workspaceId}/resume`, { method: "POST" });
 }
 
+/** Wipes all tickets/sprints (and, via cascade, comments/attachments/runs/events —
+ * chat history and Activity are just those) for the workspace. Requires it to
+ * already be paused with nothing running/queued. */
+export function resetWorkspace(workspaceId: string): Promise<Workspace> {
+  return apiFetch<Workspace>(`/workspaces/${workspaceId}/reset`, { method: "POST" });
+}
+
+export function getWorkflowPromptDefault(): Promise<{ workflow_prompt: string }> {
+  return apiFetch<{ workflow_prompt: string }>("/workspaces/workflow-prompt-default");
+}
+
 export type Role = "pm" | "lead" | "engineer" | "designer" | "qa" | "pentester";
 export type ToolKind = "opencode" | "claude" | "agy" | "codex";
+export type TicketCategory = "feature" | "improvement" | "fix" | "security" | "performance";
+
+/** Display format for every agent name in the UI: "Budi (Engineer)". */
+export function formatAgentName(name: string, role?: string): string {
+  return role ? `${name} (${role})` : name;
+}
+
+export type AvatarTemplate =
+  | "person-1"
+  | "person-2"
+  | "person-3"
+  | "person-4"
+  | "person-5"
+  | "person-6";
 
 export interface Agent {
   id: string;
@@ -112,9 +152,12 @@ export interface Agent {
   model: string;
   tool_kind: ToolKind;
   system_prompt: string | null;
+  avatar_template: AvatarTemplate | null;
+  avatar_color: string | null;
   enabled: boolean;
   status: string;
   created_at: string;
+  memory_count: number;
 }
 
 export interface AgentCreate {
@@ -123,6 +166,19 @@ export interface AgentCreate {
   model: string;
   tool_kind: ToolKind;
   system_prompt?: string;
+  avatar_template?: AvatarTemplate | null;
+  avatar_color?: string | null;
+}
+
+export interface AgentUpdate {
+  name?: string;
+  role?: Role;
+  model?: string;
+  tool_kind?: ToolKind;
+  system_prompt?: string;
+  enabled?: boolean;
+  avatar_template?: AvatarTemplate | null;
+  avatar_color?: string | null;
 }
 
 export function listAgents(workspaceId: string): Promise<Agent[]> {
@@ -134,6 +190,48 @@ export function createAgent(workspaceId: string, body: AgentCreate): Promise<Age
     method: "POST",
     body: JSON.stringify(body),
   });
+}
+
+export function updateAgent(agentId: string, body: AgentUpdate): Promise<Agent> {
+  return apiFetch<Agent>(`/agents/${agentId}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+export function deleteAgent(agentId: string): Promise<void> {
+  return apiFetch<void>(`/agents/${agentId}`, { method: "DELETE" });
+}
+
+export interface AgentMemoryEntry {
+  id: string;
+  agent_id: string;
+  note: string;
+  origin: "agent" | "owner";
+  source_ticket_key: string | null;
+  created_at: string;
+}
+
+export interface AgentMemoryEntryCreate {
+  note: string;
+}
+
+export function listAgentMemory(agentId: string): Promise<AgentMemoryEntry[]> {
+  return apiFetch<AgentMemoryEntry[]>(`/agents/${agentId}/memory`);
+}
+
+export function createAgentMemory(
+  agentId: string,
+  body: AgentMemoryEntryCreate,
+): Promise<AgentMemoryEntry> {
+  return apiFetch<AgentMemoryEntry>(`/agents/${agentId}/memory`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function deleteAgentMemory(memoryId: string): Promise<void> {
+  return apiFetch<void>(`/agent-memory/${memoryId}`, { method: "DELETE" });
 }
 
 export function getModels(): Promise<string[]> {
@@ -148,6 +246,7 @@ export type TicketStatus =
   | "qa"
   | "security"
   | "done"
+  | "release"
   | "blocked";
 export type TicketPriority = "low" | "medium" | "high" | "urgent";
 
@@ -161,6 +260,11 @@ export interface Ticket {
   priority: TicketPriority;
   assignee_id: string | null;
   parent_id: string | null;
+  category: TicketCategory | null;
+  sprint_id: string | null;
+  duration_estimate: number | null;
+  approved_at: string | null;
+  blocked_reason: string | null;
   cost_used: number;
   handoff_depth: number;
   created_at: string;
@@ -173,6 +277,11 @@ export interface TicketCreate {
   priority?: TicketPriority;
   assignee_id?: string;
   parent_id?: string;
+  category?: TicketCategory;
+  sprint_id?: string;
+  duration_estimate?: number;
+  // Every ticket needs an epic: pass parent_id, or is_new_epic to opt into a new one.
+  is_new_epic?: boolean;
 }
 
 export interface TicketUpdate {
@@ -181,7 +290,60 @@ export interface TicketUpdate {
   priority?: TicketPriority;
   assignee_id?: string;
   status?: TicketStatus;
+  category?: TicketCategory;
+  sprint_id?: string;
+  duration_estimate?: number;
   actor_agent_id?: string;
+}
+
+export type SprintStatus = "planned" | "active" | "completed";
+
+export interface Sprint {
+  id: string;
+  workspace_id: string;
+  name: string;
+  goal: string | null;
+  index: number;
+  status: SprintStatus;
+  duration_estimate: number | null;
+  start_date: string | null;
+  end_date: string | null;
+  created_at: string;
+}
+
+export interface SprintCreate {
+  name: string;
+  goal?: string;
+  duration_estimate?: number;
+  start_date?: string | null;
+  end_date?: string | null;
+}
+
+export interface SprintUpdate {
+  name?: string;
+  goal?: string;
+  duration_estimate?: number;
+  status?: SprintStatus;
+  start_date?: string | null;
+  end_date?: string | null;
+}
+
+export function listSprints(workspaceId: string): Promise<Sprint[]> {
+  return apiFetch<Sprint[]>(`/workspaces/${workspaceId}/sprints`);
+}
+
+export function createSprint(workspaceId: string, body: SprintCreate): Promise<Sprint> {
+  return apiFetch<Sprint>(`/workspaces/${workspaceId}/sprints`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function updateSprint(sprintId: string, body: SprintUpdate): Promise<Sprint> {
+  return apiFetch<Sprint>(`/sprints/${sprintId}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
 }
 
 export function listTickets(workspaceId: string): Promise<Ticket[]> {
@@ -217,6 +379,8 @@ export interface CommentCreate {
   author_agent_id?: string;
 }
 
+export type AttachmentOrigin = "upload" | "agent";
+
 export interface Attachment {
   id: string;
   ticket_id: string;
@@ -224,18 +388,36 @@ export interface Attachment {
   content_type: string;
   size_bytes: number;
   path: string;
+  origin: AttachmentOrigin;
+  description: string | null;
   created_at: string;
+}
+
+export interface ArtifactAttachment extends Attachment {
+  ticket_key: string;
+  ticket_title: string;
+}
+
+export interface ArtifactGroup {
+  id: string | null;
+  name: string;
+  attachments: ArtifactAttachment[];
+}
+
+export function listArtifacts(workspaceId: string): Promise<ArtifactGroup[]> {
+  return apiFetch<ArtifactGroup[]>(`/workspaces/${workspaceId}/artifacts`);
 }
 
 export type RunStatus = "queued" | "running" | "done" | "failed" | "cancelled" | "interrupted";
 
 export interface Run {
   id: string;
-  ticket_id: string;
+  ticket_id: string | null;
   agent_id: string;
   status: RunStatus;
   trigger: string;
   parent_run_id: string | null;
+  routine_id: string | null;
   tool_kind: string;
   model: string;
   session_id: string | null;
@@ -246,6 +428,66 @@ export interface Run {
   error: string | null;
   started_at: string | null;
   ended_at: string | null;
+}
+
+export type RoutineMode = "idle_only" | "consistent";
+export type RoutineStatus = "idle" | "waiting" | "running" | "disabled";
+
+export interface Routine {
+  id: string;
+  workspace_id: string;
+  name: string;
+  prompt: string;
+  interval_minutes: number;
+  mode: RoutineMode;
+  agent_id: string | null;
+  status: RoutineStatus;
+  last_run_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RoutineCreate {
+  name: string;
+  prompt: string;
+  interval_minutes: number;
+  mode: RoutineMode;
+  agent_id: string | null;
+}
+
+export interface RoutineUpdate {
+  name?: string;
+  prompt?: string;
+  interval_minutes?: number;
+  mode?: RoutineMode;
+  agent_id?: string | null;
+  status?: RoutineStatus;
+}
+
+export function listRoutines(workspaceId: string): Promise<Routine[]> {
+  return apiFetch<Routine[]>(`/workspaces/${workspaceId}/routines`);
+}
+
+export function createRoutine(workspaceId: string, body: RoutineCreate): Promise<Routine> {
+  return apiFetch<Routine>(`/workspaces/${workspaceId}/routines`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function updateRoutine(routineId: string, body: RoutineUpdate): Promise<Routine> {
+  return apiFetch<Routine>(`/routines/${routineId}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+export function deleteRoutine(routineId: string): Promise<void> {
+  return apiFetch<void>(`/routines/${routineId}`, { method: "DELETE" });
+}
+
+export function runRoutineNow(routineId: string): Promise<Routine> {
+  return apiFetch<Routine>(`/routines/${routineId}/run`, { method: "POST" });
 }
 
 export interface RunEvent {
@@ -278,11 +520,16 @@ export function stopRun(runId: string): Promise<Run> {
   return apiFetch<Run>(`/runs/${runId}/stop`, { method: "POST" });
 }
 
+export function retryRun(runId: string): Promise<Run> {
+  return apiFetch<Run>(`/runs/${runId}/retry`, { method: "POST" });
+}
+
 export interface TicketDetail extends Ticket {
   comments: Comment[];
   attachments: Attachment[];
   runs: Run[];
   children: Ticket[];
+  parent: Ticket | null;
 }
 
 export function getTicket(key: string): Promise<TicketDetail> {
@@ -300,8 +547,8 @@ export function createComment(key: string, body: CommentCreate): Promise<Comment
   });
 }
 
-export function attachmentUrl(id: string): string {
-  return `${API_BASE_URL}/attachments/${id}`;
+export function attachmentUrl(id: string, opts?: { inline?: boolean }): string {
+  return `${API_BASE_URL}/attachments/${id}${opts?.inline ? "?inline=1" : ""}`;
 }
 
 export async function uploadAttachment(key: string, file: File): Promise<Attachment> {

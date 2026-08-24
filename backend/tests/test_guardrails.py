@@ -87,9 +87,25 @@ def _make_agent(client, ws_id, role, name):
     return resp.json()["id"]
 
 
+def _active_sprint_id(client, ws_id):
+    """Idempotent: reuse the workspace's active sprint if one exists, else create
+    one (bootstraps active as the first sprint)."""
+    sprints = client.get(f"/api/workspaces/{ws_id}/sprints").json()
+    active = next((s for s in sprints if s["status"] == "active"), None)
+    if active:
+        return active["id"]
+    resp = client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "Sprint 0"})
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
+
+
 def _make_ticket(client, ws_id, title="Do the thing", **overrides):
-    payload = {"title": title, "description": "desc"}
+    payload = {"title": title, "description": "desc", "is_new_epic": True}
+    if "sprint_id" not in overrides:
+        payload["sprint_id"] = _active_sprint_id(client, ws_id)
     payload.update(overrides)
+    if "parent_id" in overrides:
+        payload.pop("is_new_epic", None)
     resp = client.post(f"/api/workspaces/{ws_id}/tickets", json=payload)
     assert resp.status_code == 201, resp.text
     return resp.json()
@@ -265,6 +281,60 @@ def test_max_handoff_depth_blocks_scheduling(client, tmp_path):
     assert detail["status"] == "blocked"
 
 
+_REPLY_SCRIPT = '''
+import json
+text = """reply
+
+```map
+status: in_progress
+mention: []
+summary: |
+  chatting along
+```
+"""
+print(json.dumps({"type": "assistant_text", "text": text}))
+'''
+
+
+def test_max_handoff_depth_does_not_block_owner_chat_mention(client, tmp_path, monkeypatch):
+    # A ticket whose handoff_depth is already at/over the limit (e.g. a finished epic
+    # that racked up a long real handoff chain) must still let the owner keep chatting
+    # with the mentioned agent — max_handoff_depth only bounds agent-to-agent chains.
+    ws_id = _make_workspace(client, tmp_path, guardrails={"max_handoff_depth": 2})
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    ticket = _make_ticket(client, ws_id)
+    _set_status(client, ticket["key"], "todo")
+    _set_status(client, ticket["key"], "in_progress")
+
+    from app.db.models import Ticket
+
+    async def _bump_depth():
+        async with db_session.async_session() as session:
+            t = await session.get(Ticket, ticket["id"])
+            t.handoff_depth = 5
+            await session.commit()
+
+    import asyncio
+
+    asyncio.run(_bump_depth())
+
+    script = _write_python_binary(tmp_path / "opencode", _REPLY_SCRIPT)
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.post(f"/api/tickets/{ticket['key']}/comments", json={"body": "@pm-1 hai lagi"})
+    assert resp.status_code == 201, resp.text
+
+    detail = client.get(f"/api/tickets/{ticket['key']}").json()
+    assert detail["status"] != "blocked"
+    assert not any("max_handoff_depth" in b for b in _system_comment_bodies(client, ticket["key"]))
+
+    runs = client.get(f"/api/workspaces/{ws_id}/runs").json()
+    mention_runs = [r for r in runs if r["trigger"] == "mention"]
+    assert len(mention_runs) == 1
+    final = _wait_for_run(client, mention_runs[0]["id"])
+    assert final["status"] == "done", final
+
+
 # ---------------------------------------------------------------------------
 # run_timeout_sec — exact AC scenario: lower to 5s, fake binary sleeps 20s.
 # ---------------------------------------------------------------------------
@@ -361,3 +431,83 @@ def test_max_cost_per_run_cancels_run_with_named_comment(client, tmp_path, monke
 
     bodies = _system_comment_bodies(client, ticket["key"])
     assert any("max_cost_per_run" in b for b in bodies), bodies
+
+
+# ---------------------------------------------------------------------------
+# ticket_not_in_active_sprint
+# ---------------------------------------------------------------------------
+
+_DONE_SCRIPT = '''
+import json
+text = """ok
+
+```map
+status: done
+mention: []
+summary: |
+  done
+```
+"""
+print(json.dumps({"type": "assistant_text", "text": text}))
+'''
+
+
+def test_backlog_ticket_blocks_scheduling_for_non_exempt_role(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+    ticket = _make_ticket(client, ws_id, sprint_id=None)
+
+    resp = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": eng_id})
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["error"]["code"] == "guardrail_blocked"
+
+    bodies = _system_comment_bodies(client, ticket["key"])
+    assert any("ticket_not_in_active_sprint" in b and "backlog" in b for b in bodies)
+
+    detail = client.get(f"/api/tickets/{ticket['key']}").json()
+    assert detail["status"] == "blocked"
+
+
+def test_ticket_in_planned_sprint_blocks_scheduling_for_non_exempt_role(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+    # First sprint bootstraps active; create a second one, which stays "planned".
+    client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "Sprint 1"})
+    planned = client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "Sprint 2"}).json()
+    assert planned["status"] == "planned"
+    ticket = _make_ticket(client, ws_id, sprint_id=planned["id"])
+
+    resp = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": eng_id})
+    assert resp.status_code == 409, resp.text
+
+    bodies = _system_comment_bodies(client, ticket["key"])
+    assert any(
+        "ticket_not_in_active_sprint" in b and "Sprint 2" in b and "planned" in b for b in bodies
+    )
+
+
+def test_ticket_in_active_sprint_allows_scheduling_for_non_exempt_role(client, tmp_path, monkeypatch):
+    ws_id = _make_workspace(client, tmp_path)
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+    sprint = client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "Sprint 1"}).json()
+    assert sprint["status"] == "active"
+    ticket = _make_ticket(client, ws_id, sprint_id=sprint["id"])
+
+    script = _write_python_binary(tmp_path / "opencode", _DONE_SCRIPT)
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": eng_id})
+    assert resp.status_code == 201, resp.text
+
+
+def test_pm_role_exempt_from_active_sprint_gate(client, tmp_path, monkeypatch):
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    # Backlog ticket (no sprint at all) -- PM must still be reachable to triage it.
+    ticket = _make_ticket(client, ws_id, sprint_id=None)
+
+    script = _write_python_binary(tmp_path / "opencode", _DONE_SCRIPT)
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": pm_id})
+    assert resp.status_code == 201, resp.text

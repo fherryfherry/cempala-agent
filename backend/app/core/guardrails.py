@@ -3,8 +3,9 @@
 Two call sites:
 
 - `check_guardrails()` — called from `orchestrator.schedule()` *before* a `Run` row is
-  created. Covers `max_concurrent_runs` (per workspace), `max_cost_per_ticket`, and
-  `max_handoff_depth`. Raises `GuardrailBlocked` (never creates the Run); the caller
+  created. Covers `max_concurrent_runs` (per workspace), `max_cost_per_ticket`,
+  `max_handoff_depth`, and ticket-not-in-active-sprint. Raises `GuardrailBlocked`
+  (never creates the Run); the caller
   transitions the ticket to `blocked` with a system comment naming the guardrail — same
   shape as the existing `RuntimeError("workspace paused")` -> `AppError(409, ...)` path in
   `app/api/runs.py`.
@@ -21,7 +22,7 @@ from __future__ import annotations
 
 from sqlalchemy import func, select
 
-from app.db.models import Run, Ticket
+from app.db.models import Run, Sprint, Ticket
 from app.schemas.workspace import DEFAULT_GUARDRAILS
 
 
@@ -47,7 +48,14 @@ _limit = guardrail_limit
 
 
 async def check_guardrails(
-    session, ticket: Ticket, guardrails: dict, *, exclude_run_id: str | None = None
+    session,
+    ticket: Ticket,
+    guardrails: dict,
+    *,
+    agent_role: str | None = None,
+    sprint_creator_roles: list | None = None,
+    exclude_run_id: str | None = None,
+    trigger: str | None = None,
 ) -> None:
     """Schedule-time checks. Raises `GuardrailBlocked` on the first failing check.
 
@@ -55,7 +63,40 @@ async def check_guardrails(
     updates:) is *calling* this (still DB-status "running" until its `_finish_run`
     fully wraps up) shouldn't count against `max_concurrent_runs` for follow-ups it
     is itself scheduling — it's practically done, just finishing bookkeeping.
+
+    `agent_role`/`sprint_creator_roles`: the ticket-not-in-active-sprint gate below
+    exempts whichever roles the workspace already trusts to plan sprints (default
+    PM-only, `workspace.sprint_creator_roles`) — those roles must always be able to
+    respond (including to a brand-new backlog ticket) so they can actually do the
+    triage/handoff-into-a-sprint this gate is forcing everyone else to wait for.
+
+    `trigger`: `max_handoff_depth` bounds runaway agent-to-agent handoff chains
+    (docs/03-agent-design.md §6) — it is not meant to cap how many times an owner
+    can nudge/chat an agent (`trigger="mention"`, the only human-initiated trigger;
+    see app/api/comments.py). A long-running epic ticket can legitimately rack up
+    a deep handoff chain and still be `done`; without this exemption, any further
+    owner chat message on that same ticket would guardrail-block forever, since
+    `handoff_depth` never decreases on its own. Real agent-to-agent handoffs
+    triggered by a reply to such a chat message (trigger="handoff") are still fully
+    bounded. `app/api/tickets.py`'s `update_ticket()` resets `handoff_depth` to 0
+    whenever an owner unblocks a ticket, so this guardrail is recoverable too
+    (mirrors `loop_reset_at` for the loop detector) instead of permanently jamming
+    agent-to-agent progress once a ticket ever hits the limit.
     """
+
+    if agent_role not in (sprint_creator_roles or []):
+        sprint = await session.get(Sprint, ticket.sprint_id) if ticket.sprint_id else None
+        if sprint is None or sprint.status != "active":
+            state = (
+                f'sprint "{sprint.name}" (status {sprint.status})'
+                if sprint
+                else "belum masuk sprint manapun (backlog)"
+            )
+            raise GuardrailBlocked(
+                "ticket_not_in_active_sprint",
+                f"Guardrail ticket_not_in_active_sprint: ticket ini {state} — agent "
+                f"hanya bisa mengerjakan ticket yang sudah di sprint aktif",
+            )
 
     max_concurrent = _limit(guardrails, "max_concurrent_runs")
     query = (
@@ -83,12 +124,38 @@ async def check_guardrails(
             f"${max_cost_per_ticket:.2f}",
         )
 
-    max_handoff_depth = _limit(guardrails, "max_handoff_depth")
-    depth = ticket.handoff_depth or 0
-    if depth >= max_handoff_depth:
+    if trigger != "mention":
+        max_handoff_depth = _limit(guardrails, "max_handoff_depth")
+        depth = ticket.handoff_depth or 0
+        if depth >= max_handoff_depth:
+            raise GuardrailBlocked(
+                "max_handoff_depth",
+                f"Guardrail max_handoff_depth terlampaui: kedalaman {depth} >= {max_handoff_depth}",
+            )
+
+
+async def check_guardrails_routine(
+    session,
+    workspace_id: str,
+    guardrails: dict,
+) -> None:
+    """Schedule-time checks for routine runs (no ticket): only `max_concurrent_runs`
+    applies — cost-per-ticket and handoff-depth are ticket-scoped and meaningless here.
+    Raises `GuardrailBlocked` on the first failing check.
+    """
+    max_concurrent = _limit(guardrails, "max_concurrent_runs")
+    query = (
+        select(func.count())
+        .select_from(Run)
+        .join(Ticket, Run.ticket_id == Ticket.id)
+        .where(Ticket.workspace_id == workspace_id, Run.status == "running")
+    )
+    running = await session.scalar(query)
+    if running >= max_concurrent:
         raise GuardrailBlocked(
-            "max_handoff_depth",
-            f"Guardrail max_handoff_depth terlampaui: kedalaman {depth} >= {max_handoff_depth}",
+            "max_concurrent_runs",
+            f"Guardrail max_concurrent_runs terlampaui: {running} run sedang berjalan "
+            f"(batas {max_concurrent})",
         )
 
 

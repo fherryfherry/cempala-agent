@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import shutil
 import subprocess
 from contextlib import asynccontextmanager
@@ -6,17 +8,22 @@ from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.agent_memory import agent_memory_router, memory_router
 from app.api.agents import agents_router, workspace_agents_router
+from app.api.artifacts import workspace_artifacts_router
 from app.api.attachments import attachments_router, ticket_attachments_router
 from app.api.comments import comments_router
 from app.api.errors import AppError, app_error_handler, validation_error_handler
 from app.api.events import router as events_router
 from app.api.models import router as models_router
+from app.api.routines import routines_router, workspace_routines_router
 from app.api.runs import runs_router, ticket_run_router, workspace_runs_router
+from app.api.sprints import sprints_router, workspace_sprints_router
 from app.api.tickets import tickets_router, workspace_tickets_router
 from app.api.workspaces import router as workspaces_router
 from app.config import settings
 from app.core.orchestrator import recover_interrupted_runs
+from app.core.routine_scheduler import run_scheduler
 from app.db import session as db_session
 
 
@@ -24,7 +31,13 @@ from app.db import session as db_session
 async def lifespan(app: FastAPI):
     # Schema is managed by Alembic migrations (`make migrate`), not created here.
     await recover_interrupted_runs(db_session.async_session)
+    stop_event = asyncio.Event()
+    scheduler_task = asyncio.create_task(run_scheduler(db_session.async_session, stop_event))
     yield
+    stop_event.set()
+    scheduler_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await scheduler_task
 
 
 app = FastAPI(title="Multi-Agent Portal", lifespan=lifespan)
@@ -42,8 +55,15 @@ app.include_router(workspaces_router, prefix="/api")
 app.include_router(models_router, prefix="/api")
 app.include_router(workspace_agents_router, prefix="/api")
 app.include_router(agents_router, prefix="/api")
+app.include_router(agent_memory_router, prefix="/api")
+app.include_router(memory_router, prefix="/api")
 app.include_router(workspace_tickets_router, prefix="/api")
 app.include_router(tickets_router, prefix="/api")
+app.include_router(workspace_sprints_router, prefix="/api")
+app.include_router(sprints_router, prefix="/api")
+app.include_router(workspace_artifacts_router, prefix="/api")
+app.include_router(workspace_routines_router, prefix="/api")
+app.include_router(routines_router, prefix="/api")
 app.include_router(comments_router, prefix="/api")
 app.include_router(ticket_attachments_router, prefix="/api")
 app.include_router(attachments_router, prefix="/api")

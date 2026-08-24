@@ -89,8 +89,28 @@ def _make_agent(client, ws_id, role, name, model="opencode/big-pickle", enabled=
     return agent
 
 
+def _active_sprint_id(client, ws_id):
+    """Idempotent: reuse the workspace's active sprint if one exists, else create
+    one (bootstraps active as the first sprint)."""
+    sprints = client.get(f"/api/workspaces/{ws_id}/sprints").json()
+    active = next((s for s in sprints if s["status"] == "active"), None)
+    if active:
+        return active["id"]
+    resp = client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "Sprint 0"})
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
+
+
 def _make_ticket(client, ws_id, title="Do the thing"):
-    resp = client.post(f"/api/workspaces/{ws_id}/tickets", json={"title": title, "description": "d"})
+    resp = client.post(
+        f"/api/workspaces/{ws_id}/tickets",
+        json={
+            "title": title,
+            "description": "d",
+            "is_new_epic": True,
+            "sprint_id": _active_sprint_id(client, ws_id),
+        },
+    )
     assert resp.status_code == 201, resp.text
     return resp.json()
 
@@ -285,6 +305,45 @@ def test_handoff_chain_increments_depth_and_stops_at_max_handoff_depth(
     assert all(r["status"] == "done" for r in runs)
 
 
+def test_unblocking_resets_handoff_depth(client, tmp_path, monkeypatch):
+    ws_id = _make_workspace(client, tmp_path, guardrails={"max_handoff_depth": 2})
+    eng = _make_agent(client, ws_id, "engineer", "eng-1", model="opencode/eng")
+    _make_agent(client, ws_id, "lead", "lead-1", model="opencode/lead")
+    ticket = _make_ticket(client, ws_id)
+    _set_status(client, ticket["key"], "todo")
+    _set_status(client, ticket["key"], "in_progress")
+
+    script = _write_python_binary(tmp_path / "opencode", _PINGPONG_SCRIPT)
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": eng["id"]})
+    assert resp.status_code == 201, resp.text
+    _wait_for_ticket_status(client, ticket["key"], {"blocked"})
+
+    detail = client.get(f"/api/tickets/{ticket['key']}").json()
+    assert detail["handoff_depth"] == 2
+
+    # Owner unblocks -- handoff_depth resets to 0, so this exact agent pair can make
+    # forward progress again instead of being permanently stuck (mirrors loop_reset_at
+    # for the loop detector, MAP-028's twin guardrail).
+    resp = client.patch(f"/api/tickets/{ticket['key']}", json={"status": "in_progress"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["handoff_depth"] == 0
+
+    resp = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": eng["id"]})
+    assert resp.status_code == 201, resp.text
+    detail = _wait_for_ticket_status(client, ticket["key"], {"blocked"})
+    # Blocked again at the same limit -- not immediately re-blocked from residual depth.
+    assert detail["handoff_depth"] == 2
+
+    runs = [
+        r
+        for r in client.get(f"/api/workspaces/{ws_id}/runs").json()
+        if r["ticket_id"] == ticket["id"]
+    ]
+    assert len(runs) == 4, runs  # 2 runs before the reset, 2 more after
+
+
 # ---------------------------------------------------------------------------
 # (c) role-name mention resolves to an idle agent with that role
 # ---------------------------------------------------------------------------
@@ -357,8 +416,10 @@ print(json.dumps({"type": "assistant_text", "text": text}))
     _set_status(client, ticket["key"], "in_progress")
 
     # Now PM mentions role "lead" -- lead-b (0 runs on ticket) should be preferred over
-    # lead-a (1 prior run), both idle.
-    script = _write_python_binary(tmp_path / "opencode", _script("done", "lead"))
+    # lead-a (1 prior run), both idle. Status "review" (not "done"/"release"): a
+    # completion-status report's mentions are informational only and don't schedule
+    # a follow-up (see test_mention_on_completed_ticket_does_not_schedule_followup_run).
+    script = _write_python_binary(tmp_path / "opencode", _script("review", "lead"))
     monkeypatch.setattr(settings, "OPENCODE_BIN", script)
 
     resp = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": pm["id"]})
@@ -506,3 +567,76 @@ def test_self_mention_schedules_nothing_extra(client, tmp_path, monkeypatch):
 
     detail = client.get(f"/api/tickets/{ticket['key']}").json()
     assert detail["status"] == "done"  # final status, so no auto-block either
+
+
+# ---------------------------------------------------------------------------
+# (i) mention on an already-completed ticket is informational, not a new handoff
+# ---------------------------------------------------------------------------
+
+
+def test_mention_on_completed_ticket_does_not_schedule_followup_run(client, tmp_path, monkeypatch):
+    ws_id = _make_workspace(client, tmp_path)
+    eng = _make_agent(client, ws_id, "engineer", "eng-1")
+    _make_agent(client, ws_id, "lead", "lead-1")
+    ticket = _make_ticket(client, ws_id)
+    _set_status(client, ticket["key"], "todo")
+    _set_status(client, ticket["key"], "in_progress")
+    _set_status(client, ticket["key"], "review")
+    _set_status(client, ticket["key"], "qa")
+    _set_status(client, ticket["key"], "security")
+
+    # eng closes the ticket as done but still (informationally) mentions lead-1 —
+    # this must NOT schedule a new run for lead-1 (the TRX-001 incident: agents kept
+    # re-confirming an already-done ticket to each other forever).
+    script = _write_python_binary(tmp_path / "opencode", _script("done", "lead-1"))
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": eng["id"]})
+    assert resp.status_code == 201, resp.text
+    run = _wait_for_run(client, resp.json()["id"])
+    assert run["status"] == "done", run
+
+    time.sleep(0.3)
+    runs = [
+        r
+        for r in client.get(f"/api/workspaces/{ws_id}/runs").json()
+        if r["ticket_id"] == ticket["id"]
+    ]
+    assert len(runs) == 1, runs
+
+    detail = client.get(f"/api/tickets/{ticket['key']}").json()
+    assert detail["status"] == "done"
+    assert detail["handoff_depth"] == 0
+    bodies = _system_comment_bodies(client, ticket["key"])
+    assert any("lead-1" in b and "info" in b for b in bodies), bodies
+
+
+def test_blocked_report_with_mention_still_schedules_handoff(client, tmp_path, monkeypatch):
+    ws_id = _make_workspace(client, tmp_path)
+    eng = _make_agent(client, ws_id, "engineer", "eng-1", model="opencode/eng")
+    _make_agent(client, ws_id, "lead", "lead-1", model="opencode/lead")
+    ticket = _make_ticket(client, ws_id)
+    _set_status(client, ticket["key"], "todo")
+    _set_status(client, ticket["key"], "in_progress")
+
+    # eng reports itself stuck ("blocked") but mentions lead-1 to ask for a decision —
+    # unlike "done"/"release", "blocked" + a mention is real forward momentum and must
+    # still schedule the follow-up run.
+    script = _write_python_binary(
+        tmp_path / "opencode",
+        _script_by_model({"opencode/eng": ("blocked", "lead-1"), "opencode/lead": ("blocked", "")}),
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": eng["id"]})
+    assert resp.status_code == 201, resp.text
+    first = _wait_for_run(client, resp.json()["id"])
+    assert first["status"] == "done", first
+
+    runs = _wait_for_run_count(client, ws_id, ticket["id"], 2)
+    followup = next(r for r in runs if r["id"] != first["id"])
+    assert followup["trigger"] == "handoff"
+    assert followup["parent_run_id"] == first["id"]
+
+    detail = client.get(f"/api/tickets/{ticket['key']}").json()
+    assert detail["handoff_depth"] == 1

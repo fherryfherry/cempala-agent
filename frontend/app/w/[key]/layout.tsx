@@ -3,16 +3,17 @@
 import { useParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { listWorkspaces } from "@/lib/api";
-import { EventsProvider } from "@/components/events-context";
 
+// The SSE connection (EventsProvider) lives one level up, in EventsShell (root
+// layout) — Header needs it too, and there's only ever one workspace "active" at a
+// time regardless of which layout owns the connection.
 export default function WorkspaceLayout({ children }: LayoutProps<"/w/[key]">) {
   const params = useParams<{ key: string }>();
   const workspaces = useQuery({ queryKey: ["workspaces"], queryFn: listWorkspaces });
   const workspace = workspaces.data?.find((ws) => ws.key === params.key);
-  const workspaceId = workspace?.id;
 
   return (
-    <EventsProvider workspaceId={workspaceId}>
+    <>
       {workspace?.paused && (
         <div
           role="alert"
@@ -22,6 +23,6 @@ export default function WorkspaceLayout({ children }: LayoutProps<"/w/[key]">) {
         </div>
       )}
       {children}
-    </EventsProvider>
+    </>
   );
 }

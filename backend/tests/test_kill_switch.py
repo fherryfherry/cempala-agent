@@ -83,9 +83,25 @@ def _make_agent(client, ws_id, role, name):
     return resp.json()["id"]
 
 
+def _active_sprint_id(client, ws_id):
+    """Idempotent: reuse the workspace's active sprint if one exists, else create
+    one (bootstraps active as the first sprint)."""
+    sprints = client.get(f"/api/workspaces/{ws_id}/sprints").json()
+    active = next((s for s in sprints if s["status"] == "active"), None)
+    if active:
+        return active["id"]
+    resp = client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "Sprint 0"})
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
+
+
 def _make_ticket(client, ws_id, title="Do the thing", **overrides):
-    payload = {"title": title, "description": "desc"}
+    payload = {"title": title, "description": "desc", "is_new_epic": True}
+    if "sprint_id" not in overrides:
+        payload["sprint_id"] = _active_sprint_id(client, ws_id)
     payload.update(overrides)
+    if "parent_id" in overrides:
+        payload.pop("is_new_epic", None)
     resp = client.post(f"/api/workspaces/{ws_id}/tickets", json=payload)
     assert resp.status_code == 201, resp.text
     return resp.json()

@@ -64,6 +64,8 @@ async def list_tickets(
     status: str | None = None,
     assignee_id: str | None = None,
     parent_id: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
     session: AsyncSession = Depends(get_session),
 ):
     await _get_workspace_or_404(session, workspace_id)
@@ -75,6 +77,13 @@ async def list_tickets(
         stmt = stmt.where(Ticket.assignee_id == assignee_id)
     if parent_id is not None:
         stmt = stmt.where(Ticket.parent_id == parent_id)
+    # Most-recently-updated first — the freshest state is what callers (Board,
+    # MCP tools) care about.
+    stmt = stmt.order_by(Ticket.updated_at.desc())
+    if offset:
+        stmt = stmt.offset(offset)
+    if limit is not None:
+        stmt = stmt.limit(limit)
 
     result = await session.scalars(stmt)
     return result.all()
@@ -86,6 +95,16 @@ async def create_ticket(
 ):
     workspace = await _get_workspace_or_404(session, workspace_id)
 
+    if body.parent_id is None and not body.is_new_epic:
+        raise AppError(
+            422,
+            "epic_required",
+            "parent_id is required (every ticket needs an epic) unless is_new_epic is true",
+        )
+    if body.parent_id is not None and body.is_new_epic:
+        raise AppError(
+            422, "invalid_epic_flag", "cannot set both parent_id and is_new_epic"
+        )
     if body.parent_id is not None:
         await _validate_parent(session, workspace_id, body.parent_id)
 
@@ -98,6 +117,9 @@ async def create_ticket(
         priority=body.priority,
         assignee_id=body.assignee_id,
         parent_id=body.parent_id,
+        category=body.category,
+        sprint_id=body.sprint_id,
+        duration_estimate=body.duration_estimate,
     )
     session.add(ticket)
     try:
@@ -123,6 +145,7 @@ async def get_ticket(key: str, session: AsyncSession = Depends(get_session)):
     children = (
         await session.scalars(select(Ticket).where(Ticket.parent_id == ticket.id))
     ).all()
+    parent = await session.get(Ticket, ticket.parent_id) if ticket.parent_id else None
 
     comment_out = []
     for c in comments:
@@ -146,6 +169,7 @@ async def get_ticket(key: str, session: AsyncSession = Depends(get_session)):
         attachments=[AttachmentOut.model_validate(a) for a in attachments],
         runs=[RunOut.model_validate(r) for r in runs],
         children=[TicketOut.model_validate(c) for c in children],
+        parent=TicketOut.model_validate(parent) if parent else None,
     )
 
 
@@ -166,7 +190,16 @@ async def update_ticket(key: str, body: TicketUpdate, session: AsyncSession = De
         if not allowed:
             raise AppError(422, "illegal_transition", reason)
 
-    for field in ("title", "description", "priority", "assignee_id", "status"):
+    for field in (
+        "title",
+        "description",
+        "priority",
+        "assignee_id",
+        "status",
+        "category",
+        "sprint_id",
+        "duration_estimate",
+    ):
         value = getattr(body, field)
         if value is not None:
             setattr(ticket, field, value)
@@ -180,6 +213,18 @@ async def update_ticket(key: str, body: TicketUpdate, session: AsyncSession = De
                 body=f"Status changed from {old_status} to {body.status}",
             )
         )
+        if body.status != "blocked":
+            ticket.blocked_reason = None
+            if old_status == "blocked":
+                from datetime import datetime, timezone
+
+                ticket.loop_reset_at = datetime.now(timezone.utc)
+                # handoff_depth is otherwise monotonic (app/core/orchestrator.py's
+                # _handoff() only ever increments it) — without this, a ticket that
+                # ever hit max_handoff_depth would stay permanently unable to make
+                # further agent-to-agent progress even after a human unblocks it,
+                # the same class of bug loop_reset_at fixes for the loop detector.
+                ticket.handoff_depth = 0
 
     try:
         await session.commit()

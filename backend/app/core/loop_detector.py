@@ -27,21 +27,41 @@ from app.db.models import Agent, Run, Ticket
 
 
 async def detect_loop(
-    session, ticket: Ticket, guardrails: dict, next_agent_id: str
+    session,
+    ticket: Ticket,
+    guardrails: dict,
+    next_agent_id: str,
+    *,
+    trigger: str | None = None,
 ) -> str | None:
     """Returns a cycle description if scheduling `next_agent_id` would extend a ping-pong
     loop past `loop_threshold` round-trips, else None.
 
     `next_agent_id` is the agent about to be scheduled (schedule() calls this before the
     new Run row exists, so the candidate run isn't in history yet -- it's appended here).
+
+    `trigger`: like `check_guardrails()`'s `max_handoff_depth` exemption
+    (guardrails.py), a human nudge (`trigger="mention"`, the only human-initiated
+    trigger) must always be able to get through — a ticket's run history is
+    permanent, so without this exemption a ticket that ever tripped the loop
+    guardrail for a given agent pair could never again schedule that pair, even
+    after the human intervenes. Real agent-to-agent handoffs (`trigger="handoff"`)
+    are still fully bounded.
+
+    `ticket.loop_reset_at`: set whenever a human unblocks a ticket
+    (`app/api/tickets.py`); history before that point doesn't count, so unblocking
+    gives a genuinely fresh window rather than being immediately re-tripped by the
+    same pre-block history.
     """
+    if trigger == "mention":
+        return None
+
     threshold = guardrail_limit(guardrails, "loop_threshold")
 
-    result = await session.execute(
-        select(Run.agent_id)
-        .where(Run.ticket_id == ticket.id)
-        .order_by(Run.started_at)
-    )
+    query = select(Run.agent_id).where(Run.ticket_id == ticket.id)
+    if ticket.loop_reset_at is not None:
+        query = query.where(Run.started_at > ticket.loop_reset_at)
+    result = await session.execute(query.order_by(Run.started_at))
     sequence = [row[0] for row in result.all()] + [next_agent_id]
 
     if len(sequence) < 2:

@@ -12,6 +12,19 @@ Read `docs/00-overview.md` first, then `docs/04-tasks.md` for what to build next
 structural changes, since several obvious-looking simplifications were already considered and
 rejected there for stated reasons.
 
+## Local dev safety — don't run destroyer commands
+
+`backend/map.db`, `backend/map.db-wal`/`-shm`, and `storage/attachments/` are **not disposable
+test fixtures** even though they're gitignored — they can hold real dogfooding data from a
+`make dev` session that's already running. Before touching any of them:
+
+- Check first: `lsof -i :8000` / `ps` for an already-running backend, `lsof <file>` for open
+  handles. If something's running, its DB is live even if you don't see it in `git status`.
+- Never run `rm`, `mv`, `alembic downgrade`, or any other destructive/mutating command against
+  `backend/map.db` or `storage/` to "reset" or "smoke test" something — ask first.
+- For manual verification, use a throwaway DB/repo path (exactly what the test suite's fixtures
+  already do — a fresh `sqlite+aiosqlite:///:memory:` or a temp file), never the shared dev file.
+
 ## Commands
 
 None exist yet. MAP-005 creates the `Makefile` that provides:
@@ -75,9 +88,12 @@ run — including the assembled prompt, stored on the `run_started` event.
 ### 4. Guardrails are the only brakes left
 
 Losing the in-process loop meant losing step caps and per-tool control. What remains: run timeout,
-cost per run, cost per ticket, handoff depth, loop detector, and `max_concurrent_runs` (default 3,
-because each run is a full subprocess). Every guardrail trip **must** leave a system comment naming
-which guardrail fired — there is no silent failure path.
+cost per run, cost per ticket, handoff depth, loop detector, `max_concurrent_runs` (default 3,
+because each run is a full subprocess), and `ticket_not_in_active_sprint` (a ticket with no sprint,
+or one that isn't the workspace's active sprint, can't be scheduled — except for whichever roles
+`workspace.sprint_creator_roles` trusts to plan sprints, default PM-only, since those roles need to
+be reachable on any ticket to do that triage). Every guardrail trip **must** leave a system comment
+naming which guardrail fired — there is no silent failure path.
 
 The kill switch is a security control, not a convenience: it must actually kill child processes,
 verified with `ps`, not just mark rows in the DB.

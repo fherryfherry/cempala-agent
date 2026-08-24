@@ -101,7 +101,15 @@ def _make_agent(client, ws_id, role, name, model=None):
 
 
 def _make_ticket(client, ws_id, title="Epic"):
-    resp = client.post(f"/api/workspaces/{ws_id}/tickets", json={"title": title, "description": "d"})
+    # Epics in this file are always kicked off by the PM (exempt from the
+    # ticket-not-in-active-sprint guardrail, see guardrails.py), so they don't need
+    # a sprint themselves. Child tickets the PM's report creates via `tickets:`
+    # declare their own `sprint: "Sprint 1"` (see the fake opencode scripts below)
+    # so the non-PM agents that pick them up next pass that guardrail.
+    resp = client.post(
+        f"/api/workspaces/{ws_id}/tickets",
+        json={"title": title, "description": "d", "is_new_epic": True},
+    )
     assert resp.status_code == 201, resp.text
     return resp.json()
 
@@ -165,6 +173,10 @@ def emit(status, mention, summary, session_id, tickets=None):
         for t in tickets:
             rows.append(f"  - title: \\"{t[0]}\\"")
             rows.append(f"    assignee: \\"{t[1]}\\"")
+            # New tickets need an active sprint (owner requirement: agents only work
+            # tickets in the active sprint) -- "Sprint 1" bootstraps active since
+            # it's the first sprint ever created in this workspace.
+            rows.append("    sprint: \\"Sprint 1\\"")
         tickets_yaml = "\\n".join(rows) + "\\n"
     text = f"""ok
 
@@ -304,6 +316,10 @@ def emit(status, mention, summary, session_id, tickets=None):
         for t in tickets:
             rows.append(f"  - title: \\"{t[0]}\\"")
             rows.append(f"    assignee: \\"{t[1]}\\"")
+            # New tickets need an active sprint (owner requirement: agents only work
+            # tickets in the active sprint) -- "Sprint 1" bootstraps active since
+            # it's the first sprint ever created in this workspace.
+            rows.append("    sprint: \\"Sprint 1\\"")
         tickets_yaml = "\\n".join(rows) + "\\n"
     text = f"""ok
 

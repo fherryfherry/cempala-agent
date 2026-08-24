@@ -53,9 +53,44 @@ def _make_workspace(client, tmp_path, key="MAP"):
 
 
 def _ticket_payload(title="Do the thing", **overrides):
-    payload = {"title": title, "description": "desc"}
+    payload = {"title": title, "description": "desc", "is_new_epic": True}
     payload.update(overrides)
+    if "parent_id" in overrides:
+        payload.pop("is_new_epic", None)
     return payload
+
+
+def test_create_ticket_without_parent_or_epic_flag_422(client, tmp_path):
+    # Every ticket needs an epic: parent_id or an explicit is_new_epic=True opt-in.
+    ws_id = _make_workspace(client, tmp_path)
+    resp = client.post(f"/api/workspaces/{ws_id}/tickets", json={"title": "orphan"})
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "epic_required"
+
+
+def test_create_ticket_with_both_parent_and_epic_flag_422(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    epic = client.post(
+        f"/api/workspaces/{ws_id}/tickets", json={"title": "epic", "is_new_epic": True}
+    ).json()
+    resp = client.post(
+        f"/api/workspaces/{ws_id}/tickets",
+        json={"title": "confused", "parent_id": epic["id"], "is_new_epic": True},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "invalid_epic_flag"
+
+
+def test_create_ticket_with_parent_id_succeeds_without_epic_flag(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    epic = client.post(
+        f"/api/workspaces/{ws_id}/tickets", json={"title": "epic", "is_new_epic": True}
+    ).json()
+    resp = client.post(
+        f"/api/workspaces/{ws_id}/tickets", json={"title": "child", "parent_id": epic["id"]}
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["parent_id"] == epic["id"]
 
 
 def test_create_ticket_success_and_key_format(client, tmp_path):
@@ -121,6 +156,24 @@ def test_get_ticket_with_nested_data(client, tmp_path):
     assert body["runs"] == []
     assert len(body["children"]) == 1
     assert body["children"][0]["key"] == child["key"]
+    assert body["parent"] is None
+
+
+def test_get_ticket_includes_parent_epic(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    parent = client.post(f"/api/workspaces/{ws_id}/tickets", json=_ticket_payload("parent")).json()
+    child = client.post(
+        f"/api/workspaces/{ws_id}/tickets",
+        json=_ticket_payload("child", parent_id=parent["id"]),
+    ).json()
+
+    resp = client.get(f"/api/tickets/{child['key']}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["parent"] is not None
+    assert body["parent"]["key"] == parent["key"]
+    assert body["parent"]["title"] == parent["title"]
+    assert body["children"] == []
 
 
 def test_get_ticket_nested_comments_include_mentions(client, tmp_path):
@@ -173,7 +226,10 @@ def _make_agent(client, ws_id, role, name="agent"):
     return resp.json()["id"]
 
 
-def test_patch_illegal_transition_422_names_transition(client, tmp_path):
+def test_patch_any_role_may_transition_between_any_statuses(client, tmp_path):
+    # Owner request: the old per-role transition matrix (e.g. only Lead could go
+    # review -> qa) was removed — any known role may move a ticket between any two
+    # distinct known statuses now.
     ws_id = _make_workspace(client, tmp_path)
     ticket = client.post(f"/api/workspaces/{ws_id}/tickets", json=_ticket_payload()).json()
     engineer_id = _make_agent(client, ws_id, "engineer")
@@ -182,9 +238,16 @@ def test_patch_illegal_transition_422_names_transition(client, tmp_path):
         f"/api/tickets/{ticket['key']}",
         json={"status": "review", "actor_agent_id": engineer_id},
     )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "review"
+
+
+def test_patch_unknown_status_value_422(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    ticket = client.post(f"/api/workspaces/{ws_id}/tickets", json=_ticket_payload()).json()
+
+    resp = client.patch(f"/api/tickets/{ticket['key']}", json={"status": "not_a_real_status"})
     assert resp.status_code == 422
-    msg = resp.json()["error"]["message"]
-    assert "backlog" in msg and "review" in msg and "engineer" in msg
 
 
 def test_patch_owner_bypasses_matrix_including_blocked_to_todo(client, tmp_path):
@@ -197,6 +260,16 @@ def test_patch_owner_bypasses_matrix_including_blocked_to_todo(client, tmp_path)
     resp = client.patch(f"/api/tickets/{ticket['key']}", json={"status": "todo"})
     assert resp.status_code == 200, resp.text
     assert resp.json()["status"] == "todo"
+    assert resp.json()["loop_reset_at"] is not None
+
+
+def test_patch_status_change_not_from_blocked_leaves_loop_reset_at_unset(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    ticket = client.post(f"/api/workspaces/{ws_id}/tickets", json=_ticket_payload()).json()
+
+    resp = client.patch(f"/api/tickets/{ticket['key']}", json={"status": "todo"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["loop_reset_at"] is None
 
 
 def test_patch_legal_transition_writes_system_comment(client, tmp_path):

@@ -87,19 +87,43 @@ agent
   enabled (bool), status (enum: idle|working|error|disabled),
   created_at
 
+agent_memory
+  id, agent_id → agent.id (cascade),
+  note (text), origin (enum: agent|owner),
+  source_ticket_key (nullable, terisi hanya untuk origin=agent),
+  created_at
+  -- catatan lintas tiket per agent (bukan per tiket), MAP-035. origin=agent dari blok
+  -- ```map `memory:` (§4.3); origin=owner dari POST manual /agents/{id}/memory.
+
 ticket
   id, workspace_id (cascade), key ("MAP-001"),
   title, description (markdown),
   status (enum, §5), priority (enum: low|medium|high|urgent),
   assignee_id → agent.id (nullable, SET NULL),
-  parent_id → ticket.id (nullable, 1 level),
+  parent_id → ticket.id (nullable di DB untuk 1 level nesting, tapi API `POST` mewajibkan
+    salah satu dari `parent_id` atau `is_new_epic: true` — tidak ada tiket lepas tanpa epic).
+    "Epic" = tiket dengan parent_id NULL — bukan entity terpisah (ADR-012). Sengaja
+    **reusable**: satu epic dipakai berkali-kali sebagai parent tiket baru (feature/story/
+    bug/enhancement) ke depannya, bukan container sekali pakai per request — lihat §4.3
+    field `tickets[].epic` dan §3 [03-agent-design.md](03-agent-design.md) untuk mekanisme
+    reuse-nya,
   cost_used (float, default 0),           -- akumulasi biaya dari opencode
   handoff_depth (int, default 0),
   created_at, updated_at
 
+artifact_group
+  id, workspace_id (cascade), name, created_at
+  -- get-or-create by (workspace_id, name) case-insensitive, dibuat agent lewat blok ```map
+  -- `artifacts:` (§4.3). Tidak ada endpoint create/rename manual.
+
 attachment
   id, ticket_id (cascade), filename, content_type, size_bytes,
-  path (relatif ke storage/), created_at
+  path (relatif ke storage/),
+  origin (enum: upload|agent, default upload),  -- upload = lampiran manual owner,
+                                                  -- agent = dipublikasikan dari `artifacts:`
+  group_id → artifact_group.id (nullable, SET NULL),
+  description (nullable, dari `artifacts:` — selalu NULL untuk origin=upload),
+  created_at
 
 comment
   id, ticket_id (cascade), author_agent_id (nullable = owner),
@@ -158,11 +182,24 @@ PATCH  /agents/{id}
 DELETE /agents/{id}              → 409 kalau punya run aktif
 ```
 
+### Agent memory (MAP-035)
+```
+GET    /agents/{id}/memory       → terbaru dulu
+POST   /agents/{id}/memory       {note}   -- origin=owner, catatan manual
+DELETE /agent-memory/{memory_id}
+```
+Catatan `origin=agent` hanya dibuat orchestrator dari blok ```map `memory:` (§4.3) — tidak ada
+endpoint POST untuk itu selain lewat laporan agent sendiri.
+
 ### Ticket
 ```
 GET    /workspaces/{id}/tickets   ?status=&assignee_id=&parent_id=
-POST   /workspaces/{id}/tickets   {title, description, priority?, assignee_id?, parent_id?}
-GET    /tickets/{key}             → tiket + comments + attachments + runs + children
+POST   /workspaces/{id}/tickets   {title, description, priority?, assignee_id?, parent_id?,
+                                    is_new_epic?}
+                                   -- wajib salah satu dari parent_id atau is_new_epic=true
+                                   (422 epic_required kalau keduanya kosong, 422
+                                   invalid_epic_flag kalau keduanya diisi)
+GET    /tickets/{key}             → tiket + comments + attachments + runs + children + parent
 PATCH  /tickets/{key}
 DELETE /tickets/{key}
 ```
@@ -178,6 +215,31 @@ DELETE /attachments/{id}
 Disimpan di `storage/attachments/<ticket_id>/<uuid>-<nama_sanitasi>`, di luar `repo_path`.
 Attachment disertakan ke opencode lewat flag `-f` (§4.2).
 
+### Artifact groups
+```
+GET   /workspaces/{id}/artifacts   → attachment origin=agent, dikelompokkan per ArtifactGroup
+```
+Read-only — grup dan attachment-nya dibuat lewat blok ```map `artifacts:` (§4.3), tidak ada
+endpoint create/update/delete manual. Menu Artifacts di frontend (§8) memakai endpoint ini.
+
+### Rutinitas (scheduled agent tasks)
+```
+GET    /workspaces/{id}/routines
+POST   /workspaces/{id}/routines   {name, prompt, interval_minutes, mode, agent_id?}
+PATCH  /routines/{id}              {name?, prompt?, interval_minutes?, mode?, agent_id?, status?}
+DELETE /routines/{id}
+POST   /routines/{id}/run          → trigger manual (tombol "Run now")
+```
+Rutinitas = tugas terjadwal yang menjalankan agent **tanpa tiket** (`Run.ticket_id = NULL`,
+`trigger = "routine"`, `routine_id` menautkan ke `routine`). Status rutinitas:
+`idle` (menunggu interval) → `waiting` (run terjadwal/antre) → `running` (run jalan) →
+`idle`; `disabled` = dimatikan owner. Scheduler in-process (`core/routine_scheduler.py`)
+tick tiap 60 detik; mode `idle_only` melewati tick kalau agent sibuk (dan memajukan
+`last_run_at`), mode `consistent` mengantre di belakang run agent yang sedang berjalan.
+Workspace `paused` → semua rutinitas dilewati. Guardrail `max_concurrent_runs` tetap
+berlaku (rutinitas ikut dihitung); `max_cost_per_ticket`/`max_handoff_depth` tidak relevan
+(tanpa tiket).
+
 ### Comment
 ```
 GET    /tickets/{key}/comments
@@ -190,9 +252,18 @@ yang di-mention (kecuali penulisnya sendiri), `trigger=mention`.
 ```
 POST   /tickets/{key}/run        {agent_id?}
 POST   /runs/{id}/stop
+POST   /runs/{id}/retry           -- hanya untuk run berstatus failed/interrupted
 GET    /runs/{id}                → metadata + event (paginated)
 GET    /workspaces/{id}/runs     ?status=
 ```
+`retry` (MAP-036) menjadwalkan ulang agent+tiket yang sama (`trigger=manual`) — secara
+mekanis identik dengan klik Run lagi. Lookup `session_id` di `execute()` sudah bersifat
+status-agnostic (§4.5), jadi otomatis melanjutkan session opencode lama kalau run yang
+di-retry sempat mendapat `session_id` sebelum gagal. Kalau tiket sedang `blocked` saat
+retry, endpoint ini membersihkan block itu dulu (`blocked_reason=None`, `loop_reset_at`,
+`handoff_depth=0`) — pola yang sama dengan `PATCH /tickets/{key}` saat status dipindah
+keluar dari `blocked` — supaya histori sebelum kegagalan tidak langsung memicu ulang
+guardrail yang sama. 409 `not_retryable` kalau run bukan `failed`/`interrupted`.
 
 ### Events (SSE)
 ```
@@ -210,6 +281,33 @@ Satu sumber kebenaran: yang muncul di dropdown pasti dikenali opencode.
 Kalau daftarnya kosong atau perintahnya gagal → 503 dengan pesan yang menyarankan
 `opencode auth login`. Model Ollama Cloud muncul di sini setelah provider `ollama`
 dikonfigurasi di opencode oleh owner — portal tidak menyimpan API key LLM sama sekali.
+
+### MCP ticket server (ADR-011)
+
+Setiap run opencode mendapat MCP server lokal (`app/mcp_server.py`, stdio subprocess) lewat
+config `opencode.json` per run (`OPENCODE_CONFIG` env, dihapus setelah run selesai). Server
+memproksi ke backend HTTP (`MAP_API_BASE`, default `127.0.0.1:8000/api`) dengan scope
+workspace/agent dari env per run. Tools:
+
+```
+list_tickets      → daftar tiket workspace; tiket top-level (epic) ditandai [EPIC]
+get_ticket(key)   → detail: deskripsi, komentar, status, assignee, sub-tiket
+post_comment      → komentar ke tiket (author = agent berjalan, tidak memicu run)
+create_ticket(epic?) → tiket backlog baru, tidak auto-schedule. Tanpa `epic`: jadi epic
+                        top-level baru. Dengan `epic` (key epic yang sudah ada, ADR-012):
+                        nempel sebagai anak epic itu — ditolak kalau key bukan epic
+                        top-level.
+update_ticket     → ubah status/priority (actor = agent berjalan, state machine backend)
+list_artifacts    → kelompok + file artifact (menu Artifacts)
+read_artifact     → isi artifact (markdown/teks; dipotong 8.000 karakter)
+get_memory        → catatan memory agent ini
+create_memory     → simpan catatan memory (max 500 karakter)
+update_memory     → perbarui catatan memory yang ada
+```
+
+Semua validasi (state machine, role gate, approval PM) tetap di backend — server ini proksi
+tipis, bukan duplikasi logika. Tidak ada TCP: server hanya stdio subprocess yang di-spawn
+backend. Matikan dengan `MAP_MCP_ENABLED=false` (config backend) untuk run tanpa tool tiket.
 
 ## 4. Agent runtime
 
@@ -272,6 +370,13 @@ tickets:                    # opsional; dipakai PM untuk breakdown, QA/Pentester
       ...
     assignee: eng-1
     priority: high
+    epic: AUTH-001            # opsional; key epic tujuan — WAJIB isi kalau ada yang relevan
+artifacts:                  # opsional; file yang dihasilkan agent, tampil di menu Artifacts
+  - path: docs/PRD.md       # relatif ke repo_path
+    group: Dokumen Teknis   # WAJIB dari daftar kelompok yang ada di prompt (lihat aturan di bawah)
+    description: initial PRD
+memory:                     # opsional; catatan lintas tiket, lihat aturan di bawah
+  - Jangan lupa jalankan migrasi sebelum lapor done.
 ```
 ````
 
@@ -283,9 +388,62 @@ Aturan parser (`core/report.py`):
 - `mention` dicocokkan ke nama agent di workspace. Nama tak dikenal → dicatat di komentar sistem,
   tidak memicu run.
 - `summary` **wajib** → jadi komentar tiket dengan `author_agent_id` agent tersebut.
-- `tickets[]` opsional. Dibuat sebagai anak dari tiket saat ini, di-assign, status `todo`.
-  Hanya PM, QA, dan Pentester yang boleh mengisi ini (ditegakkan per role, bukan dipercayakan
-  ke model).
+- `tickets[]` opsional. Di-assign, status `todo`. Hanya PM, QA, dan Pentester yang boleh mengisi
+  ini (ditegakkan per role, bukan dipercayakan ke model). Parent (`parent_id`) diresolusi
+  orchestrator, **bukan** selalu "anak dari tiket saat ini" (lihat `epic:` di bawah, ADR-012).
+- **`epic:` per item `tickets[]`** (ADR-012) — key epic (tiket top-level) tujuan, opsional.
+  Kontrak menyertakan katalog epic yang sudah ada (top-level tickets, ~100 terbaru diupdate,
+  pola sama seperti katalog `artifacts:` di bawah) dengan aturan WAJIB reuse kalau relevan.
+  Resolusi `parent_id` orchestrator: (1) `epic:` valid → id epic itu; (2) `epic:` tak
+  dikenal/bukan epic top-level → di-skip dengan catatan di komentar sistem, lanjut ke (3);
+  (3) tanpa `epic:`, tiket saat ini **sudah punya parent** → pakai parent itu (sibling di
+  bawah epic yang sama — menjaga flat 1-level, menambal bug lama di mana jalur agent tidak
+  menegakkan ini seperti jalur API manual); (4) tanpa `epic:` dan tiket saat ini tidak punya
+  parent → tiket saat ini sendiri jadi parent (behavior asli, tiket ini jadi epic baru).
+- `sprints[]` opsional, companion dari `tickets[]` (dieksekusi hanya saat report juga membawa
+  `tickets[]`). Role yang boleh mendeklarasikannya diatur per workspace lewat setting
+  `sprint_creator_roles` (halaman Settings, pill picker; default `["pm"]`) — ditegakkan di
+  parser, bukan dipercayakan ke prompt. Gate persetujuan owner (PM belum approve) tetap
+  berlaku untuk role pm. **Sprint murni timebox** — kontrak menyertakan katalog nama sprint
+  yang sudah ada dengan aturan WAJIB reuse (nama persis) kalau timebox-nya masih relevan, dan
+  instruksi tegas: jangan taruh nama fitur/scope di nama sprint (itu urusan `epic:` di atas).
+- `artifacts[]` opsional, tersedia untuk semua role (tidak seperti `tickets[]`). Tiap entri
+  (`path`, `group`, `description?`) diproses orchestrator (bukan parser ini — parser tetap
+  bebas filesystem): `path` diresolusi relatif ke `repo_path` dan **wajib tetap di dalam**
+  `repo_path` (entri yang keluar lewat `..`/path absolut diabaikan + dicatat di komentar
+  sistem, sama seperti `updates:` yang gagal), lalu isinya disalin ke `storage/attachments/`
+  sebagai `Attachment` (`origin=agent`, `group_id` dari `ArtifactGroup` get-or-create by name
+  per workspace, case-insensitive — pola sama seperti sprint). Ini satu-satunya tempat
+  orchestrator membaca file di dalam `repo_path`, dan hanya path eksplisit yang dideklarasikan
+  agent sendiri — bukan scan folder, bukan tool filesystem baru untuk agent (lihat catatan di
+  [ADR-006](06-adr.md)).
+- **Nama kelompok tidak lagi bebas.** Blok ```map di prompt menyertakan daftar kelompok yang
+  sudah ada di workspace (daftar `ArtifactGroup` saat prompt disusun); agent wajib memilih salah
+  satu yang relevan (mencocokkan tujuan, bukan ejaan persis) dan hanya boleh membuat nama baru
+  kalau tidak ada yang cocok. Mencegah duplikat/ambigu seperti "Dokumen Teknis" vs "Dokumen
+  Teknikal". Dedup case-insensitive get-or-create tetap berlaku sebagai jaring pengaman terakhir.
+- **Katalog artifacts di prompt.** Setiap prompt menyertakan daftar artifacts yang sudah
+  dipublikasikan di workspace (paling baru ~100, format `[kelompok] filename (KEY) —
+  deskripsi`) supaya semua agent bisa membaca/mencari apa yang sudah ada sebelum membuat file
+  baru — mencegah duplikasi kerja dan file yang menumpuk.
+- `artifact_updates[]` opsional, **HANYA PM** (ditegakkan di parser, sama seperti `tickets[]`).
+  Merapikan menu Artifacts: `rename` (group→to; kalau `to` sudah ada, otomatis jadi merge),
+  `merge` (from→into, sumber dihapus), `move` (satu file antar kelompok), `delete` (hanya
+  kelompok kosong; yang masih berisi file ditolak). Dieksekusi orchestrator **setelah**
+  `_publish_artifacts` pada report yang sama, jadi artifacts baru di blok yang sama ikut
+  terorganisir. Kelompok/file tak ditemukan atau op tak dikenal → dicatat di komentar sistem,
+  tidak menggagalkan report (toleransi sama seperti `updates:`/`tickets:`).
+- `memory[]` opsional (MAP-035), tersedia untuk semua role seperti `artifacts[]`. Tiap entri
+  string dipersist sebagai baris `agent_memory` baru (`origin=agent`, `source_ticket_key` dari
+  tiket ini) — beda dari `artifacts[]`, tidak ada filesystem yang tersentuh. Entri kosong/bukan
+  string dibuang tanpa gagal, dan tiap catatan dipotong ke 500 karakter (lihat §4.4 soal
+  bagaimana catatan ini dipakai lagi di prompt berikutnya).
+- **Run rutinitas** (`trigger="routine"`, tanpa tiket) memakai kontrak ```map yang berbeda:
+  `status`/`mention` **ditolak** (parse error → run `failed`, bukan block). Yang diizinkan:
+  `summary` (wajib), `comments[]` (komen ke tiket lain — hanya valid di run rutinitas),
+  `tickets[]` (jadi tiket backlog `todo`, **tidak** auto-schedule), `updates[]`, `memory[]`,
+  `artifact_updates[]` (PM). `artifacts[]` ditolak (butuh tiket untuk FK/folder storage).
+  Aksi dieksekusi orchestrator; tidak ada transisi status tiket apa pun.
 - **Blok hilang atau YAML rusak** → run `failed`, tiket `blocked`, komentar sistem berisi 2.000
   karakter terakhir output agent supaya kamu bisa melihat apa yang sebenarnya ia tulis.
   Tidak ada tebakan, tidak ada kegagalan diam. ([ADR-009](06-adr.md))
@@ -300,12 +458,21 @@ aksi, bukan menggantikan jejak.
 1. **BASE** — identitas, `repo_path`, aturan kerja, daftar rekan tim
    ([03-agent-design.md](03-agent-design.md) §2).
 2. **Blok role** — default per role, atau `agent.system_prompt` bila diisi.
-3. **Konteks tiket** — key, judul, status, prioritas, deskripsi, daftar attachment,
+3. **Memory agent** (MAP-035) — catatan `agent_memory` milik agent ini sendiri, lintas tiket
+   (paling baru ~20 entri, terurut kronologis), kalau ada. Muncul sebelum konteks tiket karena
+   sifatnya lintas-tiket, bukan spesifik tiket saat ini.
+4. **Konteks tiket** — key, judul, status, prioritas, deskripsi, daftar attachment,
    5 komentar terakhir, ringkasan `report.summary` dari run-run sebelumnya di tiket ini.
-4. **Konteks anti-loop** — bila ini review ke-n, ringkasan review sebelumnya
+5. **Katalog artifacts** — daftar artifacts workspace (paling baru ~100) supaya agent bisa
+   membaca/mencari apa yang sudah dipublikasikan sebelum membuat file baru.
+6. **Konteks anti-loop** — bila ini review ke-n, ringkasan review sebelumnya
    ([03-agent-design.md](03-agent-design.md) §7).
-5. **Kontrak blok ```map** — status yang legal untuk role ini, nama-nama agent yang bisa
-   di-mention, dan apakah `tickets[]` diizinkan.
+
+7. **Kontrak blok ```map** — status yang legal untuk role ini, nama-nama agent yang bisa
+   di-mention, apakah `tickets[]` diizinkan, plus (untuk role yang boleh `tickets[]`) katalog
+   epic yang sudah ada (`existing_epics`, ADR-012) dan katalog sprint (`existing_sprints`) yang
+   di-query live oleh orchestrator tiap run — bukan disimpan sebagai teks statis, karena
+   harus selalu mencerminkan tiket/sprint terbaru di workspace.
 
 Prompt final disimpan di event `run_started` supaya bisa diperiksa saat sesuatu berjalan aneh.
 
@@ -359,13 +526,22 @@ Per workspace, di `workspace.guardrails` (JSON), bisa diedit di halaman settings
 - **run_timeout_sec** — `asyncio.wait_for` di sekitar subprocess; lewat → terminate + run `failed`.
 - **max_cost_per_run** — dipantau dari event biaya opencode selagi berjalan; lewat → terminate.
 - **max_cost_per_ticket** — akumulasi `ticket.cost_used`; lewat → tiket `blocked`.
-- **max_handoff_depth** — panjang rantai `parent_run_id`; lewat → `blocked`.
+- **max_handoff_depth** — panjang rantai `parent_run_id`; lewat → `blocked`. Tidak berlaku untuk
+  run yang dipicu chat owner (`trigger="mention"`) — lihat [03-agent-design.md](03-agent-design.md)
+  §6.
 - **loop_threshold** — pasangan agent yang ping-pong (A→B→A→B) melebihi ambang → `blocked` +
   komentar sistem yang menuliskan siklusnya.
 - **max_concurrent_runs** — semaphore per workspace. Default rendah (3) karena tiap run adalah
   proses opencode penuh, bukan sekadar panggilan HTTP.
 - **Kill switch** — `POST /workspaces/{id}/pause`: set `paused=true`, set semua `cancel_event`,
   terminate seluruh subprocess, tandai run `cancelled`, agent `idle`, tolak schedule baru.
+- **ticket_not_in_active_sprint** — bukan bagian dari dict di atas (selalu aktif, tidak ada toggle
+  di Settings). Ticket yang belum masuk sprint manapun (backlog) atau sprint-nya bukan yang
+  `active` tidak bisa dijalankan agent → `blocked` + komentar sistem. Dikecualikan: role apa pun
+  yang ada di `workspace.sprint_creator_roles` (default hanya PM) — role itu perlu selalu bisa
+  merespon ticket apa pun (termasuk backlog) untuk melakukan triage/pemindahan ke sprint. Owner
+  memindahkan ticket ke sprint aktif atau menukar sprint mana yang aktif lewat mekanisme yang
+  sudah ada (`PATCH /tickets/{key}` `sprint_id`, `PATCH /sprints/{id}` `status`).
 
 Setiap guardrail yang memblokir **selalu** menulis komentar sistem yang menyebut guardrail mana.
 Tidak ada kegagalan diam.
@@ -397,9 +573,10 @@ Ini konsekuensi yang diterima sadar ([ADR-010](06-adr.md)).
 |---|---|
 | `/` | Daftar workspace + form buat baru |
 | `/w/[key]/board` | Kanban per status, drag & drop, badge agent yang sedang kerja |
-| `/w/[key]/ticket/[ticketKey]` | Detail: deskripsi, attachment, komentar + mention composer, daftar run, Run/Stop |
-| `/w/[key]/agents` | Setup agent: role, model (dropdown `/models`), tool_kind, system prompt |
-| `/w/[key]/activity` | Feed live; klik run → panel output opencode + tool call + blok map hasil parse |
+| `/w/[key]/ticket/[ticketKey]` | Detail: deskripsi, attachment, komentar + mention composer, daftar run, Run/Stop; link ke epic induk (kalau ada) dan daftar sub-tiket (kalau epic) |
+| `/w/[key]/agents` | Setup agent: role, model (dropdown `/models`), tool_kind, system prompt; tombol "Memory" per agent membuka dialog catatan lintas tiket (MAP-035) |
+| `/w/[key]/activity` | Feed live; klik run → panel output opencode + tool call + blok map hasil parse; tombol "Retry" pada run `failed`/`interrupted` (daftar run maupun panel detail, MAP-036) |
+| `/w/[key]/artifacts` | Read-only: attachment `origin=agent`, dikelompokkan per ArtifactGroup, link balik ke tiket asal |
 | `/w/[key]/settings` | `repo_path`, guardrail, Pause/Resume, peringatan keamanan §7 |
 
 Realtime: satu `EventSource` per workspace di React context; event masuk → update feed +

@@ -1,13 +1,13 @@
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.errors import AppError
 from app.api.workspaces import _get_workspace_or_404
-from app.db.models import Agent, Run
+from app.db.models import Agent, AgentMemory, Run
 from app.db.session import get_session
-from app.schemas.agent import AgentCreate, AgentOut, AgentUpdate
+from app.schemas.agent import AgentCreate, AgentListOut, AgentOut, AgentUpdate
 
 workspace_agents_router = APIRouter(prefix="/workspaces/{workspace_id}/agents", tags=["agents"])
 agents_router = APIRouter(prefix="/agents", tags=["agents"])
@@ -20,11 +20,28 @@ async def _get_agent_or_404(session: AsyncSession, agent_id: str) -> Agent:
     return agent
 
 
-@workspace_agents_router.get("", response_model=list[AgentOut])
+@workspace_agents_router.get("", response_model=list[AgentListOut])
 async def list_agents(workspace_id: str, session: AsyncSession = Depends(get_session)):
     await _get_workspace_or_404(session, workspace_id)
-    result = await session.scalars(select(Agent).where(Agent.workspace_id == workspace_id))
-    return result.all()
+    memory_count = (
+        select(func.count())
+        .where(AgentMemory.agent_id == Agent.id)
+        .correlate(Agent)
+        .scalar_subquery()
+    )
+    rows = (
+        await session.execute(
+            select(Agent, memory_count.label("memory_count")).where(
+                Agent.workspace_id == workspace_id
+            )
+        )
+    ).all()
+    return [
+        AgentListOut.model_validate(
+            {**AgentOut.model_validate(agent).model_dump(), "memory_count": count}
+        )
+        for agent, count in rows
+    ]
 
 
 @workspace_agents_router.post("", response_model=AgentOut, status_code=201)
@@ -40,6 +57,8 @@ async def create_agent(
         model=body.model,
         tool_kind=body.tool_kind,
         system_prompt=body.system_prompt,
+        avatar_template=body.avatar_template,
+        avatar_color=body.avatar_color,
     )
     session.add(agent)
     try:
@@ -59,6 +78,20 @@ async def update_agent(agent_id: str, body: AgentUpdate, session: AsyncSession =
         value = getattr(body, field)
         if value is not None:
             setattr(agent, field, value)
+
+    # avatar_template/avatar_color are the one pair where explicit null is meaningful
+    # (clearing back to plain initials), so honor field presence over non-null values.
+    if "avatar_template" in body.model_fields_set:
+        agent.avatar_template = body.avatar_template
+    if "avatar_color" in body.model_fields_set:
+        agent.avatar_color = body.avatar_color
+
+    # avatar_template/avatar_color are the one pair where explicit null is meaningful
+    # (clearing back to plain initials), so honor field presence over non-null values.
+    if "avatar_template" in body.model_fields_set:
+        agent.avatar_template = body.avatar_template
+    if "avatar_color" in body.model_fields_set:
+        agent.avatar_color = body.avatar_color
 
     try:
         await session.commit()

@@ -13,6 +13,8 @@ dependencies = [
     "greenlet>=3.0",
     "python-multipart>=0.0.12",
     "pyyaml>=6.0",
+    "mcp>=2.0.0",
+    "httpx>=0.28.1",
 ]
 
 [project.optional-dependencies]

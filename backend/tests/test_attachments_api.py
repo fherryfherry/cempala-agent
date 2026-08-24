@@ -56,7 +56,9 @@ def _make_workspace(client, tmp_path, key="MAP"):
 
 
 def _make_ticket(client, ws_id, title="Do the thing"):
-    resp = client.post(f"/api/workspaces/{ws_id}/tickets", json={"title": title})
+    resp = client.post(
+        f"/api/workspaces/{ws_id}/tickets", json={"title": title, "is_new_epic": True}
+    )
     assert resp.status_code == 201, resp.text
     return resp.json()
 
@@ -164,6 +166,26 @@ def test_download_original_filename_and_bytes(client, tmp_path):
     assert resp.content == b"a,b,c\n1,2,3"
     assert "report.csv" in resp.headers["content-disposition"]
     assert resp.headers["content-type"].startswith("text/csv")
+    # default is a forced download
+    assert resp.headers["content-disposition"].startswith("attachment")
+
+
+def test_download_inline_disposition(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    ticket = _make_ticket(client, ws_id)
+
+    resp = client.post(
+        f"/api/tickets/{ticket['key']}/attachments",
+        files={"file": ("pic.png", b"\x89PNG\r\n\x1a\n", "image/png")},
+    )
+    attachment_id = resp.json()["id"]
+
+    resp = client.get(f"/api/attachments/{attachment_id}?inline=1")
+    assert resp.status_code == 200
+    assert resp.content == b"\x89PNG\r\n\x1a\n"
+    assert resp.headers["content-type"].startswith("image/png")
+    # inline lets the browser render (iframe/img) instead of forcing a download
+    assert resp.headers["content-disposition"].startswith("inline")
 
 
 def test_delete_removes_db_row_and_file(client, tmp_path):

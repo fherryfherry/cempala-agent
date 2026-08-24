@@ -88,6 +88,43 @@ async def test_a_b_a_b_a_trips_at_threshold_2(session):
     assert "eng-1" in result and "lead-1" in result
 
 
+async def test_mention_trigger_is_exempt_from_loop_detection(session):
+    ws, ticket, agents = await _setup(session)
+    # Same history/threshold as test_a_b_a_b_a_trips_at_threshold_2 -- would trip.
+    for i, name in enumerate(["eng-1", "lead-1", "eng-1", "lead-1"]):
+        await _add_run(session, ticket, agents[name], i)
+
+    result = await detect_loop(
+        session, ticket, {"loop_threshold": 2}, agents["eng-1"].id, trigger="mention"
+    )
+    assert result is None
+
+    # Sanity: the same history with no/other trigger still trips as before.
+    result = await detect_loop(session, ticket, {"loop_threshold": 2}, agents["eng-1"].id)
+    assert result is not None
+
+
+async def test_loop_reset_at_ignores_history_before_reset(session):
+    ws, ticket, agents = await _setup(session)
+    for i, name in enumerate(["eng-1", "lead-1", "eng-1", "lead-1"]):
+        await _add_run(session, ticket, agents[name], i)
+
+    # A human unblocks the ticket after this history -- everything before the reset
+    # point should no longer count.
+    ticket.loop_reset_at = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=10)
+    await session.commit()
+
+    result = await detect_loop(session, ticket, {"loop_threshold": 2}, agents["eng-1"].id)
+    assert result is None
+
+    # A fresh alternating pair *after* the reset still trips normally.
+    for i, name in enumerate(["eng-1", "lead-1", "eng-1", "lead-1"]):
+        await _add_run(session, ticket, agents[name], 20 + i)
+
+    result = await detect_loop(session, ticket, {"loop_threshold": 2}, agents["eng-1"].id)
+    assert result is not None
+
+
 async def test_a_b_c_a_never_trips(session):
     ws, ticket, agents = await _setup(session)
     for i, name in enumerate(["eng-1", "lead-1", "qa-1"]):
@@ -220,8 +257,28 @@ def _make_agent(client, ws_id, role, name, model="opencode/big-pickle"):
     return resp.json()["id"]
 
 
+def _active_sprint_id(client, ws_id):
+    """Idempotent: reuse the workspace's active sprint if one exists, else create
+    one (bootstraps active as the first sprint)."""
+    sprints = client.get(f"/api/workspaces/{ws_id}/sprints").json()
+    active = next((s for s in sprints if s["status"] == "active"), None)
+    if active:
+        return active["id"]
+    resp = client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "Sprint 0"})
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
+
+
 def _make_ticket(client, ws_id, title="Do the thing"):
-    resp = client.post(f"/api/workspaces/{ws_id}/tickets", json={"title": title, "description": "d"})
+    resp = client.post(
+        f"/api/workspaces/{ws_id}/tickets",
+        json={
+            "title": title,
+            "description": "d",
+            "is_new_epic": True,
+            "sprint_id": _active_sprint_id(client, ws_id),
+        },
+    )
     assert resp.status_code == 201, resp.text
     return resp.json()
 
