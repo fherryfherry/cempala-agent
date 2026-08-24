@@ -395,7 +395,7 @@ function ThreadPanel({
   }
 
   return (
-    <Card className="flex h-full min-h-0 flex-col gap-4 p-4">
+    <Card className="flex h-full min-h-0 flex-col gap-3 p-4">
       <div className="relative min-h-0 flex-1">
         <div ref={scrollRef} onScroll={handleScroll} className="h-full overflow-y-auto">
           {mode.type === "draft" && (
@@ -514,7 +514,7 @@ function ThreadPanel({
       )}
 
       <form
-        className="flex flex-col gap-2 border-t border-black/5 pt-4 dark:border-white/5"
+        className="flex flex-col gap-2 border-t border-black/5 pt-1 dark:border-white/5"
         onSubmit={(e) => {
           e.preventDefault();
           handleSend();
