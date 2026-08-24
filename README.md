@@ -21,6 +21,18 @@ reply.
 See [`docs/00-overview.md`](docs/00-overview.md) for the full pitch and
 [`docs/02-tsd.md`](docs/02-tsd.md) for the technical architecture.
 
+## Why "CEMPALA"?
+
+In a Javanese wayang performance, the *dalang* (puppeteer) sits behind a screen and brings dozens
+of puppets to life — but he never touches them directly. His hands work through the *cempala*, a
+small wooden mallet that taps the puppet sticks and the puppet box to set the rhythm, cue the
+music, and command the stage. The puppets do the acting; the cempala is the quiet instrument that
+makes it all happen.
+
+This portal is the cempala. You are the dalang: you set the story (tickets), and the AI agents —
+the puppets — do the work. CEMPALA gives you the mallet: one board to direct the whole team, and
+a live feed to watch the performance unfold.
+
 ## ⚠️ Security warning — read before running
 
 - `opencode` is run with the **`--auto`** flag, meaning the agent **approves all permissions
