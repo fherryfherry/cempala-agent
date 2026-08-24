@@ -423,13 +423,14 @@ function ThreadPanel({
         )}
 
         <div className="group pointer-events-none absolute right-2 bottom-3 flex flex-col items-end gap-1.5">
-          {SUGGESTIONS.map((s) => (
+          {SUGGESTIONS.map((s, i) => (
             <button
               key={s.label}
               type="button"
               onClick={() => handleSuggestion(s)}
               disabled={sendMutation.isPending}
-              className="pointer-events-auto hidden cursor-pointer items-center gap-1.5 rounded-full border border-black/10 bg-white/60 px-3 py-1.5 text-xs text-zinc-600 shadow-sm backdrop-blur hover:bg-white/90 disabled:opacity-50 group-hover:flex dark:border-white/10 dark:bg-zinc-900/60 dark:text-zinc-300 dark:hover:bg-zinc-900/90"
+              style={{ transitionDelay: `${(SUGGESTIONS.length - 1 - i) * 30}ms` }}
+              className="pointer-events-none flex translate-y-2 cursor-pointer items-center gap-1.5 rounded-full border border-black/10 bg-white/60 px-3 py-1.5 text-xs text-zinc-600 opacity-0 shadow-sm backdrop-blur transition-all duration-200 group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100 hover:bg-white/90 dark:border-white/10 dark:bg-zinc-900/60 dark:text-zinc-300 dark:hover:bg-zinc-900/90"
             >
               <s.icon className="size-3.5 shrink-0" />
               {s.label}
