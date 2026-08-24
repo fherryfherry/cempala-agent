@@ -51,6 +51,20 @@ function stripMentionPrefix(body: string, pmName: string): string {
 
 type Mode = { type: "draft" } | { type: "ticket"; key: string };
 
+/** Quick-send suggestions shown above the composer, like ChatGPT suggestion chips. */
+const SUGGESTIONS: { label: string; message: string }[] = [
+  {
+    label: "Buat Dokumen Teknikal",
+    message:
+      "Tolong buatkan dokumen teknikal lengkap untuk project ini: PRD, TSD, API Spec, dan dokumen pendukung lainnya. Simpan hasilnya sebagai artifact di repo.",
+  },
+  {
+    label: "Progress sampai mana?",
+    message:
+      "Progress sampai mana? Tolong update status pengerjaan semua tiket yang sedang berjalan.",
+  },
+];
+
 export default function ChatPage() {
   const params = useParams<{ key: string }>();
   const workspaceKey = params.key;
@@ -325,6 +339,11 @@ function ThreadPanel({
     sendMutation.mutate({ message, file: stagedFile });
   }
 
+  function handleSuggestion(suggestion: (typeof SUGGESTIONS)[number]) {
+    if (sendMutation.isPending) return;
+    sendMutation.mutate({ message: suggestion.message, file: null });
+  }
+
   return (
     <Card className="flex h-full min-h-0 flex-col gap-4 p-4">
       <div className="relative min-h-0 flex-1">
@@ -418,6 +437,19 @@ function ThreadPanel({
           handleSend();
         }}
       >
+        <div className="flex flex-col items-end gap-1.5">
+          {SUGGESTIONS.map((s) => (
+            <button
+              key={s.label}
+              type="button"
+              onClick={() => handleSuggestion(s)}
+              disabled={sendMutation.isPending}
+              className="rounded-full border border-black/10 px-3 py-1.5 text-xs text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
         {stagedFile && (
           <div className="flex w-fit items-center gap-1.5 rounded-full border border-black/10 py-1 pr-1 pl-2.5 text-xs dark:border-white/10">
             <span className="max-w-48 truncate">{stagedFile.name}</span>
