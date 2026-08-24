@@ -125,7 +125,7 @@ real LLM calls.
 
 ## Conventions
 
-- Docs are in Indonesian; code, identifiers, and commit messages in English.
+- Docs are in English; code, identifiers, and commit messages in English.
 - Ticket IDs `MAP-NNN` in `docs/04-tasks.md` are the unit of work. Reference them in commits.
 - When a doc decision changes, update the doc in the same change — the docs are the spec, and
   v0.2 already rewrote v0.1 in place rather than accumulating stale text.

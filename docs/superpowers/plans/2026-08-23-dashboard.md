@@ -10,7 +10,7 @@
 
 **Conventions to follow:**
 - Copy the page skeleton pattern from `frontend/app/w/[key]/board/page.tsx:60-127`: `"use client"`, `useParams<{ key: string }>()`, `useQuery({ queryKey: ["tickets", workspace?.id], queryFn: () => listTickets(workspace!.id), enabled: !!workspace })`, loading `<p className="px-6 py-10 text-sm text-zinc-500">Loading workspace…</p>`, not-found `<p className="px-6 py-10 text-sm text-red-600">Workspace "{key}" not found.</p>`, page root `flex w-full flex-1 flex-col gap-6 px-6 py-10`.
-- Doc conventions: docs are the spec, Indonesian; code/comments in English. New feature doc entry as `MAP-034 · Dashboard workspace · S · Engineer` appended to `docs/04-tasks.md` (after MAP-033). No doc decisions change, so `docs/06-adr.md` untouched.
+- Doc conventions: docs are the spec, English; code/comments in English. New feature doc entry as `MAP-034 · Dashboard workspace · S · Engineer` appended to `docs/04-tasks.md` (after MAP-033). No doc decisions change, so `docs/06-adr.md` untouched.
 - Worktree: repo has `.worktrees/dev2` at a040555 (detached) — the current main tree at `eee516a` already has an **uncommitted change set** (many ` M` files). **Never `git add .`** — stage only the specific files listed in each task.
 - No `make` targets beyond existing `make test` (backend pytest — untouched), and `cd frontend && npm run lint` (eslint) for frontend checks.
 
@@ -534,12 +534,12 @@ In `docs/04-tasks.md`, after the MAP-033 block (end of M3), append:
 
 ```markdown
 ### MAP-034 · Dashboard workspace · S · Engineer
-`/w/[key]/dashboard`: stat cards (total, done, active, blocked), status tiap agent,
-8 run terbaru, dan alert (blocked, failed, epic belum mulai). Default landing & nav
-pertama. Murni komposisi data dari API existing + SSE invalidation; tanpa endpoint baru.
+`/w/[key]/dashboard`: stat cards (total, done, active, blocked), per-agent status,
+8 latest runs, and alerts (blocked, failed, epic not started). Default landing & first nav
+item. Pure composition of data from existing API + SSE invalidation; no new endpoint.
 **Dep:** MAP-032, MAP-021
-**AC:** dashboard ter-refresh otomatis saat agent bekerja (tanpa reload); setiap alert
-menghubungkan ke tiket terkait; statistik benar untuk workspace kosong (nihil run/agent).
+**AC:** dashboard auto-refreshes while agents work (no reload); every alert
+links to the related ticket; stats are correct for an empty workspace (no runs/agents).
 ```
 
 Update the header line 1 to `# Task Breakdown — MAP-001 … MAP-034`.

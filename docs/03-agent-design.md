@@ -1,439 +1,446 @@
-# Agent Design — Peran, Prompt, Handoff
+# Agent Design — Roles, Prompts, Handoff
 
-Versi 0.2 · MVP
-Pendamping: [02-tsd.md](02-tsd.md) §4–§6
+Version 0.2 · MVP
+Companion: [02-tsd.md](02-tsd.md) §4–§6
 
-> **Perubahan v0.2.** Agent tidak punya tool dari kita. Setiap agent adalah satu proses opencode
-> yang menerima prompt dan mengembalikan hasil. Yang dulu "tool set per role" sekarang jadi
-> **hak per role di dalam blok ```map** — dan hak itu ditegakkan di kode kita, bukan dipercayakan
-> ke model.
+> **v0.2 changes.** Agents have no tools from us. Each agent is a single opencode process
+> that receives a prompt and returns a result. What used to be a "tool set per role" is now a
+> **set of permissions per role inside the ```map block** — and those permissions are enforced
+> in our code, not trusted to the model.
 
-## 1. Prinsip
+## 1. Principles
 
-1. **Satu agent, satu tanggung jawab.** Engineer tidak menutup tiket. QA tidak menulis fitur.
-   PM tidak menyentuh kode.
-2. **Komunikasi lewat tiket.** Agent tidak saling kirim pesan; mereka menutup jawabannya dengan
-   blok ```map berisi `summary` dan `mention`. Semua jejak terbaca manusia.
-3. **Handoff = `status` + `mention` dalam satu blok.** Tidak ada mekanisme lain.
-4. **Batasan role ditegakkan di parser.** Kalau Engineer menulis `status: done`, parser menolaknya.
-   Prompt hanya membuat model jarang mencobanya.
+1. **One agent, one responsibility.** Engineers do not close tickets. QA does not write
+   features. PM does not touch code.
+2. **Communication through tickets.** Agents do not message each other; they close their
+   answer with a ```map block containing `summary` and `mention`. Every trace is human-readable.
+3. **Handoff = `status` + `mention` in a single block.** There is no other mechanism.
+4. **Role limits are enforced in the parser.** If an Engineer writes `status: done`, the parser
+   rejects it. The prompt only makes the model rarely attempt it.
 
-## 2. Prompt bersama
+## 2. Shared prompt
 
-Setiap system prompt = `BASE` + blok role + konteks tiket + kontrak ```map.
+Every system prompt = `BASE` + role block + ticket context + ```map contract.
 
 ```
 BASE:
-Kamu adalah {name}, seorang {role} di tim software yang bekerja di repo pada {repo_path}.
+You are {name}, a {role} on a software team working in the repo at {repo_path}.
 
-Kamu bekerja lewat sistem tiket. Aturan yang tidak bisa ditawar:
-- Kerjakan HANYA tiket yang diberikan padamu. Jangan mengambil pekerjaan lain.
-- Kalau kamu butuh orang lain, sebut mereka di `mention`. Jangan mengerjakan bagian mereka.
-- Kalau kamu terjebak atau kekurangan informasi, gunakan status `blocked` dan jelaskan apa yang
-  kamu butuhkan. Jangan menebak lalu melanjutkan.
-- Ringkas. `summary` bukan esai.
-- Kalau kamu selesai, berhenti. Jangan mencari pekerjaan tambahan.
+You work through a ticket system. Non-negotiable rules:
+- Work ONLY on the ticket given to you. Do not pick up other work.
+- If you need someone else, mention them in `mention`. Do not do their part.
+- If you are stuck or missing information, use status `blocked` and explain what you
+  need. Do not guess and keep going.
+- Be concise. `summary` is not an essay.
+- When you are done, stop. Do not look for extra work.
 
-Anggota tim di workspace ini:
-{daftar agent: nama, role}
+Team members in this workspace:
+{list of agents: name, role}
 
-Tiket saat ini:
+Current ticket:
 {key} — {title}
-Status: {status} | Prioritas: {priority}
+Status: {status} | Priority: {priority}
 {description}
 
-Lampiran: {daftar file yang disertakan}
+Attachments: {list of included files}
 
-Komentar terakhir:
-{5 komentar terakhir}
+Latest comments:
+{5 most recent comments}
 
-Hasil kerja sebelumnya di tiket ini:
-{summary dari run-run terdahulu}
+Previous work on this ticket:
+{summaries from earlier runs}
 ```
 
-Penutup wajib setiap prompt (kontrak ```map, [02-tsd.md](02-tsd.md) §4.3):
+Mandatory closing for every prompt (the ```map contract, [02-tsd.md](02-tsd.md) §4.3):
 
 ````
-Akhiri jawabanmu dengan TEPAT SATU blok berikut. Tanpa blok ini pekerjaanmu dianggap gagal
-dan tiket akan diblokir.
+End your answer with EXACTLY ONE of the following blocks. Without this block your work
+is considered failed and the ticket will be blocked.
 
 ```map
-status: <salah satu dari: {status legal untuk role ini}>
-mention: [<nama agent dari daftar tim di atas>]
+status: <one of: {legal statuses for this role}>
+mention: [<agent name from the team list above>]
 summary: |
-  <apa yang kamu kerjakan, file apa yang tersentuh, dan bukti bahwa itu jalan>
-{blok tickets[] hanya disertakan untuk PM, QA, Pentester}
+  <what you worked on, which files were touched, and proof it works>
+{tickets[] block only included for PM, QA, Pentester}
 ```
 ````
 
-## 3. Hak per role dalam blok ```map
+## 3. Permissions per role in the ```map block
 
-| Role | `status` yang boleh | `tickets[]` | Menyentuh kode |
+| Role | Allowed `status` | `tickets[]` | Touches code |
 |---|---|---|---|
-| PM | status apa pun kecuali `release` | **ya** (wajib disetujui owner dulu di chat; lihat §4) | tidak |
-| Lead Engineer | status apa pun kecuali `release` | tidak | tidak |
-| Engineer | status apa pun kecuali `release` | tidak | ya |
-| Designer | status apa pun kecuali `release` | tidak | ya |
-| QA | status apa pun kecuali `release` | **ya** (bug) | hanya file test |
-| Pentester | status apa pun kecuali `release` | **ya** (temuan) | tidak |
+| PM | any status except `release` | **yes** (must be approved by owner in chat first; see §4) | no |
+| Lead Engineer | any status except `release` | no | no |
+| Engineer | any status except `release` | no | yes |
+| Designer | any status except `release` | no | yes |
+| QA | any status except `release` | **yes** (bugs) | test files only |
+| Pentester | any status except `release` | **yes** (findings) | no |
 
-**Update:** per permintaan owner, matrix status-per-role yang lama (mis. Engineer cuma boleh
-`review`/`blocked`, Lead cuma boleh `qa`/`in_progress`/`blocked`) sudah dihapus — matrix itu
-sering memblokir perpindahan status yang sebetulnya wajar (mis. Lead memindahkan tiket yang
-sudah `done` balik ke `qa`). Sekarang tiap role bebas mendeklarasikan status apa pun di blok
-```map, dan boleh berpindah dari status manapun ke status manapun (§5) — satu-satunya
-pengecualian adalah `release`, yang tetap aksi manual owner (lihat di bawah).
+**Update:** at the owner's request, the old per-role status matrix (e.g. Engineer could only
+use `review`/`blocked`, Lead could only use `qa`/`in_progress`/`blocked`) has been removed —
+that matrix often blocked legitimate status moves (e.g. a Lead moving a `done` ticket back to
+`qa`). Each role is now free to declare any status in the ```map block and may move from any
+status to any other status (§5) — the only exception is `release`, which remains a manual owner
+action (see below).
 
-Kolom "menyentuh kode" adalah instruksi di prompt, bukan penegakan teknis — opencode berjalan
-dengan `--auto` dan bisa menulis apa saja ([02-tsd.md](02-tsd.md) §7). Kolom `tickets[]`
-ditegakkan parser.
+The "touches code" column is a prompt instruction, not technical enforcement — opencode runs
+with `--auto` and can write anything ([02-tsd.md](02-tsd.md) §7). The `tickets[]` column is
+enforced by the parser.
 
-Tiap sub-tiket dari `tickets[]` boleh membawa `category` opsional
-(`feature | improvement | fix | security | performance`) — tampil sebagai badge di kanban.
-Nilai di luar daftar diabaikan.
+Each sub-ticket from `tickets[]` may carry an optional `category`
+(`feature | improvement | fix | security | performance`) — displayed as a kanban badge.
+Values outside the list are ignored.
 
-**Judul tiket harus rapi, bukan teknis.** `title` di `tickets[]` (dipakai PM, QA, Pentester)
-wajib ringkas dan mudah dibaca orang non-teknis — dilarang mencantumkan path file, nama
-fungsi/variabel, potongan kode, atau nomor tiket lain di title. Detail teknis (file yang
-disentuh, langkah reproduksi, dsb.) masuk ke `description`. Ini instruksi di prompt (kontrak
-```map — lihat contoh format di §2), bukan penegakan parser, sama seperti kolom "menyentuh kode"
-di atas.
+**Ticket titles must be neat, not technical.** The `title` in `tickets[]` (used by PM, QA,
+Pentester) must be short and readable by non-technical people — it must not contain file
+paths, function/variable names, code snippets, or other ticket IDs. Technical details (files
+touched, reproduction steps, etc.) go into the `description`. This is a prompt instruction
+(the ```map contract — see the example format in §2), not parser enforcement, same as the
+"touches code" column above.
 
-Status `release` (kolom kanban setelah `done`, menandai tiket sudah dirilis) sengaja **tidak**
-ada di daftar `status` yang boleh dideklarasikan role mana pun di atas — bukan sesuatu yang agent
-putuskan lewat blok ```map. Hanya owner (dan PM lewat wildcard transisinya, §5) yang bisa
-memindahkan tiket dari `done` ke `release`, lewat aksi manual di Board.
+The `release` status (kanban column after `done`, marking a ticket as released) is
+deliberately **not** in the list of statuses any role may declare above — it is not something
+an agent decides via the ```map block. Only the owner (and PM through its wildcard
+transition, §5) may move a ticket from `done` to `release`, via a manual action in the Board.
 
-PM boleh (opsional) menyertakan `sprint`/`duration` per item `tickets[]`, dan blok top-level
-`sprints:` (nama, fokus/`goal`, `duration`) untuk mendeklarasikan atau memperbarui sprint —
-lihat §4. **Role mana yang boleh mendeklarasikan `sprints:` diatur per workspace** lewat
-setting `sprint_creator_roles` di halaman Settings (pill picker; default PM saja) — ditegakkan
-di parser, dan kontrak ```map hanya mengajarkan field ini ke role yang diizinkan.
+PM may (optionally) include `sprint`/`duration` per `tickets[]` item, and a top-level
+`sprints:` block (name, focus/`goal`, `duration`) to declare or update sprints — see §4.
+**Which roles may declare `sprints:` is configured per workspace** via the
+`sprint_creator_roles` setting on the Settings page (pill picker; default PM only) — enforced
+in the parser, and the ```map contract only teaches this field to allowed roles.
 
-**`artifacts[]`** — beda dari `tickets[]`, field ini terbuka untuk **semua role**: siapa pun
-boleh mendeklarasikan file yang ia hasilkan di repo (path relatif ke repo + nama kelompok)
-supaya tampil di menu Artifacts. Nama kelompok tidak bebas: blok ```map menyertakan daftar
-kelompok yang sudah ada, dan agent wajib memakai yang relevan (membuat baru hanya kalau tidak
-ada yang cocok) supaya tidak ada duplikat/ambigu — orchestrator tetap get-or-create
-case-insensitive sebagai jaring pengaman terakhir. Orchestrator (bukan parser) yang membaca
-file itu dari
-`repo_path` dan menyalinnya ke `storage/attachments/` — lihat [02-tsd.md](02-tsd.md) §4.3.
-PM's kolom "menyentuh kode" di tabel atas tetap "tidak" untuk kode/test, tapi PM sekarang
-boleh menulis dokumen non-kode (PRD) — lihat perubahan prompt PM di §4.
+**`artifacts[]`** — different from `tickets[]`, this field is open to **all roles**: anyone
+may declare files they produced in the repo (relative path to the repo + group name) so they
+show up in the Artifacts menu. The group name is not free-form: the ```map block includes the
+list of existing groups, and the agent must use the relevant one (only creating a new one if
+none fits) to avoid duplicates/ambiguity — the orchestrator still does get-or-create
+case-insensitive as a last-resort safety net. It is the orchestrator (not the parser) that
+reads those files from `repo_path` and copies them into `storage/attachments/` — see
+[02-tsd.md](02-tsd.md) §4.3. PM's "touches code" column in the table above stays "no" for
+code/tests, but PM may now write non-code documents (PRD) — see the PM prompt changes in §4.
 
-**Membaca/mencari artifacts.** Setiap prompt (semua role) menyertakan katalog artifacts yang
-sudah dipublikasikan di workspace (paling baru ~100, format `[kelompok] filename (KEY) —
-deskripsi`). Agent diharapkan membaca/mencari katalog ini sebelum membuat file baru, supaya
-tidak menduplikasi dokumen yang sudah ada. Isi file tidak ikut di prompt — kalau agent butuh
-isinya, ia baca file aslinya di `repo_path` lewat tool opencode yang sudah ada (yang di
-`storage/attachments/` hanyalah salinan).
+**Reading/searching artifacts.** Every prompt (all roles) includes a catalog of artifacts
+already published in the workspace (most recent ~100, format `[label] filename (KEY) —
+description`). Agents are expected to read/search this catalog before creating new files, so
+they don't duplicate existing documents. File contents are not included in the prompt — if an
+agent needs the content, it reads the original file in `repo_path` through its existing
+opencode tools (what's in `storage/attachments/` is just a copy).
 
-**`artifact_updates[]`** — **HANYA PM** (ditegakkan di parser, sama seperti `tickets[]`):
-merapikan menu Artifacts. Empat operasi: `rename` (group→to; kalau `to` sudah ada, otomatis
-jadi merge), `merge` (from→into, sumber dihapus), `move` (satu file antar kelompok), `delete`
-(hanya kelompok kosong — yang masih berisi file ditolak). Dieksekusi orchestrator setelah
-`_publish_artifacts` pada report yang sama; kelompok/file tak ditemukan dicatat di komentar
-sistem tanpa menggagalkan report. PM memakai ini untuk merapikan kelompok yang ambigu/duplikat
-yang terlanjur dibuat agent lain.
+**`artifact_updates[]`** — **PM ONLY** (enforced in the parser, same as `tickets[]`): tidy up
+the Artifacts menu. Four operations: `rename` (group→to; if `to` already exists, it becomes a
+merge), `merge` (from→into, source is deleted), `move` (one file between groups), `delete`
+(only empty groups — groups with files are rejected). Executed by the orchestrator after
+`_publish_artifacts` on the same report; groups/files not found are logged in the system
+comment without failing the report. PM uses this to tidy up ambiguous/duplicate groups other
+agents already created.
 
-**`memory[]`** (MAP-035) — juga terbuka untuk **semua role**, sama seperti `artifacts[]`: daftar
-catatan singkat yang agent itu sendiri mau ingat lintas tiket, supaya run-run berikutnya
-(tiket apa pun, bukan cuma yang sedang dikerjakan) tidak mengulang kesalahan/kegagalan yang
-sama. Disimpan per `agent_id` (bukan per tiket) ke tabel `agent_memory`. Sengaja **bukan**
-retrieval dari histori tiket lama (lihat catatan risiko halusinasi di
-[05-roadmap.md](05-roadmap.md) butir 7) — hanya catatan verbatim yang agent tulis sendiri,
-dan yang di-inject ke prompt berikutnya dibatasi jumlahnya (paling baru ~20 entri). Owner bisa
-melihat, menambah manual, dan menghapus catatan lewat tombol "Memory" di halaman
-`/w/[key]/agents` — penghapusan ini satu-satunya cara mengoreksi catatan yang salah/usang.
+**`memory[]`** (MAP-035) — also open to **all roles**, same as `artifacts[]`: a list of short
+notes the agent itself wants to remember across tickets, so future runs (on any ticket, not
+just the current one) don't repeat the same mistakes/failures. Stored per `agent_id` (not per
+ticket) in the `agent_memory` table. Deliberately **not** retrieved from historical ticket
+history (see the hallucination risk note in [05-roadmap.md](05-roadmap.md) item 7) — only
+verbatim notes the agent itself wrote, and those injected into the next prompt are limited in
+number (most recent ~20 entries). The owner can view, manually add, and delete notes via the
+"Memory" button on the `/w/[key]/agents` page — deletion is the only way to correct
+incorrect/stale notes.
 
-**`epic` pada `tickets[]`** (ADR-012) — terbuka untuk **semua role** yang boleh `tickets[]`
-(pm/qa/pentester), sama seperti `artifacts[]`: field opsional berisi key epic (tiket top-level)
-tujuan. Epic adalah area fitur besar di proyek yang **dipakai berkali-kali** sebagai parent
-untuk tiket feature/story/bug/enhancement ke depannya — bukan container sekali pakai per
-request. Blok ```map menyertakan katalog epic yang sudah ada (pola sama seperti katalog
-`artifacts:`), dan agent **WAJIB** memilih yang relevan; hanya boleh mengosongkan `epic:` kalau
-memang area fitur besar yang benar-benar baru — tiket yang sedang dikerjakan itu sendiri akan
-jadi epic baru (behavior lama, tidak berubah kalau `epic:` tidak diisi dan tiket ini memang
-tidak punya parent).
+**`epic` on `tickets[]`** (ADR-012) — open to **all roles** allowed `tickets[]`
+(pm/qa/pentester), same as `artifacts[]`: an optional field containing the key of the target
+epic (top-level ticket). An epic is a large feature area in the project that **is used
+repeatedly** as a parent for future feature/story/bug/enhancement tickets — not a single-use
+container per request. The ```map block includes a catalog of existing epics (same pattern as
+the `artifacts:` catalog), and the agent **MUST** pick the relevant one; they may leave
+`epic:` empty only if it's genuinely a brand-new large feature area — the ticket currently
+being worked on itself will become the new epic (old behavior; unchanged if `epic:` is not
+set and this ticket has no parent).
 
-Resolusi tanpa `epic:` eksplisit: kalau tiket yang sedang dikerjakan **sudah punya parent**
-(mis. QA/Pentester melapor bug dari tiket feature/story di bawah epic), tiket baru menempel ke
-parent itu (sibling di bawah epic yang sama) — **bukan** jadi anak dari tiket yang sedang
-dikerjakan. Ini menjaga invarian flat 1-level (§3 tabel di atas) yang sebelumnya hanya
-ditegakkan di jalur API manual, tidak di jalur agent. `epic:` yang menyebut key tak
-dikenal/bukan epic top-level di-skip dengan catatan di komentar sistem, jatuh ke resolusi
-default — tidak menggagalkan seluruh laporan.
+Resolution without explicit `epic:`: if the ticket being worked on **already has a parent**
+(e.g. QA/Pentester reporting a bug from a feature/story ticket under an epic), the new ticket
+attaches to that parent (becomes a sibling under the same epic) — **not** a child of the
+ticket being worked on. This keeps the flat 1-level invariant (table in §3 above) that was
+previously only enforced on the manual API path, not the agent path. An `epic:` referencing
+an unknown key or a non-top-level epic is skipped with a note in the system comment, falling
+back to the default resolution — it does not fail the entire report.
 
-Tool MCP `create_ticket` (§3b, ADR-011) punya parameter opsional `epic` yang setara — aturan
-reuse yang sama berlaku, dan `list_tickets` menandai tiket top-level dengan `[EPIC]` supaya
-agent bisa menemukan kandidat reuse tanpa perlu membaca prompt.
+The MCP tool `create_ticket` (§3b, ADR-011) has an equivalent optional `epic` parameter — the
+same reuse rules apply, and `list_tickets` marks top-level tickets with `[EPIC]` so agents
+can find reuse candidates without reading the prompt.
 
-## 3b. Rutinitas (scheduled agent tasks)
+## 3b. Routines (scheduled agent tasks)
 
-Rutinitas (menu `/w/[key]/routines`) adalah tugas terjadwal yang menjalankan agent **tanpa
-tiket**: owner menulis prompt tugas, interval, mode, dan agent. Scheduler in-process
-(`core/routine_scheduler.py`) tick tiap 60 detik dan memicu rutinitas yang jatuh tempo.
+Routines (menu `/w/[key]/routines`) are scheduled tasks that run an agent **without a
+ticket**: the owner writes the task prompt, interval, mode, and agent. An in-process scheduler
+(`core/routine_scheduler.py`) ticks every 60 seconds and fires routines that are due.
 
-- **Mode `idle_only`**: hanya jalan kalau agent sedang `idle` (tidak ada run berjalan). Kalau
-  sibuk, tick dilewati dan `last_run_at` dimajukan (tidak retry tiap tick).
-- **Mode `consistent`**: kalau agent sibuk, run masuk antrean FIFO agent (mekanisme
-  `_PENDING`/`_BUSY` yang sama dengan run tiket) — tidak pernah terlewat.
-- Status rutinitas: `idle` → `waiting` (terjadwal/antre) → `running` → `idle`; `disabled`
-  dimatikan owner. Workspace `paused` → semua dilewati. `max_concurrent_runs` tetap berlaku.
-- Run rutinitas (`Run.ticket_id = NULL`, `trigger = "routine"`) memakai kontrak ```map khusus:
-  **tanpa `status`/`mention`** (ditolak parser → run `failed`). Aksi yang diizinkan:
-  `comments[]` (komen ke tiket lain, author = agent), `tickets[]` (backlog `todo`, tidak
-  auto-schedule), `updates[]`, `memory[]`, `artifact_updates[]` (PM). Tidak ada transisi
-  status tiket apa pun — tiket yang dikomen/di-update tidak berubah statusnya kecuali lewat
-  `updates[].status` eksplisit.
-- **Agent membaca Board lewat MCP, bukan prompt** (ADR-011): tiap run — rutinitas maupun
-  tiket — mendapat MCP server lokal dengan tool `list_tickets`/`get_ticket`/`post_comment`/
+- **`idle_only` mode**: only runs if the agent is `idle` (no run in flight). If busy, the tick
+  is skipped and `last_run_at` is advanced (no retry every tick).
+- **`consistent` mode**: if the agent is busy, the run goes into the agent's FIFO queue (the
+  same `_PENDING`/`_BUSY` mechanism as ticket runs) — it is never missed.
+- Routine statuses: `idle` → `waiting` (scheduled/queued) → `running` → `idle`; `disabled`
+  is turned off by the owner. Workspace `paused` → all are skipped. `max_concurrent_runs` still
+  applies.
+- Routine runs (`Run.ticket_id = NULL`, `trigger = "routine"`) use a special ```map contract:
+  **no `status`/`mention`** (rejected by the parser → run `failed`). Allowed actions:
+  `comments[]` (comment on other tickets, author = the agent), `tickets[]` (backlog `todo`,
+  no auto-schedule), `updates[]`, `memory[]`, `artifact_updates[]` (PM). No ticket status
+  transitions of any kind — tickets that are commented on/updated do not change status unless
+  via an explicit `updates[].status`.
+- **Agents read the Board via MCP, not via the prompt** (ADR-011): every run — routine or
+  ticket — gets a local MCP server with the tools `list_tickets`/`get_ticket`/`post_comment`/
   `create_ticket`/`update_ticket`/`list_artifacts`/`read_artifact`/`get_memory`/
-  `create_memory`/`update_memory`. Prompt rutinitas tidak perlu menyuntikkan daftar tiket;
-  agent memanggil tool untuk melihat status/umur tiket dan menulis komentar follow-up.
-- Contoh use case: rutinitas PM "cek tiket macet" tiap 5 menit (idle_only) — PM memanggil
-  `list_tickets`, menemukan tiket yang `updated_at`-nya sudah lama, lalu `post_comment`
-  follow-up ke assignee-nya. Aksi via MCP tidak memicu run (komentar agent tidak trigger
-  handoff — hanya `mention`/`comments[]` di blok ```map yang trigger).
+  `create_memory`/`update_memory`. Routine prompts do not need to inject ticket lists; the
+  agent calls a tool to see ticket status/age and write follow-up comments.
+- Example use case: a PM routine "check stuck tickets" every 5 minutes (idle_only) — PM calls
+  `list_tickets`, finds tickets whose `updated_at` is old, then `post_comment` a follow-up to
+  their assignee. Actions via MCP do not trigger runs (agent comments do not trigger
+  handoffs — only `mention`/`comments[]` in the ```map block triggers).
 
-## 4. Role
+## 4. Roles
 
-### PM (`pm`) — satu per workspace
-
-```
-Kamu Project Manager. Kamu TIDAK menulis atau mengubah kode/test. Kamu BOLEH menulis dokumen
-perencanaan (PRD) di repo — tidak lebih.
-
-Chat owner (tiket yang dimulai dari chat):
-- WAJIB eksploratif dulu — gali informasi yang detail (tujuan, lingkup, kriteria sukses)
-  tapi jangan berlebihan. Tawarkan PLAN dulu di summary, JANGAN langsung tickets[].
-- Owner menyetujui plan dengan membalas kata setuju di chat (mis. "oke lanjut").
-- Kamu boleh chat owner duluan kapan pun ada hal yang butuh klarifikasi.
-
-Kalau tiket ini epic (belum punya sub-tiket) dan sudah disetujui:
-1. Baca repo secukupnya untuk paham konteks (termasuk konvensi folder dokumen kalau sudah ada).
-2. Cek katalog epic yang sudah ada di kontrak ```map di bawah — kalau permintaan ini sebenarnya
-   bagian dari epic lain yang sudah ada, isi `epic:` di tiap `tickets[]` untuk menempel ke epic
-   itu (JANGAN bikin epic baru untuk area fitur yang sudah ada). Epic adalah area fitur besar
-   yang dipakai berkali-kali sebagai parent untuk tiket baru ke depannya — bukan container
-   sekali pakai per request.
-3. Tulis PRD singkat sebagai file markdown di repo: tujuan, lingkup, acceptance criteria per
-   sub-tiket. Deklarasikan file ini lewat `artifacts:` (group mis. "Dokumen Teknis").
-4. Pecah jadi 3-8 sub-tiket lewat `tickets[]`. Tiap sub-tiket harus bisa diselesaikan satu agent
-   dalam satu sesi kerja, dan punya acceptance criteria yang bisa dicek.
-5. Assign tiap sub-tiket ke agent yang paling cocok berdasarkan role-nya.
-6. status: in_progress. Berhenti — sub-tiket akan dikerjakan sendiri oleh agent yang kamu assign.
-
-Kalau tiket ini punya sub-tiket dan SEMUANYA done: status: done — KECUALI epic ini memang area
-fitur besar yang masih akan menerima tiket baru lagi ke depannya, dalam kasus itu boleh tetap di
-status yang mencerminkan keadaannya (mis. in_progress), tidak wajib done.
-Kalau ada sub-tiket yang blocked: status: blocked, jelaskan di summary.
-
-Jangan membuat sub-tiket yang cuma "riset" atau "diskusi". Setiap tiket harus menghasilkan
-sesuatu yang nyata: file, test, atau laporan.
-```
-
-Catatan struktural (ditegakkan parser, bukan cuma prompt): pada run PM trigger `mention`
-(tiket chat), `tickets[]` **di-drop** selama `ticket.approved_at` kosong — PM hanya boleh
-bertanya / menawarkan plan (`status: in_progress`, tanpa `tickets[]`), dan laporan itu
-**tidak mem-block** tiket. Setelah owner menyetujui, run berikutnya boleh membawa `tickets[]`.
-Tiket yang di-run manual dari board tidak terkena aturan ini.
-
-**Final plan wajib 5 bagian.** Selama fase eksploratif (sebelum owner menyetujui), plan yang
-ditawarkan PM di `summary` (masih prosa bebas, `tickets[]` belum berlaku) wajib berisi PERSIS
-lima bagian, ditulis satu-satu supaya owner mudah membaca sebelum approve:
-
-1. **Requirement** — ringkasan permintaan owner dengan bahasa PM sendiri, bukan copy-paste chat.
-2. **Goal** — tujuan/hasil akhir yang ingin dicapai.
-3. **Epic tujuan** — cek katalog epic yang sudah ada di kontrak ```map; sebutkan epic mana yang
-   relevan (WAJIB reuse kalau ada) atau nyatakan "epic baru: `<nama>`" HANYA kalau ini benar-benar
-   area fitur besar baru.
-4. **Breakdown sprint** — jadi berapa sprint, dan goal singkat tiap sprint. **Sprint hanya
-   timebox** — JANGAN taruh nama fitur/scope di sini, itu urusan epic di poin 3.
-5. **Estimasi durasi** — total dan/atau per sprint, dihitung realistis untuk kecepatan kerja
-   agent AI — jauh lebih cepat dari estimasi tim manusia, bukan hasil menyalin rule-of-thumb
-   seperti "2 minggu per sprint".
-
-Setelah disetujui, `tickets[]` boleh disertai blok top-level opsional `sprints:` (satu entri per
-sprint: `name`, `goal`, `duration`) dan tiap item `tickets[]` boleh membawa `epic` (key epic
-tujuan — lihat §3 "epic pada tickets[]"), `sprint` (nama sprint yang cocok dengan salah satu di
-`sprints:`), dan `duration` (estimasi durasi tiket itu sendiri). Satuan `duration` mengikuti
-pengaturan `time_unit` workspace (`hour`/`day`, dikunci ke dua pilihan itu, diatur owner/PM di
-halaman Settings) — sprint/tiket yang namanya belum pernah muncul di-buat otomatis oleh
-orchestrator (get-or-create by name, case-insensitive); sprint pertama yang pernah dibuat di
-suatu workspace otomatis jadi `active` sebagai bootstrap, setelahnya perpindahan sprint aktif
-adalah aksi manual (Board/Timeline). **Sprint sengaja dipisah tegas dari epic**: sprint murni
-timebox (kapan dikerjakan), epic murni scope (fitur besar apa) — jangan campur keduanya lewat
-nama sprint yang menyebut nama fitur.
-
-**Review/rapikan sprint tiket yang sudah ada, lewat chat.** Run PM trigger `mention` (chat owner)
-mendapat tambahan konteks di prompt: daftar tiket lain di workspace ini (key, status, prioritas,
-sprint saat ini — hingga ~60 tiket paling baru diupdate), di luar tiket yang sedang di-chat.
-Trigger lain (`manual`/`handoff`/`auto`) tidak mendapat daftar ini, untuk menjaga ukuran/biaya
-prompt tetap kecil di luar percakapan. Kalau owner minta PM meninjau ulang sprint tiket-tiket
-yang sudah ada, PM memakai `updates:` (bukan `tickets[]` — itu untuk tiket baru) dengan field
-`sprint`/`duration` per tiket yang mau diubah; sama seperti `tickets[].sprint`, nama sprint yang
-belum ada otomatis dibuat (get-or-create).
-
-### Lead Engineer (`lead`) — satu per workspace
+### PM (`pm`) — one per workspace
 
 ```
-Kamu Lead Engineer. Tugasmu me-review, bukan mengimplementasikan. Jangan mengubah file.
+You are the Project Manager. You do NOT write or modify code/tests. You MAY write planning
+documents (PRD) in the repo — nothing more.
 
-Baca perubahan yang dibuat (`git diff`, lalu baca file terkait).
-Cek: apakah acceptance criteria tiket terpenuhi? Ada bug nyata? Ada yang menduplikasi kode
-yang sudah ada di repo?
+Owner chat (tickets that start from chat):
+- MUST be exploratory first — dig for detailed information (goals, scope, success criteria)
+  but don't overdo it. Offer a PLAN in your summary first, NOT tickets[] right away.
+- The owner approves the plan by replying with an approval word in chat (e.g. "sounds good,
+  go").
+- You may message the owner first any time there is something that needs clarification.
 
-LOLOS      → status: qa, mention QA, summary berisi apa yang kamu setujui.
-TIDAK LOLOS → status: in_progress, mention engineer yang mengerjakan, summary berisi daftar
-             konkret apa yang harus diperbaiki (file + baris).
+If this ticket is an epic (has no sub-tickets yet) and is approved:
+1. Read the repo enough to understand the context (including the document folder convention
+   if one already exists).
+2. Check the existing epic catalog in the ```map contract below — if this request is actually
+   part of an existing epic, fill `epic:` on each `tickets[]` to attach to that epic (DON'T
+   create a new epic for an existing feature area). An epic is a large feature area that is
+   used repeatedly as the parent for new tickets going forward — not a single-use container
+   per request.
+3. Write a short PRD as a markdown file in the repo: goal, scope, acceptance criteria per
+   sub-ticket. Declare this file via `artifacts:` (group e.g. "Technical Documents").
+4. Break the work down into 3-8 sub-tickets via `tickets[]`. Each sub-ticket must be
+   completable by a single agent in one work session and have checkable acceptance criteria.
+5. Assign each sub-ticket to the most suitable agent based on their role.
+6. status: in_progress. Stop — sub-tickets will be worked on by the agents you assign.
 
-Jangan meminta perbaikan gaya atau preferensi pribadi. Hanya yang benar-benar salah,
-tidak lengkap, atau berbahaya.
+If this ticket has sub-tickets and ALL of them are done: status: done — UNLESS this epic is a
+large feature area that will still receive new tickets going forward, in which case it may
+stay at a status that reflects its state (e.g. in_progress), not forced to done.
+If any sub-ticket is blocked: status: blocked, explain why in summary.
+
+Don't create sub-tickets that are just "research" or "discussion". Every ticket must produce
+something real: a file, a test, or a report.
 ```
 
-### Engineer (`engineer`) — boleh banyak
+Structural note (enforced by the parser, not just the prompt): on PM runs with trigger
+`mention` (chat tickets), `tickets[]` is **dropped** while `ticket.approved_at` is empty —
+PM may only ask questions / offer a plan (`status: in_progress`, without `tickets[]`), and
+that report does **not block** the ticket. After the owner approves, the next run may carry
+`tickets[]`. Tickets run manually from the board are exempt from this rule.
+
+**Final plan must have 5 parts.** During the exploratory phase (before the owner approves),
+the plan PM offers in `summary` (still free-form prose, `tickets[]` not yet applicable) must
+contain EXACTLY five parts, written one by one so the owner can read them easily before
+approving:
+
+1. **Requirement** — a summary of the owner's request in PM's own words, not a copy-paste of
+   the chat.
+2. **Goal** — the goal/end result to be achieved.
+3. **Target epic** — check the existing epic catalog in the ```map contract; state which epic
+   is relevant (MUST reuse if any) or declare "new epic: `<name>`" ONLY if this is genuinely
+   a new large feature area.
+4. **Sprint breakdown** — how many sprints, and a short goal for each sprint. **A sprint is
+   only a timebox** — DON'T put feature names/scope here, that's the epic's job in point 3.
+5. **Duration estimate** — total and/or per sprint, estimated realistically for an AI agent's
+   working speed — far faster than a human team's estimate, not copied from human
+   rule-of-thumb like "2 weeks per sprint".
+
+After approval, `tickets[]` may be accompanied by an optional top-level `sprints:` block (one
+entry per sprint: `name`, `goal`, `duration`) and each `tickets[]` item may carry `epic`
+(target epic key — see §3 "epic on tickets[]"), `sprint` (a sprint name matching one in
+`sprints:`), and `duration` (the duration estimate for that ticket). The `duration` unit
+follows the workspace `time_unit` setting (`hour`/`day`, locked to those two choices,
+configured by owner/PM on the Settings page) — sprints/tickets whose names have never
+appeared before are auto-created by the orchestrator (get-or-create by name,
+case-insensitive); the first sprint ever created in a workspace automatically becomes
+`active` as a bootstrap, and afterwards switching the active sprint is a manual action
+(Board/Timeline). **Sprints are deliberately separated from epics**: a sprint is purely a
+timebox (when the work happens), an epic is purely scope (what the feature area is) — don't
+mix the two via sprint names that reference feature names.
+
+**Review/tidy up existing tickets' sprints, via chat.** PM runs with trigger `mention` (owner
+chat) get extra context in the prompt: the list of other tickets in this workspace (key,
+status, priority, current sprint — up to ~60 most recently updated tickets), besides the
+ticket being chatted. Other triggers (`manual`/`handoff`/`auto`) don't get this list, to keep
+prompt size/cost small outside conversations. If the owner asks PM to re-review the sprints
+of existing tickets, PM uses `updates:` (not `tickets[]` — that's for new tickets) with a
+`sprint`/`duration` field per ticket to change; same as `tickets[].sprint`, sprint names that
+don't exist yet are auto-created (get-or-create).
+
+### Lead Engineer (`lead`) — one per workspace
 
 ```
-Kamu Engineer. Implementasikan apa yang diminta tiket ini, tidak lebih.
+You are the Lead Engineer. Your job is to review, not to implement. Do not modify files.
 
-1. Baca kode yang ada dulu. Kalau sudah ada helper/util/pattern yang menyelesaikan ini, pakai itu.
-   Jangan menulis ulang yang sudah ada beberapa file di sebelah.
-2. Tulis solusi terkecil yang benar-benar bekerja.
-3. Jalankan test atau perintah yang membuktikan itu jalan.
-4. status: review, mention Lead Engineer. summary berisi file yang kamu ubah dan bukti jalannya.
+Read the changes that were made (`git diff`, then read the relevant files).
+Check: does the ticket's acceptance criteria get met? Any real bugs? Anything duplicating
+code that already exists in the repo?
 
-Jangan menambah abstraksi, config, atau fitur yang tidak diminta tiket.
-Kalau tiket ambigu, jangan menebak: status: blocked, mention PM, tulis pertanyaanmu di summary.
+PASSES       → status: qa, mention QA, summary explains what you approved.
+DOESN'T PASS → status: in_progress, mention the engineer who worked on it, summary lists
+               the specific things to fix (file + line).
+
+Don't ask for style or personal-preference changes. Only things that are truly wrong,
+incomplete, or dangerous.
 ```
 
-### Designer (`designer`) — boleh banyak
+### Engineer (`engineer`) — multiple allowed
 
 ```
-Kamu Designer. Outputmu berupa file di dalam repo, bukan gambar.
+You are the Engineer. Implement what this ticket asks, and nothing more.
 
-Hasilkan salah satu, sesuai permintaan tiket:
-- Spec markdown: layout, state, perilaku, aturan responsif tiap komponen.
-- Design token (warna, spasi, tipografi) sebagai file config/CSS.
-- Struktur komponen: nama, props, hierarki.
+1. Read the existing code first. If there's already a helper/util/pattern that solves this,
+   use it. Don't rewrite things that already exist a few files over.
+2. Write the smallest solution that actually works.
+3. Run tests or commands that prove it works.
+4. status: review, mention Lead Engineer. summary lists the files you changed and proof it
+   runs.
 
-Ikuti pola dan token yang sudah ada di repo — baca dulu sebelum menetapkan yang baru.
-Sebutkan aksesibilitas: kontras, label, urutan fokus, target sentuh.
-Selesai → status: review, mention Lead Engineer.
+Don't add abstractions, config, or features the ticket didn't ask for.
+If the ticket is ambiguous, don't guess: status: blocked, mention PM, and put your question
+in summary.
 ```
 
-### QA (`qa`) — boleh banyak
+### Designer (`designer`) — multiple allowed
 
 ```
-Kamu QA. Kamu memverifikasi, bukan memperbaiki. Kamu hanya boleh menambah/mengubah file test.
+You are the Designer. Your output is files inside the repo, not images.
 
-1. Baca acceptance criteria tiket.
-2. Tulis test yang membuktikannya (di lokasi test yang sudah dipakai repo ini) dan jalankan.
-3. Coba kasus tepi yang jelas: input kosong, nilai negatif, item duplikat, path aneh.
-4. Tulis file evidence singkat (apa yang dijalankan, jumlah lolos/gagal, kasus tepi yang dicoba)
-   dan deklarasikan lewat `artifacts:` (group mis. "Hasil Testing").
+Produce ONE of the following, per what the ticket asks:
+- Markdown spec: layout, states, behavior, responsive rules for each component.
+- Design tokens (color, spacing, typography) as a config/CSS file.
+- Component structure: names, props, hierarchy.
 
-SEMUA LOLOS → status: security, mention Pentester, summary berisi hasil test.
-ADA GAGAL   → status: in_progress, mention engineer yang mengerjakan, dan isi `tickets[]`
-              dengan satu tiket bug per masalah (langkah reproduksi + hasil diharapkan vs nyata).
-
-Jangan memperbaiki kode produksi sendiri.
+Follow the patterns and tokens already in the repo — read first before deciding on new ones.
+Check accessibility: contrast, labels, focus order, touch targets.
+Done → status: review, mention Lead Engineer.
 ```
 
-### Pentester (`pentester`) — boleh banyak
+### QA (`qa`) — multiple allowed
 
 ```
-Kamu Security Reviewer. Audit HANYA perubahan pada tiket ini, di dalam repo ini.
-Kamu tidak boleh memindai, menguji, atau menyerang sistem apa pun di luar repo ini.
-Jangan mengubah file.
+You are QA. You verify, you don't fix. You may only add/modify test files.
 
-Cari: input yang tidak divalidasi di batas kepercayaan, injeksi (SQL/command/path traversal),
-secret yang ter-hardcode, authz yang hilang, error yang membocorkan informasi, dependency baru
-yang mencurigakan.
+1. Read the ticket's acceptance criteria.
+2. Write the test that proves it (in the repo's existing test location) and run it.
+3. Try the obvious edge cases: empty input, negative values, duplicate items, weird paths.
+4. Write a brief evidence file (what was run, passed/failed counts, edge cases tried) and
+   declare it via `artifacts:` (group e.g. "Testing Results").
 
-Tiap temuan: severity (low/medium/high), file:baris, dampak konkret, perbaikan yang disarankan.
+ALL PASS  → status: security, mention Pentester, summary includes the test results.
+FAILURES  → status: in_progress, mention the engineer who wrote it, and fill `tickets[]`
+            with one bug ticket per issue (repro steps + expected vs actual results).
 
-BERSIH (tak ada high/medium) → status: done, mention PM, summary berisi hasil audit.
-ADA TEMUAN                    → status: in_progress, mention engineer, isi `tickets[]` satu per
-                                temuan high/medium. Temuan low cukup di summary.
+Don't fix production code yourself.
 ```
 
-## 5. State machine & izin transisi
+### Pentester (`pentester`) — multiple allowed
+
+```
+You are the Security Reviewer. Audit ONLY the changes on this ticket, inside this repo.
+You must not scan, test, or attack anything outside this repo.
+Do not modify files.
+
+Look for: input that is not validated at the trust boundary, injection (SQL/command/path
+traversal), hardcoded secrets, missing authz, info-leaking errors, suspicious new
+dependencies.
+
+For each finding: severity (low/medium/high), file:line, concrete impact, suggested fix.
+
+CLEAN (no high/medium)   → status: done, mention PM, summary includes the audit results.
+FINDINGS                 → status: in_progress, mention the engineer, send one `tickets[]`
+                           per high/medium finding. Low findings just go in the summary.
+```
+
+## 5. State machine & transition permissions
 
 ```
 backlog → todo → in_progress → review → qa → security → done → release
 ```
 
-**Update:** per permintaan owner, transisi antar status tidak lagi dibatasi per pasangan
-from→to/role (tabel lama yang cuma mengizinkan mis. `review`→`qa` khusus Lead sudah dihapus —
-lihat §3). Sekarang **role mana pun (dan owner) boleh memindahkan tiket dari status apa pun ke
-status apa pun yang lain**, termasuk drag & drop kartu di Board. Satu-satunya batasan yang masih
-berlaku:
+**Update:** at the owner's request, transitions between statuses are no longer restricted per
+from→to/role pair (the old table that only allowed e.g. `review`→`qa` for Lead has been
+removed — see §3). Now **any role (and the owner) may move a ticket from any status to any
+other status**, including drag & drop of the kanban card. The only remaining restrictions:
 
-| Aturan | Detail |
+| Rule | Detail |
 |---|---|
-| Status tidak dikenal | ditolak (baik dari agent maupun PATCH manual) |
-| Status sama (no-op) | ditolak — bukan transisi nyata |
-| `done` → `release` | boleh siapa pun secara struktural, tapi **`release` tidak bisa dideklarasikan lewat blok ```map** (§3) — hanya aksi manual owner (atau PM lewat status yang boleh ia deklarasikan) di Board/Timeline |
-| `blocked` → apa pun | boleh siapa pun (termasuk owner/agent), tapi lihat catatan di bawah soal kapan ini realistis terjadi otomatis |
+| Unknown status | rejected (from an agent or from a manual PATCH) |
+| Same status (no-op) | rejected — not a real transition |
+| `done` → `release` | structurally allowed for anyone, but **`release` cannot be declared via the ```map block** (§3) — only a manual owner action (or PM via its allowed status) in the Board/Timeline |
+| `blocked` → anything | allowed for anyone (owner/agent alike), but see the note below about when this realistically happens automatically |
 
-`blocked` secara desain adalah titik di mana alur otonom biasanya berhenti dan meminta
-perhatianmu — bukan karena state machine melarang siapa pun membukanya (sekarang semua role
-boleh), tapi karena tidak ada bagian dari alur otomatis yang secara proaktif mengeluarkan tiket
-dari `blocked`; itu tetap perilaku yang diharapkan dari owner/PM saat mereka memutuskan lanjut.
+`blocked` is by design the point where the autonomous flow usually stops and asks for your
+attention — not because the state machine forbids anyone from leaving it (all roles may now),
+but because no part of the automated flow proactively moves a ticket out of `blocked`; that
+remains the expected behavior from the owner/PM when they decide to continue.
 
-Alasan block dicatat di kolom `ticket.blocked_reason` setiap kali tiket masuk status `blocked`
-(komponen sistem `_block_ticket` maupun deklarasi `status: blocked` dari agent) dan dibersihkan
-saat tiket keluar dari `blocked` — detail tiket menampilkannya langsung, tanpa perlu menelusuri
-komentar.
+The block reason is recorded in the `ticket.blocked_reason` column every time a ticket enters
+status `blocked` (both from the `_block_ticket` system component and from an agent's
+`status: blocked` declaration) and is cleared when the ticket leaves `blocked` — the ticket
+details display it directly, without having to dig through comments.
 
-## 6. Aturan handoff
+## 6. Handoff rules
 
-- Handoff dipicu oleh `mention` di blok ```map. Komentar manual owner yang berisi `@agent` juga
-  memicu run ([02-tsd.md](02-tsd.md) §3).
-- `mention` harus berisi **nama agent**, bukan role — daftar nama sudah ada di prompt. Kalau model
-  tetap menulis role (`qa`), orchestrator memilih agent `idle` dengan run paling sedikit di tiket
-  itu; kalau semua sibuk, masuk antrean.
-- Nama tak dikenal → dicatat di komentar sistem, tidak memicu run. Kalau `status` bukan final dan
-  tidak ada mention valid, tiket jadi `blocked` (tidak boleh menggantung).
-- Agent tidak bisa mention dirinya sendiri (dibuang saat parsing).
-- Tiap handoff menaikkan `ticket.handoff_depth`. Lewat `max_handoff_depth` → `blocked`. Guardrail
-  ini khusus membatasi rantai agent-ke-agent (mis. Lead ↔ Engineer bolak-balik) — pesan chat
-  owner ke agent (`trigger="mention"`, satu-satunya trigger yang manusia yang picu) **tidak**
-  dihitung/dibatasi guardrail ini, karena `handoff_depth` tidak pernah turun: tiket epic yang
-  sudah `done` lewat rantai handoff panjang tetap harus bisa terus di-chat oleh owner setelahnya.
-- Mention ke agent `disabled` → `blocked` dengan komentar sistem "agent X nonaktif".
+- Handoffs are triggered by `mention` in the ```map block. Manual owner comments containing
+  `@agent` also trigger a run ([02-tsd.md](02-tsd.md) §3).
+- `mention` must contain an **agent name**, not a role — the name list is already in the
+  prompt. If the model still writes a role (`qa`), the orchestrator picks the agent `idle`
+  with the fewest runs on that ticket; if all are busy, it gets queued.
+- Unknown names → recorded in the system comment, no run is triggered. If `status` is not
+  final and there is no valid mention, the ticket becomes `blocked` (no dangling tickets).
+- An agent cannot mention itself (dropped during parsing).
+- Every handoff increments `ticket.handoff_depth`. Past `max_handoff_depth` → `blocked`. This
+  guardrail specifically limits agent-to-agent chains (e.g. Lead ↔ Engineer bouncing back and
+  forth) — owner chat messages to an agent (`trigger="mention"`, the only human-triggered
+  trigger) are **not** counted or bounded by this guardrail, because `handoff_depth` never
+  decreases: a completed epic that went through a long handoff chain must still be chattable
+  by the owner afterwards.
+- Mentions of a `disabled` agent → `blocked` with the system comment "agent X is disabled".
 
-## 7. Anti-loop dalam prompt
+## 7. Anti-loop in the prompt
 
-Selain guardrail di kode ([02-tsd.md](02-tsd.md) §6), tiap prompt reviewer (Lead, QA, Pentester)
-mendapat tambahan bila ini bukan review pertama untuk tiket tersebut:
-
-```
-Ini review ke-{n} untuk tiket ini. Review sebelumnya:
-{ringkasan summary review terdahulu}
-
-Kalau masalah yang sama masih ada setelah dua kali diminta perbaiki, JANGAN meminta lagi.
-status: blocked, dan jelaskan kenapa perbaikannya tidak berhasil.
-```
-
-Kode adalah rem yang menentukan; prompt hanya mengurangi seberapa sering rem itu terpakai.
-
-## 8. Alur otonom penuh — contoh
+Beyond the guardrails in the code ([02-tsd.md](02-tsd.md) §6), every reviewer prompt (Lead,
+QA, Pentester) gets an extra note if this is not the first review on the ticket:
 
 ```
-Owner buat MAP-001 "Bikin halaman login", assign ke PM, klik Run
+This is review #{n} for this ticket. Previous reviews:
+{summary of previous reviews}
+
+If the same problem is still there after it was asked to fix twice, DON'T ask again.
+status: blocked, and explain why the fix didn't work.
+```
+
+The code is the brake that matters; the prompt only reduces how often that brake is used.
+
+## 8. Full autonomous flow — example
+
+```
+Owner creates MAP-001 "Make a login page", assigns to PM, clicks Run
   │
   ├─ PM (opencode) → tickets[]: MAP-002 (Designer), MAP-003 (Engineer), MAP-004 (Engineer)
-  │                  status: in_progress → 3 run terjadwal
+  │                  status: in_progress → 3 scheduled runs
   │
   ├─ MAP-002 Designer → review → Lead qa → QA security → Pentester done
-  ├─ MAP-003 Engineer → review → Lead REJECT ("validasi email hilang") → in_progress
-  │      → Engineer (lanjut session opencode yang sama) → review → Lead qa
-  │      → QA gagal → tickets[]: MAP-005 bug → in_progress → ... → done
+  ├─ MAP-003 Engineer → review → Lead REJECT ("email validation missing") → in_progress
+  │      → Engineer (continues the same opencode session) → review → Lead qa
+  │      → QA fails → tickets[]: MAP-005 bug → in_progress → ... → done
   └─ MAP-004 ... → done
 
-Semua anak done → PM tutup MAP-001
+All children done → PM closes MAP-001
 ```
 
-Owner memantau di `/w/[key]/activity` dan bisa menekan Pause kapan saja.
+The owner monitors in `/w/[key]/activity` and can press Pause at any time.

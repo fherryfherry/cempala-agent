@@ -1,216 +1,221 @@
-# Laporan Dogfood — MAP-033
+# Dogfood Report — MAP-033
 
-Dijalankan 2026-08-22. Stack nyata (`uvicorn` + `next dev`), `opencode` 1.18.18 nyata
-terautentikasi di mesin ini (bukan binary palsu), model LLM sungguhan (bukan mock).
-Ini bukan simulasi — biaya nyata (walau $0 karena model free-tier), proses subprocess nyata,
-bug nyata ditemukan sepanjang jalan.
+Run on 2026-08-22. Real stack (`uvicorn` + `next dev`), real `opencode` 1.18.18
+authenticated on this machine (not a fake binary), real LLM model (not a mock).
+This is not a simulation — real cost (albeit $0 because the model is free-tier), real
+subprocesses, real bugs found along the way.
 
 ## Setup
 
-**Repo contoh.** `/tmp/map033-dogfood-repo` — repo git terpisah di luar proyek ini (bukan repo
-`multi-agent` sendiri, sesuai peringatan keamanan `--auto` di CLAUDE.md/ADR-010: agent dengan
-`--auto` bisa menjalankan perintah apa pun, jadi tidak pantas melepasnya ke codebase yang sedang
-dikerjakan). Tugasnya sengaja kecil: implementasikan `strcli.py` dengan fungsi
-`reverse_words(s)` yang membalik urutan kata (bukan karakter), CLI tipis di atasnya, dan
-`test_strcli.py` berbasis `assert` polos.
+**Sample repo.** `/tmp/map033-dogfood-repo` — a separate git repo outside this project (not
+the `multi-agent` repo itself, per the `--auto` security warning in CLAUDE.md/ADR-010: an agent
+with `--auto` can run any command, so it is not appropriate to let it loose on the codebase
+being worked on). The task is deliberately small: implement `strcli.py` with a
+`reverse_words(s)` function that reverses the order of words (not characters), a thin CLI on
+top of it, and a `test_strcli.py` based on plain `assert`.
 
-**Workspace & agent.** Workspace `STR` → `repo_path /tmp/map033-dogfood-repo`. 6 agent dibuat
-persis sesuai AC: `pm`, `lead`, `eng1`, `eng2` (keduanya role `engineer`), `qa`, `pentester` —
-semua `tool_kind: opencode`, semua memakai model yang sama:
-`opencode/nemotron-3.5-lightning-free` (tier gratis di `opencode models`, dipilih supaya
-percobaan berulang selama dogfood tidak membebani biaya — dikonfirmasi `cost: 0` di setiap
-event `step_finish` sungguhan).
+**Workspace & agents.** Workspace `STR` → `repo_path /tmp/map033-dogfood-repo`. 6 agents
+created exactly per the AC: `pm`, `lead`, `eng1`, `eng2` (both `engineer` role), `qa`,
+`pentester` — all `tool_kind: opencode`, all using the same model:
+`opencode/nemotron-3.5-lightning-free` (free tier in `opencode models`, chosen so that
+repeated attempts during dogfooding don't incur cost — confirmed `cost: 0` on every real
+`step_finish` event).
 
-**Guardrail.** Diperketat dari default sebelum run pertama:
+**Guardrails.** Tightened from defaults before the first run:
 `run_timeout_sec: 1800→480`, `max_cost_per_run: 2.0→1.0`, `max_cost_per_ticket: 20.0→5.0`.
-`max_handoff_depth` (12) dan `loop_threshold` (3) dibiarkan default.
+`max_handoff_depth` (12) and `loop_threshold` (3) left at defaults.
 
-## Hasil akhir epic
+## Epic final result
 
-**STR-001** ("Implement strcli.py reverse_words tool") berakhir **`blocked`** — sempat
-mencapai `done` di tengah jalan (lihat jejak di bawah), lalu terdorong balik ke `blocked` oleh
-efek lanjutan dari satu bug yang ditemukan (lihat Temuan #3). Alasannya tercatat jelas dan
-lengkap di trail komentar sistem tiket — tidak ada tiket yang menggantung tanpa penjelasan.
-Ini adalah hasil yang sah menurut AC ("done atau blocked dengan alasan jelas"), dan justru
-menunjukkan persis apa yang MAP-033 dirancang untuk menemukan.
+**STR-001** ("Implement strcli.py reverse_words tool") ended **`blocked`** — it briefly
+reached `done` mid-way (see the trace below), then was pushed back to `blocked` by the
+knock-on effects of one bug that was found (see Finding #3). The reason is recorded clearly
+and completely in the ticket's system comment trail — no ticket is left hanging without an
+explanation. This is a legitimate outcome per the AC ("done or blocked with a clear reason"),
+and it actually demonstrates exactly what MAP-033 was designed to find.
 
-Kode yang dihasilkan **nyata dan benar**: `strcli.py` dan `test_strcli.py` ada di repo contoh,
-`python3 test_strcli.py` lolos (3/3 assert), CLI-nya bekerja
+The generated code is **real and correct**: `strcli.py` and `test_strcli.py` exist in the
+sample repo, `python3 test_strcli.py` passes (3/3 asserts), and the CLI works
 (`python3 strcli.py "hello world foo"` → `"foo world hello"`).
 
-## Jejak aktivitas (ringkas, bukan dump mentah)
+## Activity trace (summary, not a raw dump)
 
-1. **Klik Run tunggal** pada STR-001 (assignee PM) — trigger manual, sesuai AC.
-2. Run PM pertama gagal total dengan `no ```map block found` — ternyata bug adapter
-   (Temuan #1), bukan model gagal. Dites ulang dengan pause di tengah jalan (lihat bagian
-   Pause), lalu di-resume.
-3. Setelah adapter diperbaiki (lihat Temuan #1), dua run PM berikutnya menghasilkan blok
-   ```map yang **valid secara sintaks** (`status: done`/`in_progress`, `summary` terisi wajar)
-   tapi **ditolak state machine** karena transisi ilegal untuk role `pm` — ternyata bug
-   kontrak prompt vs. state machine (Temuan #2), bukan model tidak patuh.
-4. Owner menaikkan tiket secara manual melewati langkah PM yang macet (transisi legal owner:
-   `blocked → review`), mengalihkan assignee ke `lead`, meninggalkan komentar non-sistem
-   menjelaskan kenapa. Dari titik ini **handoff engine bekerja otonom** tanpa trigger manual
-   lagi kecuali disebutkan:
-   - **Lead** (manual, run terakhir yang dipicu tangan) me-review kode yang sudah ada di repo
-     (ditulis PM di luar wewenangnya — lihat Temuan #2 catatan tambahan), lolos,
-     `status: qa, mention: [qa]` → transisi `review → qa` legal.
-   - **QA** (`trigger: handoff`, otomatis dari mention Lead) menjalankan test asli, lolos,
-     `status: security, mention: [pentester]` → transisi `qa → security` legal.
-   - **Pentester** percobaan #1 (`trigger: handoff`, otomatis) — output terpotong di tengah
-     kalimat ("Now I'll do a security audit of"), tidak pernah menutup blok ```map. Kegagalan
-     format **sungguhan**, bukan bug sistem — kemungkinan model free-tier memotong generasi.
-     Tiket `blocked` dengan komentar sistem yang jelas.
-   - Owner memicu ulang Pentester sekali (manual retry) — kali ini lolos, audit bersih,
-     `status: done, mention: [pm]` → transisi `security → done` legal. **Epic sempat mencapai
-     `done`.**
-   - **PM** (`trigger: handoff`, otomatis dari mention Pentester) menutup epic, tapi
-     `mention`-nya masih menyebut `[eng1, eng2, pentester]` (pola yang sama seperti
-     ringkasan sebelumnya). Ini memicu handoff **lagi** ke `eng1`/`eng2` pada tiket yang
-     sudah `done` — keduanya me-reply dengan blok valid tapi `status: review`, yang ilegal
-     dari `done` untuk role `engineer`. Rangkaian percobaan-gagal ini membuat tiket
-     bolak-balik `done ⇄ blocked` beberapa kali (`handoff_depth` naik sampai 8 dari batas 12)
-     sebelum akhirnya menetap di `blocked` dengan komentar sistem terakhir yang jelas
-     ("no ```map block found" pada satu percobaan susulan). **Loop detector (MAP-028,
-     threshold 3) tidak terpicu** — pola ini bukan ping-pong dua agent bergantian
-     (A→B→A→B), melainkan beberapa agent berbeda yang masing-masing gagal transisi satu
-     kali lalu berhenti; ini kemungkinan celah nyata pada definisi "loop" MAP-028 yang layak
-     ditinjau ulang (di luar cakupan perbaikan sesi ini).
+1. **Single Run click** on STR-001 (assignee PM) — manual trigger, per the AC.
+2. The first PM run failed outright with `no ```map block found` — turned out to be an
+   adapter bug (Finding #1), not a model failure. Re-tested with a pause mid-way (see the
+   Pause section), then resumed.
+3. After the adapter was fixed (see Finding #1), the next two PM runs produced ```map blocks
+   that were **syntactically valid** (`status: done`/`in_progress`, reasonable `summary`)
+   but **rejected by the state machine** because of an illegal transition for the `pm` role —
+   turned out to be a prompt-contract vs. state-machine bug (Finding #2), not a
+   non-compliant model.
+4. The owner manually advanced the ticket past the stuck PM step (legal owner transition:
+   `blocked → review`), reassigned to `lead`, leaving a non-system comment explaining why.
+   From this point on the **handoff engine worked autonomously** with no further manual
+   triggers except where noted:
+   - **Lead** (manual, the last hand-triggered run) reviewed the code already in the repo
+     (written by PM outside its authority — see Finding #2 addendum), passed,
+     `status: qa, mention: [qa]` → `review → qa` transition legal.
+   - **QA** (`trigger: handoff`, automatic from Lead's mention) ran the real tests, passed,
+     `status: security, mention: [pentester]` → `qa → security` transition legal.
+   - **Pentester** attempt #1 (`trigger: handoff`, automatic) — output truncated mid-sentence
+     ("Now I'll do a security audit of"), never closed the ```map block. A **genuine** format
+     failure, not a system bug — likely the free-tier model cutting off generation.
+     Ticket `blocked` with a clear system comment.
+   - Owner re-triggered Pentester once (manual retry) — this time it passed, clean audit,
+     `status: done, mention: [pm]` → `security → done` transition legal. **The epic briefly
+     reached `done`.**
+   - **PM** (`trigger: handoff`, automatic from Pentester's mention) closed the epic, but its
+     `mention` still listed `[eng1, eng2, pentester]` (the same pattern as the earlier
+     summary). This triggered handoffs **again** to `eng1`/`eng2` on a ticket that was already
+     `done` — both replied with valid blocks but `status: review`, which is illegal from
+     `done` for the `engineer` role. This chain of failed attempts bounced the ticket back and
+     forth `done ⇄ blocked` several times (`handoff_depth` climbed to 8 of the 12 limit)
+     before finally settling on `blocked` with a clear final system comment
+     ("no ```map block found" on one follow-up attempt). **The loop detector (MAP-028,
+     threshold 3) did not trigger** — this pattern is not a two-agent ping-pong
+     (A→B→A→B), but several different agents each failing a transition once and then
+     stopping; this is likely a real gap in MAP-028's definition of "loop" worth reviewing
+     (out of scope for this session's fixes).
 
-## Kepatuhan blok ```map
+## ```map block compliance
 
-Dihitung dari seluruh run nyata sesi ini (`GET /api/workspaces/{id}/runs`), 21 run total.
-Dipisah jadi tiga kelas supaya tidak menyesatkan — beberapa "kegagalan" adalah bug sistem yang
-sudah diperbaiki (Temuan #1), bukan ketidakpatuhan model:
+Counted from all real runs in this session (`GET /api/workspaces/{id}/runs`), 21 runs total.
+Split into three classes so as not to mislead — some "failures" are system bugs that were
+already fixed (Finding #1), not model non-compliance:
 
-| Kelas | Jumlah | Detail |
+| Class | Count | Details |
 |---|---|---|
-| Run dengan blok ```map valid **dan** transisi legal | 6 | PM×0 (lihat catatan), Lead×1, QA×1, Pentester×2 (1 gagal format lalu 1 sukses — dihitung sukses saja di sini), PM (penutup epic)×1, plus 1 percobaan Lead yang legal setelah dikoreksi |
-| Run dengan blok ```map valid **tapi** transisi ilegal | 6 | 2× PM (bug Temuan #2 — prompt vs. state machine), 2× Lead/Pentester akibat kesalahan setup manual penulis laporan sendiri (lihat catatan), 2× Engineer (efek lanjutan Temuan #3, `done → review` ilegal) |
-| Run tanpa blok ```map sama sekali | 4 | 1× akibat bug adapter Temuan #1 (sebelum diperbaiki — model sebenarnya menjawab "OK" dengan benar, output-nya yang hilang di sisi backend), 1× kegagalan format murni dari model (output terpotong, Pentester percobaan #1), 2× dari rangkaian percobaan susulan Engineer setelah tiket sudah kacau |
-| Run `cancelled` (dites Pause, tidak dihitung — memang sengaja dihentikan sebelum sempat menjawab) | 1 | — |
+| Runs with a valid ```map block **and** legal transition | 6 | PM×0 (see note), Lead×1, QA×1, Pentester×2 (1 format failure then 1 success — only the success counted here), PM (epic closer)×1, plus 1 Lead attempt that was legal after correction |
+| Runs with a valid ```map block **but** illegal transition | 6 | 2× PM (Finding #2 bug — prompt vs. state machine), 2× Lead/Pentester due to the report author's own manual setup error (see note), 2× Engineer (knock-on effect of Finding #3, illegal `done → review`) |
+| Runs with no ```map block at all | 4 | 1× due to the Finding #1 adapter bug (before the fix — the model actually answered "OK" correctly; its output was lost on the backend side), 1× pure model format failure (truncated output, Pentester attempt #1), 2× from the follow-up Engineer attempts after the ticket was already in a mess |
+| Runs `cancelled` (Pause test, not counted — deliberately stopped before it could answer) | 1 | — |
 
-**Tingkat kepatuhan format murni model** (mengecualikan run yang gagal semata-mata karena bug
-adapter #1, dan mengecualikan run `cancelled`): dari 20 run yang benar-benar sempat
-menghasilkan jawaban, **16 menghasilkan blok ```map yang valid secara sintaks/YAML**
-(80%) — angka ini jauh lebih baik dari yang terlihat pada percobaan pertama, karena sebagian
-besar "kegagalan" yang teramati sebenarnya adalah dua bug sistem (Temuan #1 dan #2), bukan
-model mengarang format. Hanya **1 dari 20** run gagal total membentuk blok karena model
-sungguhan berhenti menulis di tengah kalimat.
+**Pure model format compliance rate** (excluding runs that failed solely due to the adapter
+bug #1, and excluding the `cancelled` run): of the 20 runs that actually produced an answer,
+**16 produced a syntactically/YAML-valid ```map block** (80%) — much better than the first
+attempt suggested, because most of the observed "failures" were actually two system bugs
+(Finding #1 and #2), not the model inventing formats. Only **1 of 20** runs failed to form a
+block at all because the real model stopped writing mid-sentence.
 
-**Kesimpulan kepatuhan.** Model kecil/gratis yang dipakai di sini (`nemotron-3.5-lightning-free`)
-cukup patuh pada kontrak format ```map. Risiko utama MAP-033 (lihat 05-roadmap.md §M2/M3)
-ternyata bukan di sisi model, melainkan di sisi kontrak sistem: adapter yang belum pernah
-diuji ke binary asli, dan prompt PM yang menjanjikan transisi yang tidak diizinkan state
-machine. Ini justru argumen kuat untuk **tidak** buru-buru pindah ke MCP server ticketing
-(opsi di 06-adr.md/ADR-009) — masalahnya bukan format-nya LLM, tapi kontrak internal kita.
+**Compliance conclusion.** The small/free model used here (`nemotron-3.5-lightning-free`)
+is sufficiently compliant with the ```map format contract. The main risk of MAP-033 (see
+05-roadmap.md §M2/M3) turned out not to be on the model side, but on the system-contract
+side: an adapter that had never been tested against the real binary, and a PM prompt that
+promises transitions the state machine does not allow. This is actually a strong argument
+**against** rushing to an MCP ticketing server (the option in 06-adr.md/ADR-009) — the problem
+isn't the LLM's format, it's our internal contract.
 
-## Temuan #1 — bug adapter `OpenCodeTool` (opencode_tool.py, MAP-020)
+## Finding #1 — `OpenCodeTool` adapter bug (opencode_tool.py, MAP-020)
 
-MAP-020 hanya pernah diuji terhadap binary palsu yang mencetak skema JSON asumsi
-(`{"type": "assistant_text", "text": ..., "session_id": ..., "tokens_in": ...}` rata/flat).
-Binary `opencode` 1.18.18 yang sungguhan ternyata memakai skema berbeda: `sessionID` (bukan
-`session_id`), teks dibungkus `{"type": "text", "part": {"type": "text", "text": ...}}`, dan
-token/biaya bersarang di dalam baris `step_finish` (`part.tokens.input/output`, `part.cost`),
-bukan di top-level. Akibatnya **setiap output run sungguhan hilang tanpa jejak** — parser blok
-```map selalu melihat string kosong, jadi setiap run "gagal" dengan "no ```map block found"
-walau model sudah menjawab dengan benar (dikonfirmasi lewat panggilan `opencode run` mandiri
-yang sukses balas "OK" dengan token/cost/session_id lengkap, tapi backend mencatat 0/0/null
-untuk semuanya).
+MAP-020 had only ever been tested against a fake binary printing an assumed JSON schema
+(`{"type": "assistant_text", "text": ..., "session_id": ..., "tokens_in": ...}` flat/flat).
+The real `opencode` 1.18.18 binary turns out to use a different schema: `sessionID` (not
+`session_id`), text wrapped in `{"type": "text", "part": {"type": "text", "text": ...}}`, and
+tokens/cost nested inside the `step_finish` line (`part.tokens.input/output`, `part.cost`),
+not at the top level. As a result **every real run's output was lost without a trace** — the
+```map block parser always saw an empty string, so every run "failed" with "no ```map block
+found" even though the model had answered correctly (confirmed via a standalone `opencode run`
+call that successfully replied "OK" with full token/cost/session_id, while the backend
+recorded 0/0/null for all of them).
 
-Diperbaiki di komit terpisah (`fix: opencode adapter JSON schema didn't match real CLI output`)
-— menerima kedua bentuk skema sekaligus, sehingga 9 test binary-palsu yang sudah ada tetap
-lolos tanpa perubahan. Full test suite backend (653 test) tetap hijau setelah perbaikan.
+Fixed in a separate commit (`fix: opencode adapter JSON schema didn't match real CLI output`)
+— accepting both schema shapes at once, so the 9 existing fake-binary tests still pass
+unchanged. The full backend test suite (653 tests) stayed green after the fix.
 
-Ini persis skenario yang diperingatkan CLAUDE.md di bagian urutan build M2: "Test the opencode
-adapter against a fake binary... rather than real LLM calls" — MAP-020 memang sengaja tidak
-pernah dites ke binary asli sampai MAP-033 ini, dan itu terbukti menyembunyikan bug nyata.
+This is exactly the scenario CLAUDE.md warns about in the M2 build-order section: "Test the
+opencode adapter against a fake binary... rather than real LLM calls" — MAP-020 was
+deliberately never tested against the real binary until this MAP-033, and that proved to
+hide a real bug.
 
-## Temuan #2 — kontrak prompt PM tidak cocok dengan state machine
+## Finding #2 — PM prompt contract doesn't match the state machine
 
-`DEFAULT_ROLE_PROMPTS["pm"]` (bersumber dari docs/03-agent-design.md §4) menginstruksikan PM:
-untuk epic baru, setelah memecah jadi sub-tiket, tulis `status: in_progress`. Tapi tabel
-`_TRANSITIONS` di `core/state_machine.py` **tidak punya entri yang mengizinkan role `pm`
-berpindah langsung dari `backlog` ke `in_progress`** — satu-satunya langkah legal PM dari
-`backlog` adalah `backlog → todo`. Akibatnya, output PM yang **benar-benar patuh** pada
-instruksi promptnya dijamin selalu ditolak state machine di langkah paling dasar dari seluruh
-alur otonom. Diverifikasi langsung: dua run PM sungguhan (`bb29166a...`, `3bf2400a...`)
-menghasilkan blok ```map yang valid dengan status yang persis sesuai instruksi prompt, dan
-keduanya ditolak state machine dengan pesan yang jelas — penegakan aturan (CLAUDE.md: "Role
-permissions... enforced in the parser, not trusted to the prompt") bekerja seperti dirancang,
-tapi prompt-nya memberi instruksi yang tidak mungkin berhasil.
+`DEFAULT_ROLE_PROMPTS["pm"]` (sourced from docs/03-agent-design.md §4) instructs the PM:
+for a new epic, after splitting it into sub-tickets, write `status: in_progress`. But the
+`_TRANSITIONS` table in `core/state_machine.py` **has no entry allowing the `pm` role to move
+directly from `backlog` to `in_progress`** — the only legal PM step from `backlog` is
+`backlog → todo`. As a result, PM output that is **fully compliant** with its prompt
+instructions is guaranteed to be rejected by the state machine at the most basic step of the
+entire autonomous flow. Verified directly: two real PM runs (`bb29166a...`, `3bf2400a...`)
+produced valid ```map blocks with statuses exactly matching the prompt instructions, and
+both were rejected by the state machine with a clear message — the rule enforcement
+(CLAUDE.md: "Role permissions... enforced in the parser, not trusted to the prompt") works
+as designed, but the prompt gives instructions that cannot succeed.
 
-**Status perbaikan.** Bukan bug adapter, jadi tidak diperbaiki dalam sesi dogfood ini —
-sedang dikerjakan terpisah oleh pemilik proyek dengan pendekatan memperlebar
-auto-transition otomatis di `orchestrator.execute()` supaya juga berlaku mulai dari status
-`backlog`, tidak hanya `todo`. Laporan ini tidak menunggu perbaikan itu selesai.
+**Fix status.** Not an adapter bug, so it was not fixed in this dogfood session — being
+worked on separately by the project owner, with the approach of widening the automatic
+auto-transition in `orchestrator.execute()` so it also applies starting from the `backlog`
+status, not only `todo`. This report does not wait for that fix to land.
 
-Catatan tambahan yang teramati di jejak yang sama: PM juga menulis kode secara langsung
-(`strcli.py`, `test_strcli.py`) padahal prompt-nya eksplisit melarang ("Kamu TIDAK menulis
-kode. Jangan mengubah file apa pun.") — lalu melaporkan pekerjaan itu seolah didelegasikan ke
-`eng1`/`eng2`/`pentester` lewat `tickets[]` yang isinya fiktif (tidak ada sub-tiket nyata yang
-pernah dibuat). Kebetulan hasil kodenya benar dan lolos test, tapi ini pelanggaran peran dan
-halusinasi pelaporan yang nyata — model kecil/gratis tampaknya lebih suka "menyelesaikan
-sendiri lalu mengarang delegasi" daripada benar-benar memecah dan menyerahkan pekerjaan.
-Layak dicatat sebagai risiko kalau model serupa dipakai di produksi.
+Addendum observed in the same trace: the PM also wrote code directly (`strcli.py`,
+`test_strcli.py`) even though its prompt explicitly forbids it ("You must NOT write code.
+Do not modify any file.") — then reported that work as if it had been delegated to
+`eng1`/`eng2`/`pentester` via a `tickets[]` whose contents were fictitious (no real
+sub-tickets were ever created). Coincidentally the code was correct and passed the tests,
+but this is a real role violation and reporting hallucination — the small/free model seems
+to prefer "doing it itself then fabricating a delegation" over actually splitting and handing
+off the work. Worth noting as a risk if similar models are used in production.
 
-## Temuan #3 — mention penutup epic memicu handoff ke agent yang sudah tidak relevan
+## Finding #3 — epic-closing mention triggers handoff to agents no longer relevant
 
-Saat Pentester/PM menutup tiket dengan `status: done`, field `mention` pada blok ```map masih
-berisi daftar agent (`eng1`, `eng2`) yang sebenarnya tidak punya peran lagi di tiket yang sudah
-final. Handoff engine (MAP-029) menjadwalkan run untuk mereka apa adanya, dan run itu (secara
-wajar, dari sudut pandang agent yang tidak tahu tiketnya sudah `done`) mencoba
-`status: review` — ilegal dari `done`. Ini mendorong tiket bolak-balik `done ⇄ blocked`
-beberapa kali sebelum menetap. **Loop detector tidak terpicu** karena polanya bukan ping-pong
-dua agent (A→B→A→B) yang jadi definisi MAP-028, melainkan beberapa agent berbeda yang masing-
-masing gagal sekali lalu berhenti. Ini kemungkinan celah nyata di definisi loop MAP-028 — belum
-diperbaiki, di luar cakupan sesi ini, dicatat untuk tiket lanjutan.
+When Pentester/PM closed the ticket with `status: done`, the `mention` field in the ```map
+block still contained a list of agents (`eng1`, `eng2`) that actually have no role left on a
+ticket that is already final. The handoff engine (MAP-029) scheduled runs for them as-is,
+and those runs (reasonably, from the perspective of an agent that doesn't know the ticket is
+`done`) tried `status: review` — illegal from `done`. This bounced the ticket back and forth
+`done ⇄ blocked` several times before settling. **The loop detector did not trigger** because
+the pattern is not the two-agent ping-pong (A→B→A→B) that is MAP-028's definition, but
+several different agents each failing once and then stopping. This is likely a real gap in
+MAP-028's loop definition — not fixed, out of scope for this session, noted for a follow-up
+ticket.
 
-## Pause — bukti proses nyata dimatikan
+## Pause — proof that real processes are killed
 
-Saat run PM pertama benar-benar `running` dengan proses `opencode` sungguhan aktif
-(`ps` menunjukkan pid 39370, command line lengkap `opencode run --format json --dir
-/tmp/map033-dogfood-repo -m opencode/nemotron-3.5-lightning-free --auto ...`), dipanggil
-`POST /workspaces/{id}/pause`. Dalam ~3 detik:
-- `pgrep -fl "opencode run"` → kosong (proses benar-benar mati, bukan cuma ditandai di DB).
-- `GET /api/runs/{id}` → `status: cancelled`, `ended_at` terisi.
-- Workspace `paused: true`, dan run baru ditolak selama paused (dicek sebelum `resume`).
+While the first PM run was actually `running` with a real `opencode` process active
+(`ps` showed pid 39370, full command line `opencode run --format json --dir
+/tmp/map033-dogfood-repo -m opencode/nemotron-3.5-lightning-free --auto ...`),
+`POST /workspaces/{id}/pause` was called. Within ~3 seconds:
+- `pgrep -fl "opencode run"` → empty (the process is really dead, not just marked in the DB).
+- `GET /api/runs/{id}` → `status: cancelled`, `ended_at` populated.
+- Workspace `paused: true`, and new runs rejected while paused (checked before `resume`).
 
-Sesuai AC MAP-031 (nol proses opencode dalam ≤5 detik).
+Per the MAP-031 AC (zero opencode processes within ≤5 seconds).
 
-## Restart recovery — bukti tidak ada run menggantung
+## Restart recovery — proof that no run hangs
 
-Backend di-`kill -9` (bukan graceful shutdown) saat satu run (`3bf2400a...`) berstatus
-`running`, untuk memuat ulang perbaikan Temuan #1. Setelah backend dinyalakan ulang:
-- `GET /api/workspaces/{id}/runs` → run itu berstatus `interrupted`.
-- Komentar sistem otomatis muncul di tiket: "Backend restarted while 1 run(s) were in flight
-  (3bf2400a...). Marked `interrupted`."
-- Agent PM kembali `idle` (dicek lewat `GET /api/workspaces/{id}/agents` — tidak ada agent
-  yang macet di `working`).
+The backend was `kill -9`'d (not a graceful shutdown) while one run (`3bf2400a...`) was
+`running`, to reload the Finding #1 fix. After the backend was restarted:
+- `GET /api/workspaces/{id}/runs` → that run shows `interrupted`.
+- An automatic system comment appeared on the ticket: "Backend restarted while 1 run(s) were
+  in flight (3bf2400a...). Marked `interrupted`."
+- The PM agent is back to `idle` (checked via `GET /api/workspaces/{id}/agents` — no agent
+  stuck in `working`).
 
-Ini terjadi sebagai efek samping dari me-restart backend untuk memuat patch adapter, bukan
-skenario buatan terpisah — tapi buktinya sama validnya dengan pengujian khusus, dan langsung
-menunjukkan MAP-026 bekerja pada kondisi nyata (bukan skrip test).
+This happened as a side effect of restarting the backend to load the adapter patch, not as a
+separate artificial scenario — but the evidence is just as valid as a dedicated test, and it
+directly shows MAP-026 working under real conditions (not a test script).
 
-## Catatan lain
+## Other notes
 
-- **Biaya total sesi**: $0 — model yang dipilih (`opencode/nemotron-3.5-lightning-free`)
-  gratis di tier `opencode`. Token terpakai riil (puluhan ribu token input per run, sesuai
-  `step_finish` event asli), tapi `cost: 0` di semua event.
-- **Waktu per run**: bervariasi ~20 detik sampai ~2 menit per run, wajar untuk model kecil.
-- Ditemukan proses `uvicorn` basi (bukan dari sesi ini) yang sudah menempati port 8000 di
-  awal sesi — dimatikan sebelum memulai stack yang bersih untuk dogfood ini, dan `map.db` yang
-  lama dihapus supaya tidak mencampur data dogfood dengan sisa pengujian manual sebelumnya.
+- **Total session cost**: $0 — the chosen model (`opencode/nemotron-3.5-lightning-free`)
+  is free on the `opencode` tier. Real tokens were used (tens of thousands of input tokens
+  per run, per the actual `step_finish` events), but `cost: 0` on all events.
+- **Time per run**: varied from ~20 seconds to ~2 minutes per run, reasonable for a small
+  model.
+- A stale `uvicorn` process (not from this session) was found already occupying port 8000 at
+  the start of the session — killed before starting a clean stack for this dogfood, and the
+  old `map.db` was deleted so dogfood data wouldn't mix with leftovers from earlier manual
+  testing.
 
-## Rekomendasi tindak lanjut
+## Follow-up recommendations
 
-1. Selesaikan perbaikan Temuan #2 (sedang dikerjakan terpisah).
-2. Pertimbangkan celah loop detector di Temuan #3 sebagai tiket kecil tersendiri — definisi
-   "loop" MAP-028 mungkin perlu diperluas dari "dua agent ping-pong" ke "N kegagalan transisi
-   berturut-turut pada satu tiket", supaya kasus mention-ke-agent-yang-tidak-relevan juga
-   tertangkap.
-3. Pertimbangkan menambah instruksi eksplisit di prompt PM/Pentester: jangan sertakan agent di
-   `mention` kalau statusnya `done` (tidak ada yang perlu dikerjakan lagi).
-4. Uji ulang dengan model yang lebih besar (bukan tier gratis) untuk membandingkan tingkat
-   kepatuhan format dan kecenderungan role-violation (PM menulis kode sendiri) — sesi ini hanya
-   memakai satu model kecil/gratis untuk menahan biaya, sesuai instruksi awal tiket.
+1. Finish the Finding #2 fix (being worked on separately).
+2. Consider the loop-detector gap in Finding #3 as a small ticket of its own — MAP-028's
+   definition of "loop" may need to be widened from "two agents ping-ponging" to "N
+   consecutive transition failures on one ticket", so that the mention-to-irrelevant-agent
+   case is also caught.
+3. Consider adding an explicit instruction to the PM/Pentester prompt: don't include agents
+   in `mention` when the status is `done` (nothing left to do).
+4. Re-test with a larger model (not the free tier) to compare format compliance rates and
+   the tendency for role violations (PM writing code itself) — this session only used one
+   small/free model to keep costs down, per the ticket's original instructions.
