@@ -435,7 +435,9 @@ function ThreadPanel({
         )}
 
         <div
-          className="group pointer-events-none absolute right-2 bottom-3 flex flex-col items-end gap-1.5"
+          className={`absolute right-2 bottom-3 flex flex-col items-end gap-1.5 pt-3 ${
+            suggestionsHovered ? "pointer-events-auto" : "pointer-events-none"
+          }`}
           onMouseEnter={handleSuggestionsEnter}
           onMouseLeave={handleSuggestionsLeave}
         >
@@ -446,9 +448,9 @@ function ThreadPanel({
               onClick={() => handleSuggestion(s)}
               disabled={sendMutation.isPending}
               style={{ transitionDelay: `${(SUGGESTIONS.length - 1 - i) * 30}ms` }}
-              className={`pointer-events-none flex translate-y-2 cursor-pointer items-center gap-1.5 rounded-full border border-black/10 bg-white/60 px-3 py-1.5 text-xs text-zinc-600 opacity-0 shadow-sm backdrop-blur transition-all duration-200 hover:bg-white/90 dark:border-white/10 dark:bg-zinc-900/60 dark:text-zinc-300 dark:hover:bg-zinc-900/90 ${
+              className={`flex translate-y-2 cursor-pointer items-center gap-1.5 rounded-full border border-black/10 bg-white/60 px-3 py-1.5 text-xs text-zinc-600 opacity-0 shadow-sm backdrop-blur transition-all duration-200 hover:bg-white/90 dark:border-white/10 dark:bg-zinc-900/60 dark:text-zinc-300 dark:hover:bg-zinc-900/90 ${
                 suggestionsHovered
-                  ? "pointer-events-auto translate-y-0 opacity-100"
+                  ? "translate-y-0 opacity-100"
                   : "translate-y-2 opacity-0"
               }`}
             >
