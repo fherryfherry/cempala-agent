@@ -249,7 +249,6 @@ function ThreadPanel({
   const stickToBottomRef = useRef(true);
   const [hasNewMessage, setHasNewMessage] = useState(false);
   const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null);
-  const [suggestionsOpen, setSuggestionsOpen] = useState(false);
 
   const isTicket = mode.type === "ticket";
   const ticketKey = isTicket ? mode.key : null;
@@ -423,30 +422,25 @@ function ThreadPanel({
           </button>
         )}
 
-        <div className="pointer-events-none absolute right-0 bottom-3 flex flex-col items-end gap-1.5">
-          {suggestionsOpen && (
-            <>
-              {SUGGESTIONS.map((s) => (
-                <button
-                  key={s.label}
-                  type="button"
-                  onClick={() => handleSuggestion(s)}
-                  disabled={sendMutation.isPending}
-                  className="pointer-events-auto flex cursor-pointer items-center gap-1.5 rounded-full border border-black/10 bg-white/60 px-3 py-1.5 text-xs text-zinc-600 shadow-sm backdrop-blur hover:bg-white/90 disabled:opacity-50 dark:border-white/10 dark:bg-zinc-900/60 dark:text-zinc-300 dark:hover:bg-zinc-900/90"
-                >
-                  <s.icon className="size-3.5 shrink-0" />
-                  {s.label}
-                </button>
-              ))}
-            </>
-          )}
+        <div className="group pointer-events-none absolute right-2 bottom-3 flex flex-col items-end gap-1.5">
+          {SUGGESTIONS.map((s) => (
+            <button
+              key={s.label}
+              type="button"
+              onClick={() => handleSuggestion(s)}
+              disabled={sendMutation.isPending}
+              className="pointer-events-auto hidden cursor-pointer items-center gap-1.5 rounded-full border border-black/10 bg-white/60 px-3 py-1.5 text-xs text-zinc-600 shadow-sm backdrop-blur hover:bg-white/90 disabled:opacity-50 group-hover:flex dark:border-white/10 dark:bg-zinc-900/60 dark:text-zinc-300 dark:hover:bg-zinc-900/90"
+            >
+              <s.icon className="size-3.5 shrink-0" />
+              {s.label}
+            </button>
+          ))}
           <button
             type="button"
-            onClick={() => setSuggestionsOpen((o) => !o)}
-            className="pointer-events-auto flex cursor-pointer items-center gap-1.5 rounded-full border border-black/10 bg-white/60 px-3 py-1.5 text-xs font-medium text-zinc-600 shadow-sm backdrop-blur hover:bg-white/90 disabled:opacity-50 dark:border-white/10 dark:bg-zinc-900/60 dark:text-zinc-300 dark:hover:bg-zinc-900/90"
+            className="pointer-events-auto flex cursor-pointer items-center gap-1.5 rounded-full border border-black/10 bg-white/60 px-3 py-1.5 text-xs font-medium text-zinc-600 shadow-sm backdrop-blur hover:bg-white/90 dark:border-white/10 dark:bg-zinc-900/60 dark:text-zinc-300 dark:hover:bg-zinc-900/90"
           >
             <SparklesIcon className="size-3.5 shrink-0" />
-            {suggestionsOpen ? "Tutup saran" : "Saran"}
+            Saran
           </button>
         </div>
       </div>
