@@ -478,7 +478,7 @@ function ThreadPanel({
               <button
                 type="button"
                 onClick={() => setPreviewAttachment(a)}
-                className="flex min-w-0 items-center gap-0.5 hover:underline"
+                className="flex min-w-0 cursor-pointer items-center gap-0.5 hover:underline"
                 title="Preview file"
               >
                 <EyeIcon className="size-2.5 shrink-0 text-zinc-500" />
