@@ -1643,3 +1643,123 @@ def test_artifact_updates_errors_skipped_with_notes(client, tmp_path, monkeypatc
     diag = next(b for b in system_bodies if "artifact_updates diabaikan" in b)
     assert "masih berisi" in diag
     assert "Tidak Ada" in diag
+
+
+# ---------------------------------------------------------------------------
+# Owner chat notifications (System messages on the epic chat)
+# ---------------------------------------------------------------------------
+
+
+def test_pm_tickets_from_child_mirrors_system_message_to_epic_chat(
+    client, tmp_path, monkeypatch
+):
+    """PM filed tickets[] while working a CHILD ticket (e.g. QA bug report fan-out):
+    the owner's chat lives on the epic, so a System message must land there listing
+    the new sub-tickets — otherwise the PM "answers" by filing tickets but says
+    nothing in the conversation the owner is actually watching."""
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    _make_agent(client, ws_id, "engineer", "eng-1")
+    epic = _make_ticket(client, ws_id, "Epic")
+    story = _make_ticket(client, ws_id, "Story", parent_id=epic["id"])
+    _set_status(client, story["key"], "todo")
+    _set_status(client, story["key"], "in_progress")
+
+    script = _write_python_binary(tmp_path / "opencode", _PM_TICKETS_SCRIPT)
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+    run = client.post(f"/api/tickets/{story['key']}/run", json={"agent_id": pm_id}).json()
+    _wait_for_run(client, run["id"])
+
+    epic_detail = client.get(f"/api/tickets/{epic['key']}").json()
+    system_bodies = [c["body"] for c in epic_detail["comments"] if c["is_system"]]
+    assert any("memecah" in b and story["key"] in b for b in system_bodies), system_bodies
+
+    children = client.get(
+        f"/api/workspaces/{ws_id}/tickets", params={"parent_id": epic["id"]}
+    ).json()
+    child_keys = {c["key"] for c in children if c["id"] != story["id"]}
+    assert child_keys, "expected the PM report to have created a child ticket"
+    # the chat message must name the newly created tickets so the owner can click through
+    breakdown = next(b for b in system_bodies if "memecah" in b)
+    assert any(k in breakdown for k in child_keys), (breakdown, child_keys)
+
+
+def test_blocked_child_mirrors_system_notice_with_reason_to_epic_chat(
+    client, tmp_path, monkeypatch
+):
+    """A blocked/failed child must reach the owner's epic chat with the block reason,
+    so the owner is told what happened instead of discovering it by opening the child."""
+    ws_id = _make_workspace(client, tmp_path)
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+    epic = _make_ticket(client, ws_id, "Epic")
+    child = _make_ticket(client, ws_id, "Child", parent_id=epic["id"])
+    _set_status(client, child["key"], "todo")
+    _set_status(client, child["key"], "in_progress")
+
+    script = _write_python_binary(tmp_path / "opencode", _GARBAGE_SCRIPT)
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    run = client.post(f"/api/tickets/{child['key']}/run", json={"agent_id": eng_id}).json()
+    _wait_for_run(client, run["id"])
+
+    detail = client.get(f"/api/tickets/{child['key']}").json()
+    assert detail["status"] == "blocked"
+
+    epic_detail = client.get(f"/api/tickets/{epic['key']}").json()
+    system_bodies = [c["body"] for c in epic_detail["comments"] if c["is_system"]]
+    notice = next(
+        (b for b in system_bodies if "menandai" in b and child["key"] in b), None
+    )
+    assert notice is not None, system_bodies
+    assert "blocked" in notice
+    assert "hilang/rusak" in notice, "the reason excerpt must be included"
+
+
+def test_failed_child_mirrors_system_notice_to_epic_chat(client, tmp_path, monkeypatch):
+    """Nonzero-exit (opencode error) on a child -> failed -> blocked: the epic chat
+    must get the System notice with the stderr excerpt."""
+    ws_id = _make_workspace(client, tmp_path)
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+    epic = _make_ticket(client, ws_id, "Epic")
+    child = _make_ticket(client, ws_id, "Child", parent_id=epic["id"])
+    _set_status(client, child["key"], "todo")
+    _set_status(client, child["key"], "in_progress")
+
+    script = _write_script(
+        tmp_path / "opencode",
+        r""">&2 printf 'opencode crashed: segfault in tool runner\n'
+exit 1""",
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    run = client.post(f"/api/tickets/{child['key']}/run", json={"agent_id": eng_id}).json()
+    _wait_for_run(client, run["id"])
+
+    epic_detail = client.get(f"/api/tickets/{epic['key']}").json()
+    system_bodies = [c["body"] for c in epic_detail["comments"] if c["is_system"]]
+    notice = next(
+        (b for b in system_bodies if "menandai" in b and child["key"] in b), None
+    )
+    assert notice is not None, system_bodies
+    assert "segfault" in notice
+
+
+def test_top_level_blocked_no_duplicate_epic_notice(client, tmp_path, monkeypatch):
+    """Blocking a top-level ticket must NOT mirror an extra comment onto itself —
+    its own system comment IS the chat message (no duplication)."""
+    ws_id = _make_workspace(client, tmp_path)
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+    ticket = _make_ticket(client, ws_id)
+    _set_status(client, ticket["key"], "todo")
+    _set_status(client, ticket["key"], "in_progress")
+
+    script = _write_python_binary(tmp_path / "opencode", _GARBAGE_SCRIPT)
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+    run = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": eng_id}).json()
+    _wait_for_run(client, run["id"])
+
+    detail = client.get(f"/api/tickets/{ticket['key']}").json()
+    assert detail["status"] == "blocked"
+    system_bodies = [c["body"] for c in detail["comments"] if c["is_system"]]
+    block_bodies = [b for b in system_bodies if "hilang/rusak" in b]
+    assert len(block_bodies) == 1, system_bodies

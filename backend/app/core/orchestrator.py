@@ -622,6 +622,66 @@ async def _block_ticket(
         run_id=run_id,
         workspace_id=workspace_id,
     )
+    # Owner-facing summary in the epic chat, so a blocked child never goes unnoticed:
+    # the system comment above lands on the child ticket itself; the owner's PM chat
+    # lives on the epic, so mirror a short one-liner there (skipped for top-level
+    # tickets — the comment above already is their chat).
+    if ticket.parent_id is not None:
+        await _notify_owner_chat(
+            session,
+            ticket,
+            agent,
+            f"{agent.name} menandai {ticket.key} → blocked: {_excerpt(reason_body)}",
+            run_id=run_id,
+            workspace_id=workspace_id,
+        )
+
+
+async def _notify_owner_chat(
+    session: AsyncSession,
+    ticket: Ticket,
+    agent: Agent,
+    body: str,
+    *,
+    run_id: str | None,
+    workspace_id: str | None,
+) -> None:
+    """Post a System message on the owner's PM chat for a ticket action.
+
+    The owner's chat with the PM lives on the epic (top-level ticket) — child
+    tickets under it are worked autonomously and would otherwise be invisible
+    to the owner. Whenever something significant happens to a child (blocked,
+    failed, or the PM filing tickets[] from the epic), mirror a short system
+    comment onto the epic so the owner sees it in the chat feed without opening
+    each child.
+
+    Only meaningful when the ticket has a parent; top-level tickets are their
+    own chat and already received their own system comment (or the summary
+    comment) by the caller. Message is written as `is_system=True` with no agent
+    author, so the frontend renders it as a System notice and the notification
+    bell/toast path treats it like any other system comment.
+    """
+    if ticket.parent_id is None:
+        return
+    parent = await session.get(Ticket, ticket.parent_id)
+    if parent is None:
+        return
+    await _write_system_comment(
+        session,
+        parent.id,
+        body,
+        ticket_key=parent.key,
+        run_id=run_id,
+        workspace_id=workspace_id,
+    )
+
+
+def _excerpt(text: str, limit: int = 200) -> str:
+    """Short excerpt of a (possibly long, multi-line) reason — used for chat one-liners."""
+    excerpt = (text or "").strip()
+    if len(excerpt) > limit:
+        excerpt = excerpt[: limit - 3] + "..."
+    return excerpt
 
 
 async def recover_interrupted_runs(session_factory: async_sessionmaker) -> int:
@@ -1577,6 +1637,17 @@ async def _finish_run(
                 run_id=run.id,
                 workspace_id=workspace_id,
             )
+            # Same owner-facing mirror as _block_ticket: a guardrail trip on a child
+            # must reach the owner's epic chat, not just the child's own comments.
+            if ticket.parent_id is not None:
+                await _notify_owner_chat(
+                    session,
+                    ticket,
+                    agent,
+                    f"Run {agent.name} pada {ticket.key} dihentikan: {_excerpt(guardrail_cancel_reason)}",
+                    run_id=run.id,
+                    workspace_id=workspace_id,
+                )
         agent.status = "idle"
         await session.commit()
         return
@@ -1934,6 +2005,7 @@ async def _finish_run(
 
     to_auto_schedule: list[tuple[Ticket, Agent]] = []
     epic_skip_notes: list[str] = []
+    created_child_keys: list[str] = []
     if parsed.tickets:
         from app.api.tickets import _next_key  # reuse the same atomic-counter key logic
 
@@ -1994,6 +2066,7 @@ async def _finish_run(
             )
             session.add(child)
             await session.flush()  # populate child.id before publishing
+            created_child_keys.append(child.key)
             await event_bus.publish(
                 session,
                 run_id=run.id,
@@ -2048,6 +2121,23 @@ async def _finish_run(
                 # with a system comment, or untouched if the workspace got paused);
                 # nothing more to do for this one child.
                 pass
+
+    # Owner-facing "PM balas" in the epic chat: whenever a report filed tickets[],
+    # mirror a short system message onto the owner's chat listing the new children
+    # (skip when the report itself was on a top-level ticket — that ticket IS the
+    # owner chat, and its own summary comment already landed there above). Without
+    # this, the PM "answers" the owner's chat by breaking down tickets but says
+    # nothing in the conversation, which reads as the PM going silent.
+    if parsed.tickets and ticket.parent_id is not None:
+        keys = ", ".join(f"`{k}`" for k in created_child_keys) or " (no sub-tickets)"
+        await _notify_owner_chat(
+            session,
+            ticket,
+            agent,
+            f"{agent.name} memecah {ticket.key} menjadi sub-tiket: {keys}",
+            run_id=run.id,
+            workspace_id=workspace_id,
+        )
 
     if session_factory is not None:
         await _handoff(session, session_factory, run, ticket, agent, parsed)

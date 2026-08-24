@@ -63,6 +63,42 @@ function stripMentionPrefix(body: string, pmName: string): string {
   return body.startsWith(prefix) ? body.slice(prefix.length) : body;
 }
 
+/** Web Speech API constructor, resolved once at module load (window may not exist in SSR). */
+function getSpeechRecognitionCtor(): typeof SpeechRecognition | undefined {
+  if (typeof window === "undefined") return undefined;
+  return (
+    (window as Window & { SpeechRecognition?: typeof SpeechRecognition }).SpeechRecognition ??
+    (window as Window & { webkitSpeechRecognition?: typeof SpeechRecognition }).webkitSpeechRecognition
+  );
+}
+
+// System comments are mostly bookkeeping (status-change restatements, artifact
+// publish notes, memory notes) that would drown the chat if shown verbatim. Only
+// the ones that carry real information for the owner — run failures, blocks,
+// guardrail trips, PM breakdown notices — get rendered. Same spirit as
+// events-context.tsx's buildActivityToastMessage, kept here because the chat
+// thread and the notification bell have different spam tolerances.
+const CHAT_HIDDEN_SYSTEM_PREFIXES = [
+  "Status changed from",
+  "Artifact dipublikasikan",
+  "Beberapa artifact",
+  "Memory disimpan",
+  "Diperbarui oleh",
+  "Plan disetujui",
+];
+
+function isChatVisible(c: Comment): boolean {
+  if (!c.is_system) return true;
+  return !CHAT_HIDDEN_SYSTEM_PREFIXES.some((p) => c.body.startsWith(p));
+}
+
+/** Linkify `KEY-NNN` ticket keys in message text into markdown links to their
+ * ticket page. `react-markdown` renders the produced `[KEY-NNN](...)` syntax
+ * into clickable anchors inside the bubble. */
+function linkifyTicketKeys(body: string, workspaceKey: string): string {
+  return body.replace(/\b([A-Z][A-Z0-9]*-\d{3})\b/g, (key) => `[\`${key}\`](/w/${workspaceKey}/ticket/${key})`);
+}
+
 type Mode = { type: "draft" } | { type: "ticket"; key: string };
 
 /** Quick-send suggestions shown above the composer, like ChatGPT suggestion chips. */
@@ -214,6 +250,7 @@ export default function ChatPage() {
 
         <ThreadPanel
           workspaceId={workspace.id}
+          workspaceKey={workspace.key}
           timezone={workspace.timezone}
           pm={pm}
           mode={mode}
@@ -229,12 +266,14 @@ export default function ChatPage() {
 
 function ThreadPanel({
   workspaceId,
+  workspaceKey,
   timezone,
   pm,
   mode,
   onCreated,
 }: {
   workspaceId: string;
+  workspaceKey: string;
   timezone: string;
   pm: Agent;
   mode: Mode;
@@ -254,8 +293,7 @@ function ThreadPanel({
   const [suggestionsHovered, setSuggestionsHovered] = useState(false);
   const [attachOpen, setAttachOpen] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
-  const [speechSupported, setSpeechSupported] = useState(false);
-  const [transcriptPending, setTranscriptPending] = useState(false);
+  const [speechSupported] = useState(() => getSpeechRecognitionCtor() !== undefined);
   const suggestionsHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attachHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attachOpenTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -263,13 +301,8 @@ function ThreadPanel({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
-    const SpeechRecognitionCtor =
-      typeof window !== "undefined"
-        ? (window as Window & { SpeechRecognition?: typeof SpeechRecognition; webkitSpeechRecognition?: typeof SpeechRecognition }).SpeechRecognition ??
-          (window as Window & { SpeechRecognition?: typeof SpeechRecognition; webkitSpeechRecognition?: typeof SpeechRecognition }).webkitSpeechRecognition
-        : undefined;
-    setSpeechSupported(!!SpeechRecognitionCtor);
-    if (SpeechRecognitionCtor) speechRecognitionRef.current = new SpeechRecognitionCtor();
+    const ctor = getSpeechRecognitionCtor();
+    if (ctor) speechRecognitionRef.current = new ctor();
   }, []);
 
   useEffect(() => {
@@ -333,7 +366,6 @@ function ThreadPanel({
       return;
     }
     setIsRecording(true);
-    setTranscriptPending(false);
   }
 
   const isTicket = mode.type === "ticket";
@@ -349,7 +381,7 @@ function ThreadPanel({
     refetchInterval: ticketKey ? 2000 : false,
   });
 
-  const comments: Comment[] = (ticket.data?.comments ?? []).filter((c) => !c.is_system);
+  const comments: Comment[] = (ticket.data?.comments ?? []).filter((c) => isChatVisible(c));
   const attachments = ticket.data?.attachments ?? [];
   const pmIsTyping = (ticket.data?.runs ?? []).some(
     (r) => r.agent_id === pm.id && (r.status === "running" || r.status === "queued"),
@@ -493,6 +525,7 @@ function ThreadPanel({
               }}
               pmIsTyping={pmIsTyping}
               timezone={timezone}
+              workspaceKey={workspaceKey}
             />
           )}
         </div>
@@ -717,6 +750,7 @@ function ChatMessages({
   pmAvatar,
   pmIsTyping,
   timezone,
+  workspaceKey,
 }: {
   comments: Comment[];
   transcriptEvents: WorkspaceEvent[] | null;
@@ -725,6 +759,7 @@ function ChatMessages({
   pmAvatar: { template: AvatarTemplate | null; color: string | null };
   pmIsTyping: boolean;
   timezone: string;
+  workspaceKey: string;
 }) {
   const [visibleCount, setVisibleCount] = useState(10);
   const visible = comments.slice(-visibleCount);
@@ -745,6 +780,19 @@ function ChatMessages({
         </button>
       )}
       {visible.map((c) => {
+        if (c.is_system) {
+          return (
+            <div key={c.id} className="flex justify-center">
+              <div className="flex max-w-[85%] flex-col gap-0.5 rounded-lg border border-dashed border-zinc-300 bg-zinc-50 px-3 py-1.5 text-xs text-zinc-500 dark:border-zinc-700 dark:bg-zinc-900/40 dark:text-zinc-400">
+                <p className="flex items-center gap-1.5 text-[10px] font-medium opacity-80">
+                  <span>System</span>
+                  <span className="font-normal">{formatShortTime(c.created_at, timezone)}</span>
+                </p>
+                <Markdown>{linkifyTicketKeys(c.body, workspaceKey)}</Markdown>
+              </div>
+            </div>
+          );
+        }
         const isOwner = c.author_agent_id === null;
         const text = isOwner ? stripMentionPrefix(c.body, pmName) : c.body;
         return (
@@ -761,7 +809,7 @@ function ChatMessages({
                 <span>{isOwner ? "You" : pmLabel}</span>
                 <span className="font-normal">{formatShortTime(c.created_at, timezone)}</span>
               </p>
-              <Markdown invert={isOwner}>{text}</Markdown>
+              <Markdown invert={isOwner}>{linkifyTicketKeys(text, workspaceKey)}</Markdown>
             </div>
           </div>
         );
