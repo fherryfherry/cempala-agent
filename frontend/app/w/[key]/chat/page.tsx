@@ -421,6 +421,21 @@ function ThreadPanel({
             Pesan baru
           </button>
         )}
+
+        <div className="pointer-events-none absolute right-0 bottom-3 flex flex-col items-end gap-1.5">
+          {SUGGESTIONS.map((s) => (
+            <button
+              key={s.label}
+              type="button"
+              onClick={() => handleSuggestion(s)}
+              disabled={sendMutation.isPending}
+              className="pointer-events-auto flex cursor-pointer items-center gap-1.5 rounded-full border border-black/10 bg-white/90 px-3 py-1.5 text-xs text-zinc-600 shadow-sm backdrop-blur hover:bg-zinc-100 disabled:opacity-50 dark:border-white/10 dark:bg-zinc-900/90 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            >
+              <s.icon className="size-3.5 shrink-0" />
+              {s.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {isTicket && attachments.length > 0 && (
@@ -475,20 +490,6 @@ function ThreadPanel({
           handleSend();
         }}
       >
-        <div className="flex flex-col items-end gap-1.5">
-          {SUGGESTIONS.map((s) => (
-            <button
-              key={s.label}
-              type="button"
-              onClick={() => handleSuggestion(s)}
-              disabled={sendMutation.isPending}
-              className="flex cursor-pointer items-center gap-1.5 rounded-full border border-black/10 px-3 py-1.5 text-xs text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-zinc-800"
-            >
-              <s.icon className="size-3.5 shrink-0" />
-              {s.label}
-            </button>
-          ))}
-        </div>
         {stagedFile && (
           <div className="flex w-fit items-center gap-1.5 rounded-full border border-black/10 py-1 pr-1 pl-2.5 text-xs dark:border-white/10">
             <span className="max-w-48 truncate">{stagedFile.name}</span>
