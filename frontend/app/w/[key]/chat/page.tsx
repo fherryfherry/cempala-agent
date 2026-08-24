@@ -29,14 +29,16 @@ import { Markdown } from "@/components/markdown";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Textarea } from "@/components/ui/textarea";
 import {
   ArrowDownIcon,
+  ArrowUpIcon,
   EyeIcon,
   FileTextIcon,
   LightbulbIcon,
   ListChecksIcon,
+  MicIcon,
   PaperclipIcon,
+  PlusIcon,
   ShieldCheckIcon,
   SparklesIcon,
   TrendingUpIcon,
@@ -250,7 +252,50 @@ function ThreadPanel({
   const [hasNewMessage, setHasNewMessage] = useState(false);
   const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null);
   const [suggestionsHovered, setSuggestionsHovered] = useState(false);
+  const [attachOpen, setAttachOpen] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [speechSupported, setSpeechSupported] = useState(false);
+  const [transcriptPending, setTranscriptPending] = useState(false);
   const suggestionsHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const attachHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const attachOpenTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const speechRecognitionRef = useRef<SpeechRecognition | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    const SpeechRecognitionCtor =
+      typeof window !== "undefined"
+        ? (window as Window & { SpeechRecognition?: typeof SpeechRecognition; webkitSpeechRecognition?: typeof SpeechRecognition }).SpeechRecognition ??
+          (window as Window & { SpeechRecognition?: typeof SpeechRecognition; webkitSpeechRecognition?: typeof SpeechRecognition }).webkitSpeechRecognition
+        : undefined;
+    setSpeechSupported(!!SpeechRecognitionCtor);
+    if (SpeechRecognitionCtor) speechRecognitionRef.current = new SpeechRecognitionCtor();
+  }, []);
+
+  useEffect(() => {
+    if (!isRecording) return;
+    const rec = speechRecognitionRef.current;
+    if (!rec) return;
+    rec.lang = "en-US";
+    rec.interimResults = true;
+    rec.continuous = true;
+    rec.onresult = (e) => {
+      const text = Array.from(e.results)
+        .map((r) => r[0].transcript)
+        .join("");
+      setDraft(text);
+    };
+    rec.onend = () => setIsRecording(false);
+    rec.onerror = () => setIsRecording(false);
+    rec.start();
+    return () => {
+      try {
+        rec.stop();
+      } catch {
+        // already stopped
+      }
+    };
+  }, [isRecording]);
 
   function handleSuggestionsEnter() {
     if (suggestionsHideTimer.current) clearTimeout(suggestionsHideTimer.current);
@@ -260,6 +305,35 @@ function ThreadPanel({
   function handleSuggestionsLeave() {
     if (suggestionsHideTimer.current) clearTimeout(suggestionsHideTimer.current);
     suggestionsHideTimer.current = setTimeout(() => setSuggestionsHovered(false), 400);
+  }
+
+  function handleAttachEnter() {
+    if (attachHideTimer.current) clearTimeout(attachHideTimer.current);
+    if (attachOpenTimer.current) clearTimeout(attachOpenTimer.current);
+    setAttachOpen(true);
+  }
+
+  function handleAttachLeave() {
+    if (attachOpenTimer.current) clearTimeout(attachOpenTimer.current);
+    attachOpenTimer.current = setTimeout(() => {
+      if (attachHideTimer.current) clearTimeout(attachHideTimer.current);
+      attachHideTimer.current = setTimeout(() => setAttachOpen(false), 200);
+    }, 300);
+  }
+
+  function handleMicClick() {
+    if (!speechRecognitionRef.current) return;
+    if (isRecording) {
+      try {
+        speechRecognitionRef.current.stop();
+      } catch {
+        // already stopped
+      }
+      setIsRecording(false);
+      return;
+    }
+    setIsRecording(true);
+    setTranscriptPending(false);
   }
 
   const isTicket = mode.type === "ticket";
@@ -514,7 +588,7 @@ function ThreadPanel({
       )}
 
       <form
-        className="flex flex-col gap-2 border-t border-black/5 pt-0.5 dark:border-white/5"
+        className="flex flex-col gap-2 pt-0.5"
         onSubmit={(e) => {
           e.preventDefault();
           handleSend();
@@ -533,13 +607,86 @@ function ThreadPanel({
             </button>
           </div>
         )}
-        <Textarea
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          placeholder={mode.type === "draft" ? "Start a new conversation with the PM…" : "Reply to the PM…"}
-          autoFocus
-          disabled={sendMutation.isPending}
-        />
+        <div
+          className="flex items-end gap-2 rounded-[1.75rem] border border-black/10 bg-white/60 p-2 backdrop-blur focus-within:border-zinc-400 dark:border-white/10 dark:bg-zinc-900/60 dark:focus-within:border-zinc-600"
+        >
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              onMouseEnter={handleAttachEnter}
+              onMouseLeave={handleAttachLeave}
+              disabled={sendMutation.isPending}
+              aria-label="Attach a file"
+              className="flex size-9 shrink-0 cursor-pointer items-center justify-center rounded-full text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800 disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+            >
+              {attachOpen ? <XIcon className="size-5" /> : <PlusIcon className="size-5" />}
+            </button>
+
+            <div
+              className={`absolute bottom-12 left-0 flex flex-col gap-1.5 ${
+                attachOpen ? "pointer-events-auto" : "pointer-events-none"
+              }`}
+              onMouseEnter={handleAttachEnter}
+              onMouseLeave={handleAttachLeave}
+            >
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={sendMutation.isPending}
+                className={`flex translate-y-2 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full border border-black/10 bg-white/90 px-3 py-1.5 text-xs text-zinc-600 opacity-0 shadow-sm backdrop-blur transition-all duration-200 hover:bg-zinc-100 disabled:opacity-50 dark:border-white/10 dark:bg-zinc-800/90 dark:text-zinc-300 dark:hover:bg-zinc-700 ${
+                  attachOpen ? "translate-y-0 opacity-100" : "translate-y-2 opacity-0"
+                }`}
+              >
+                <PaperclipIcon className="size-3.5 shrink-0" />
+                Attach file
+              </button>
+            </div>
+          </div>
+
+          <textarea
+            ref={textareaRef}
+            value={draft}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              e.target.style.height = "auto";
+              e.target.style.height = `${e.target.scrollHeight}px`;
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                handleSend();
+              }
+            }}
+            placeholder={mode.type === "draft" ? "Start a new conversation with the PM…" : "Reply to the PM…"}
+            disabled={sendMutation.isPending}
+            className="max-h-48 min-h-[2.5rem] flex-1 resize-none overflow-y-auto border-0 bg-transparent px-2 py-2 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 dark:text-zinc-100 dark:placeholder:text-zinc-500"
+          />
+
+          <button
+            type="button"
+            onClick={handleMicClick}
+            disabled={sendMutation.isPending || !speechSupported}
+            aria-label={isRecording ? "Stop recording" : "Speak to type"}
+            title={speechSupported ? (isRecording ? "Stop recording" : "Speak to type") : "Speech input not supported"}
+            className={`flex size-9 shrink-0 cursor-pointer items-center justify-center rounded-full disabled:opacity-40 ${
+              isRecording
+                ? "animate-pulse bg-red-500 text-white"
+                : "text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+            }`}
+          >
+            <MicIcon className="size-5" />
+          </button>
+
+          <button
+            type="submit"
+            disabled={!draft.trim() || sendMutation.isPending}
+            aria-label="Send message"
+            className="flex size-9 shrink-0 cursor-pointer items-center justify-center rounded-full bg-zinc-900 text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-30 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+          >
+            <ArrowUpIcon className="size-5" />
+          </button>
+        </div>
         <input
           ref={fileInputRef}
           type="file"
@@ -547,24 +694,10 @@ function ThreadPanel({
           onChange={(e) => {
             const file = e.target.files?.[0];
             if (file) setStagedFile(file);
+            setAttachOpen(false);
             e.target.value = "";
           }}
         />
-        <div className="flex items-center gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            size="icon"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={sendMutation.isPending}
-            aria-label="Attach a file"
-          >
-            <PaperclipIcon className="size-4" />
-          </Button>
-          <Button type="submit" disabled={!draft.trim() || sendMutation.isPending}>
-            {sendMutation.isPending ? "Sending…" : "Send"}
-          </Button>
-        </div>
       </form>
     </Card>
   );
