@@ -469,25 +469,25 @@ function ThreadPanel({
       </div>
 
       {isTicket && attachments.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 border-t border-black/5 pt-2 dark:border-white/5">
+        <div className="flex flex-wrap gap-1 border-t border-black/5 pt-1.5 dark:border-white/5">
           {attachments.map((a) => (
             <div
               key={a.id}
-              className="flex items-center gap-1 rounded-full border border-black/10 py-0.5 pr-1 pl-2 text-xs dark:border-white/10"
+              className="flex items-center gap-0.5 rounded-full border border-black/10 py-0.5 pr-0.5 pl-1.5 text-xs dark:border-white/10"
             >
               <button
                 type="button"
                 onClick={() => setPreviewAttachment(a)}
-                className="flex min-w-0 items-center gap-1 hover:underline"
+                className="flex min-w-0 items-center gap-0.5 hover:underline"
                 title="Preview file"
               >
-                <EyeIcon className="size-3 shrink-0 text-zinc-500" />
-                <span className="max-w-40 truncate">{a.filename}</span>
+                <EyeIcon className="size-2.5 shrink-0 text-zinc-500" />
+                <span className="max-w-36 truncate">{a.filename}</span>
               </button>
               {a.origin === "agent" ? (
                 <span
                   title="Dipublikasikan agent (artifacts) — tidak bisa dihapus dari chat"
-                  className="rounded-full bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
+                  className="rounded-full bg-zinc-100 px-1 py-px text-[10px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
                 >
                   agent
                 </span>
@@ -495,10 +495,10 @@ function ThreadPanel({
                 <button
                   type="button"
                   onClick={() => deleteAttachmentMutation.mutate(a.id)}
-                  className="rounded-full p-0.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800"
+                  className="rounded-full p-px text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800"
                   aria-label={`Remove ${a.filename}`}
                 >
-                  <XIcon className="size-3" />
+                  <XIcon className="size-2.5" />
                 </button>
               )}
             </div>
