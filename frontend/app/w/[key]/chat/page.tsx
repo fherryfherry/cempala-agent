@@ -608,7 +608,7 @@ function ThreadPanel({
           </div>
         )}
         <div
-          className="flex items-end gap-2 rounded-[1.75rem] border border-black/10 bg-white/60 p-2 backdrop-blur focus-within:border-zinc-400 dark:border-white/10 dark:bg-zinc-900/60 dark:focus-within:border-zinc-600"
+          className="flex items-center gap-2 rounded-[1.75rem] border border-black/10 bg-white/60 p-2 backdrop-blur focus-within:border-zinc-400 dark:border-white/10 dark:bg-zinc-900/60 dark:focus-within:border-zinc-600"
         >
           <div className="relative">
             <button
