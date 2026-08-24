@@ -444,7 +444,7 @@ function ThreadPanel({
               type="button"
               onClick={() => handleSuggestion(s)}
               disabled={sendMutation.isPending}
-              className="rounded-full border border-black/10 px-3 py-1.5 text-xs text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              className="cursor-pointer rounded-full border border-black/10 px-3 py-1.5 text-xs text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-white/10 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
               {s.label}
             </button>
