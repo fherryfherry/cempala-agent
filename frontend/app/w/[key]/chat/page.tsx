@@ -249,6 +249,18 @@ function ThreadPanel({
   const stickToBottomRef = useRef(true);
   const [hasNewMessage, setHasNewMessage] = useState(false);
   const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null);
+  const [suggestionsHovered, setSuggestionsHovered] = useState(false);
+  const suggestionsHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function handleSuggestionsEnter() {
+    if (suggestionsHideTimer.current) clearTimeout(suggestionsHideTimer.current);
+    setSuggestionsHovered(true);
+  }
+
+  function handleSuggestionsLeave() {
+    if (suggestionsHideTimer.current) clearTimeout(suggestionsHideTimer.current);
+    suggestionsHideTimer.current = setTimeout(() => setSuggestionsHovered(false), 400);
+  }
 
   const isTicket = mode.type === "ticket";
   const ticketKey = isTicket ? mode.key : null;
@@ -422,7 +434,11 @@ function ThreadPanel({
           </button>
         )}
 
-        <div className="group pointer-events-none absolute right-2 bottom-3 flex flex-col items-end gap-1.5">
+        <div
+          className="group pointer-events-none absolute right-2 bottom-3 flex flex-col items-end gap-1.5"
+          onMouseEnter={handleSuggestionsEnter}
+          onMouseLeave={handleSuggestionsLeave}
+        >
           {SUGGESTIONS.map((s, i) => (
             <button
               key={s.label}
@@ -430,7 +446,11 @@ function ThreadPanel({
               onClick={() => handleSuggestion(s)}
               disabled={sendMutation.isPending}
               style={{ transitionDelay: `${(SUGGESTIONS.length - 1 - i) * 30}ms` }}
-              className="pointer-events-none flex translate-y-2 cursor-pointer items-center gap-1.5 rounded-full border border-black/10 bg-white/60 px-3 py-1.5 text-xs text-zinc-600 opacity-0 shadow-sm backdrop-blur transition-all duration-200 group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100 hover:bg-white/90 dark:border-white/10 dark:bg-zinc-900/60 dark:text-zinc-300 dark:hover:bg-zinc-900/90"
+              className={`pointer-events-none flex translate-y-2 cursor-pointer items-center gap-1.5 rounded-full border border-black/10 bg-white/60 px-3 py-1.5 text-xs text-zinc-600 opacity-0 shadow-sm backdrop-blur transition-all duration-200 hover:bg-white/90 dark:border-white/10 dark:bg-zinc-900/60 dark:text-zinc-300 dark:hover:bg-zinc-900/90 ${
+                suggestionsHovered
+                  ? "pointer-events-auto translate-y-0 opacity-100"
+                  : "translate-y-2 opacity-0"
+              }`}
             >
               <s.icon className="size-3.5 shrink-0" />
               {s.label}
