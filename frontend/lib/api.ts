@@ -39,6 +39,11 @@ export interface HealthResponse {
   status: string;
   /** opencode version string, or null if the binary wasn't found. */
   opencode: string | null;
+  mcp: {
+    enabled: boolean;
+    api_base: string;
+    tools: { name: string; description: string }[];
+  };
 }
 
 export function getHealth(): Promise<HealthResponse> {
@@ -47,7 +52,7 @@ export function getHealth(): Promise<HealthResponse> {
 
 export type TimeUnit = "hour" | "day";
 
-export type AgentRole = "pm" | "lead" | "engineer" | "designer" | "qa" | "pentester";
+export type AgentRole = "pm" | "lead" | "engineer" | "designer" | "qa" | "pentester" | "business_analyst" | "system_architect";
 
 export interface Workspace {
   id: string;
@@ -127,7 +132,7 @@ export function getWorkflowPromptDefault(): Promise<{ workflow_prompt: string }>
   return apiFetch<{ workflow_prompt: string }>("/workspaces/workflow-prompt-default");
 }
 
-export type Role = "pm" | "lead" | "engineer" | "designer" | "qa" | "pentester";
+export type Role = "pm" | "lead" | "engineer" | "designer" | "qa" | "pentester" | "business_analyst" | "system_architect";
 export type ToolKind = "opencode" | "claude" | "agy" | "codex";
 export type TicketCategory = "feature" | "improvement" | "fix" | "security" | "performance";
 
@@ -413,6 +418,7 @@ export type RunStatus = "queued" | "running" | "done" | "failed" | "cancelled" |
 export interface Run {
   id: string;
   ticket_id: string | null;
+  conversation_id: string | null;
   agent_id: string;
   status: RunStatus;
   trigger: string;
@@ -573,4 +579,204 @@ export async function uploadAttachment(key: string, file: File): Promise<Attachm
 
 export function deleteAttachment(id: string): Promise<void> {
   return apiFetch<void>(`/attachments/${id}`, { method: "DELETE" });
+}
+
+export interface Conversation {
+  id: string;
+  workspace_id: string;
+  title: string;
+  linked_ticket_key: string | null;
+  created_at: string;
+  updated_at: string;
+  last_message_at: string | null;
+}
+
+export interface ConversationCreate {
+  title: string;
+  linked_ticket_key?: string | null;
+}
+
+export interface ConversationMessage {
+  id: string;
+  conversation_id: string;
+  run_id: string | null;
+  author_agent_id: string | null;
+  is_system: boolean;
+  body: string;
+  created_at: string;
+}
+
+export interface ConversationAttachment {
+  id: string;
+  conversation_id: string;
+  message_id: string | null;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  path: string;
+  created_at: string;
+}
+
+export function listConversations(workspaceId: string): Promise<Conversation[]> {
+  return apiFetch<Conversation[]>(`/workspaces/${workspaceId}/conversations`);
+}
+
+export function createConversation(
+  workspaceId: string,
+  body: ConversationCreate,
+): Promise<Conversation> {
+  return apiFetch<Conversation>(`/workspaces/${workspaceId}/conversations`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function getConversation(conversationId: string): Promise<Conversation> {
+  return apiFetch<Conversation>(`/conversations/${conversationId}`);
+}
+
+export function listConversationMessages(
+  conversationId: string,
+  opts?: { limit?: number; offset?: number },
+): Promise<ConversationMessage[]> {
+  const params = new URLSearchParams();
+  if (opts?.limit) params.set("limit", String(opts.limit));
+  if (opts?.offset) params.set("offset", String(opts.offset));
+  const qs = params.toString() ? `?${params.toString()}` : "";
+  return apiFetch<ConversationMessage[]>(`/conversations/${conversationId}/messages${qs}`);
+}
+
+export function postConversationMessage(
+  conversationId: string,
+  body: string,
+): Promise<ConversationMessage> {
+  return apiFetch<ConversationMessage>(`/conversations/${conversationId}/messages`, {
+    method: "POST",
+    body: JSON.stringify({ body }),
+  });
+}
+
+export function listConversationAttachments(
+  conversationId: string,
+): Promise<ConversationAttachment[]> {
+  return apiFetch<ConversationAttachment[]>(`/conversations/${conversationId}/attachments`);
+}
+
+export function conversationAttachmentUrl(id: string): string {
+  return `${API_BASE_URL}/conversations/attachments/${id}/download`;
+}
+
+export async function uploadConversationAttachment(
+  conversationId: string,
+  file: File,
+): Promise<ConversationAttachment> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const res = await fetch(`${API_BASE_URL}/conversations/${conversationId}/attachments`, {
+    method: "POST",
+    body: formData,
+  });
+  if (!res.ok) {
+    let message = res.statusText;
+    try {
+      const body = await res.json();
+      message = body?.error?.message ?? message;
+    } catch {
+      // not JSON
+    }
+    throw new ApiError(message, res.status);
+  }
+  return res.json() as Promise<ConversationAttachment>;
+}
+
+export function deleteConversationAttachment(id: string): Promise<void> {
+  return apiFetch<void>(`/conversations/attachments/${id}`, { method: "DELETE" });
+}
+
+// ---------------------------------------------------------------------------
+// Git menu
+// ---------------------------------------------------------------------------
+
+export interface GitBranch {
+  name: string;
+  is_current: boolean;
+  latest_sha: string;
+  latest_subject: string;
+}
+
+export interface GitGraphCommit {
+  sha: string;
+  parents: string[];
+  subject: string;
+  author_name: string;
+  author_date: string;
+  lane: number;
+  total_lanes: number;
+  decorations: string[];
+}
+
+export interface GitGraph {
+  commits: GitGraphCommit[];
+  total_lanes: number;
+}
+
+export interface GitCommitList {
+  commits: GitGraphCommit[];
+  total_lanes: number;
+  has_more: boolean;
+}
+
+export interface GitCommitFile {
+  path: string;
+  additions: number;
+  deletions: number;
+  status: string | null;
+}
+
+export interface GitCommitDetail {
+  sha: string;
+  subject: string;
+  author_name: string;
+  author_date: string;
+  body: string;
+  parents: string[];
+  is_merge: boolean;
+  files: GitCommitFile[];
+  patch: string;
+  patch_truncated: boolean;
+}
+
+export function listGitBranches(workspaceId: string): Promise<GitBranch[]> {
+  return apiFetch<GitBranch[]>(`/workspaces/${workspaceId}/git/branches`);
+}
+
+export function getGitGraph(
+  workspaceId: string,
+  opts?: { limit?: number },
+): Promise<GitGraph> {
+  const params = new URLSearchParams();
+  if (opts?.limit) params.set("limit", String(opts.limit));
+  const qs = params.toString() ? `?${params.toString()}` : "";
+  return apiFetch<GitGraph>(`/workspaces/${workspaceId}/git/graph${qs}`);
+}
+
+export function listGitCommits(
+  workspaceId: string,
+  opts?: { ref?: string; limit?: number; offset?: number },
+): Promise<GitCommitList> {
+  const params = new URLSearchParams();
+  if (opts?.ref) params.set("ref", opts.ref);
+  if (opts?.limit) params.set("limit", String(opts.limit));
+  if (opts?.offset) params.set("offset", String(opts.offset));
+  const qs = params.toString() ? `?${params.toString()}` : "";
+  return apiFetch<GitCommitList>(`/workspaces/${workspaceId}/git/commits${qs}`);
+}
+
+export function getGitCommit(
+  workspaceId: string,
+  sha: string,
+): Promise<GitCommitDetail> {
+  return apiFetch<GitCommitDetail>(
+    `/workspaces/${workspaceId}/git/commits/${sha}`,
+  );
 }

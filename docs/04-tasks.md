@@ -310,21 +310,53 @@ also injected; deleting an entry via the UI keeps it out of the next prompt; del
 agent cascades the delete of its memory.
 
 ## MAP-036 · Retry failed/interrupted runs · S · Engineer
-`POST /runs/{id}/retry` — only for runs with status `failed`/`interrupted`, 409
-`not_retryable` for any other status. Reschedules the same agent+ticket
+`POST /runs/{id}/retry` — for runs with status `failed`/`interrupted` (Retry) and
+`cancelled` with `error=None` (Resume, i.e. a run the owner stopped), 409
+`not_retryable` for any other status — including `cancelled` runs whose `error` is set
+(those were killed by a runtime guardrail: timeout/cost — a deliberate brake, never
+resumable). Reschedules the same agent+ticket
 (`trigger=manual`, same as clicking Run) through the existing `orchestrator.schedule()`;
 the `session_id` lookup in `execute()` is already status-agnostic so it automatically
 continues the old opencode session if available — no new code for that. If the ticket is
 `blocked` at retry time, the endpoint clears the block first (`blocked_reason=None`,
 `loop_reset_at`, `handoff_depth=0`, same pattern as `PATCH /tickets/{key}` in
 `app/api/tickets.py`) so pre-failure history does not immediately re-trip the same guardrail.
-UI: `/w/[key]/activity` — "Retry" button in the run list row and the run detail panel,
-for runs with status `failed`/`interrupted`.
+UI: `/w/[key]/activity` — "Retry" button for `failed`/`interrupted` and "Resume" button for
+`cancelled` in the run list row and the run detail panel; "Stop" button for
+`running`/`queued` runs. `cancelled` runs display as `stopped`.
 **Dep:** MAP-023, MAP-027
 **AC:** retrying a `failed` run whose ticket is `blocked` because of an old `max_handoff_depth`/loop
 gets successfully rescheduled (not an immediate 409 again); retrying a `failed` run with a
 stored `session_id` passes `-s <session_id>` to opencode on the new run; retrying a
-`done`/`running`/`queued`/`cancelled` run → 409 `not_retryable`.
+`done`/`running`/`queued` run → 409 `not_retryable`; resuming a `cancelled` run (owner stop,
+`error=None`) schedules a new run that completes; retrying a `cancelled` run with `error`
+set (guardrail kill) → 409 `not_retryable`.
+
+## MAP-044 · Auto-retry failed runs with adaptive prompt · M · Engineer
+Before a ticket is blocked, a *retryable* failure is retried automatically up to
+`max_auto_retries` (per workspace, `workspace.guardrails`, default 3) per (ticket, agent).
+Retryable = missing/malformed ```map block or an opencode subprocess failure (nonzero exit /
+stderr / binary not found / no `run_ended` event). Each retry is a new `Run` row
+(`trigger="auto"`, `parent_run_id` chained to the failed run, ticket NOT blocked between
+attempts). The retry prompt (`_build_prompt_for`) carries a "PERINGATAN: RUN SEBELUMNYA
+GAGAL" notice: the parent's `error` plus the tail of the agent's accumulated `assistant_text`
+(replayed from the `event` table), with an instruction to re-read the ```map contract and try
+a different approach. Retry runs deliberately do NOT pass `-s <session_id>` (fresh opencode
+conversation). Only when the budget is exhausted does the ticket get blocked, with the reason
+naming `max_auto_retries`. Non-retryable failures (state-machine rejection, runtime guardrail
+trips, user stops) and routine runs never retry. The attempt chain (and budget) resets at any
+owner intervention: manual `POST /runs/{id}/retry` or `trigger="mention"` schedules without
+`parent_run_id`, breaking the chain (same "fresh window" semantics as `loop_reset_at` /
+`handoff_depth`). `max_auto_retries=0` restores the pre-MAP fail → block behavior. Retry
+children pass through all other guardrails, including `max_cost_per_ticket` (cost of failed
+attempts accumulates), which bounds runaway retries.
+**Dep:** MAP-036, MAP-018, MAP-019, MAP-023
+**AC:** missing-```map failure → child run scheduled (ticket stays `in_progress`), child
+prompt contains the failure notice + output tail, child runs without `-s`; after
+`max_auto_retries` consecutive failures the ticket is `blocked` with the reason naming
+`max_auto_retries`; a later manual retry succeeds with a fresh budget; agent B's failures do
+not consume agent A's budget on the same ticket; a routine run failure does not retry; a
+guardrail-cancelled run does not retry.
 
 ## MAP-037 · Epic reuse & sprint/epic decoupling · M · Engineer
 Epics remain `Ticket` (parent_id NULL), but are now **reusable** instead of single-use
@@ -347,3 +379,160 @@ QA/Pentester reporting a bug from a parented ticket (without `epic:`) → the bu
 under the same epic, not a grandchild (regression test for the nesting bug found during
 the audit); the PM `mention`-trigger prompt includes all five final plan sections.
 
+
+## MAP-045 · Chat terpisah dari tiket (conversations) · L · Engineer
+Chat dengan PM dipisah dari tiket: tabel baru `conversation` + `conversation_message` +
+`conversation_attachment` (migration `a1b2c3d4e5f6`), run PM dari chat berjalan tanpa tiket
+(`Run.ticket_id=NULL`, `trigger="chat"`, `Run.conversation_id` baru). Owner mengirim pesan →
+`POST /conversations/{id}/messages` → `orchestrator.schedule_chat()` (guardrail hanya
+`max_concurrent_runs`, dihitung lintas tiket + no-ticket runs). PM membalas lewat `summary`
+di ```map kontrak chat (kontrak baru `_chat_contract_block` di `agents/prompts.py`); arah
+kedua: `comments[]` (sudah ada untuk routine) kini juga valid di run chat — PM bisa menulis
+komentar follow-up ke tiket mana pun dalam satu run yang sama. `tickets[]`/`updates:`/
+`memory:`/`artifact_updates:` ikut tersedia (backlog, tidak auto-schedule). Kegagalan run chat
+(auto-retry habis / guardrail / error internal) → System message di conversation, bukan
+block tiket. `recover_interrupted_runs` menulis System message ke conversation yang
+terinterupsi. Data chat lama (komentar di tiket epic) TIDAK dimigrasi — tetap sebagai
+history di komentar tiket. Frontend: halaman chat di-rewrite jadi daftar conversation +
+thread; komposer memakai `MentionAutocomplete` (agent/artifact/tiket, klik/Tab/panah);
+render mention jadi link via `lib/mention-link.ts`; attachment chat disimpan per
+conversation dan dikirim ke PM sebagai context file (PM bisa menyalinnya ke tiket lewat
+komentar). SSE: event type baru `conversation_message` → invalidate conversations.
+**Dep:** MAP-018, MAP-019, MAP-023, MAP-044
+**AC:** pesan owner → run `trigger="chat"` tanpa tiket; PM reply muncul di conversation;
+`comments[]` di run chat menulis komentar ke tiket target (author = PM); `status`/`mention`
+di kontrak chat ditolak (run failed); pesan kedua saat run aktif tidak membuat run kedua;
+guardrail `max_concurrent_runs` memblokir run chat dengan System message; attachment chat
+upload/download/delete; `GET /workspaces/{id}/runs` menampilkan run chat; autocomplete
+`@` di chat (3 tipe) dan komentar tiket (agent) dengan klik + Tab + panah; mention
+ter-render jadi link.
+
+## MAP-046 · Activate sprint kicks off its tickets · S · Engineer
+When a sprint transitions to `active` (`PATCH /sprints/{id}`), the backend schedules a
+run (`trigger="manual"`) for every ticket in that sprint that still needs work
+(status in backlog/todo/in_progress/review/qa/security/blocked) and has an assignee
+(enabled agent). Tickets already `done`/`release` are skipped — if every ticket is
+done, nothing is triggered. Tickets without an assignee are skipped (no agent to run
+them). Guardrail trips (e.g. `max_concurrent_runs`) are swallowed per ticket —
+`schedule()` already wrote its own system comment naming the guardrail, and the
+sprint activation itself must still succeed. Re-saving an already-active sprint with
+other fields does NOT re-trigger (kick-off only on the transition into active).
+**Dep:** MAP-023
+**AC:** activating a planned sprint schedules runs for all unfinished assigned tickets;
+done tickets and unassigned tickets are skipped; all-done sprint triggers nothing;
+re-saving an active sprint triggers nothing; guardrail-blocked tickets don't fail the
+activation.
+
+## MAP-047 · Sprint gate refuses runs without touching ticket status · S · Engineer
+Dogfooding fix: the `ticket_not_in_active_sprint` guardrail used to transition the
+ticket to `blocked` on every trip (via `schedule()`'s shared `_block_ticket` path),
+so an agent merely *attempting* to work a ticket in a planned sprint / backlog moved
+its status to `blocked` — the agent effectively changed status on a ticket it wasn't
+allowed to work. Now `schedule()` special-cases this guardrail: the run is refused
+(409 `guardrail_blocked`) with a system comment naming the guardrail, but the
+ticket's status is never touched (no `blocked` transition, no `status_change`
+event). All other guardrails still block the ticket as before. ADR-013 updated.
+**Dep:** MAP-027, ADR-013
+**AC:** scheduling a backlog/planned-sprint ticket for a non-exempt role → 409 +
+system comment, ticket status unchanged; other guardrail trips still block the
+ticket; PM (sprint_creator_roles) exemption unchanged.
+
+## MAP-048 · MCP identity: agent comments must not land as owner-authored · S · Engineer
+Dogfooding incident: MCP `post_comment`/`update_ticket`/memory tools write on the
+running agent's behalf, but opencode's MCP launcher did not forward the `env` block
+of the per-run opencode.json config to the MCP subprocess — `MAP_AGENT_ID` was empty,
+so `author_agent_id` was omitted and every MCP comment landed as owner-authored
+(`author_agent_id=NULL`). Worse, `comments.py` treats NULL-author comments as
+human-written, so each `@mention` inside those comments created `comment_mention`
+rows AND triggered runs for the mentioned agents — every report got duplicated as an
+owner comment + an agent comment, and mention runs kept firing. Fix: `mcp_config.py`
+now passes `--workspace-id`/`--agent-id` as CLI flags (reliable channel) in addition
+to env vars; `mcp_server.py` reads ids from CLI args as a fallback over env; and
+`post_comment` fails loud (refuses to send) when no agent id resolved, instead of
+silently degrading to owner authorship.
+**Dep:** ADR-011
+**AC:** MCP `post_comment` always stores `author_agent_id` (from CLI flag when env
+missing); with no id at all the tool returns an error and sends nothing; env still
+takes precedence over CLI flags; existing MCP e2e tests pass.
+
+## MAP-048 · MCP identity: agent comments must not land as owner-authored · S · Engineer
+Dogfooding fix. `app/mcp_server.py` reads `MAP_AGENT_ID`/`MAP_WORKSPACE_ID` from env,
+but opencode's MCP launcher was observed dropping the `env` block of the per-run
+config — so `AGENT_ID` was empty and every MCP `post_comment`/`update_ticket`/memory
+write landed as **owner-authored** (`author_agent_id=NULL`). Because `comments.py`
+treats NULL-author comments as human-written, each such comment created
+`comment_mention` rows AND triggered mention runs — producing the observed
+"owner comment + agent comment with the same text" duplication on tickets, plus
+spurious runs. Fix: `mcp_config.py` now passes `--workspace-id`/`--agent-id` as CLI
+flags (the reliable channel) in addition to env vars; `mcp_server.py` parses them
+via `argparse` and prefers CLI args over env; `post_comment` fails loud (returns an
+error, sends nothing) when no agent id resolved, instead of silently degrading to
+owner authorship.
+**Dep:** MAP-045, ADR-011
+**AC:** MCP `post_comment` stores `author_agent_id` from CLI flags when env is
+missing; env still takes precedence when both present; missing both → tool returns
+an error and no comment is created; existing MCP tests (`test_mcp_server.py`)
+pass.
+
+## MAP-049 · PM deletes tickets + sprint date range from ```map · S · Engineer
+Two PM powers. (1) New MCP tool `delete_ticket(key)` — permanent delete
+(comments/attachments/runs cascade), gated in the backend API (`DELETE
+/tickets/{key}?actor_agent_id=...`): only a PM agent may delete; owner path stays
+ungated. Taught in `_mcp_tools_block` with strong usage guidance (only
+duplicate/mistaken tickets, never in-flight work). (2) `sprints:` in the ```map
+block now accepts `start_date`/`end_date` (YYYY-MM-DD): `SprintDraft` + parser +
+`_get_or_create_sprint` (+ all call sites) persist the calendar range so the PM
+sets the sprint's date range when creating it (previously UI-only via PATCH).
+Malformed dates are ignored (sprint keeps NULL), never fail the run.
+**AC:** PM can delete via MCP tool (agent-authored, gated); non-PM delete → 403;
+`sprints:` with dates creates sprint with dates; without dates → NULL dates.
+
+## MAP-050 · Built-in auto-check on stale tickets · L · Engineer
+Proactive follow-up, built-in (not a Routine — works by default for every
+workspace, no per-workspace setup). New background scheduler
+`core/auto_check.py` (started in `main.py` lifespan, mocked in tests' conftest)
+ticks every 30s and, per workspace, finds tickets in the ACTIVE sprint whose
+status still needs work (in_progress/review/qa/security/blocked) and whose
+`updated_at` is older than `auto_check_stale_minutes` (default 3), then schedules
+a follow-up run (`trigger="auto"`) for the assigned agent IF idle; busy/disabled
+agents and unassigned tickets fall through to the PM (idle only) — the PM owns
+the whole sprint. Tunable via two new guardrails in Settings
+(`auto_check_interval_minutes`, `auto_check_stale_minutes`; 0 disables).
+Guardrail trips/paused workspaces are swallowed per ticket (schedule() already
+comments). **Dep:** MAP-027, MAP-046
+**AC:** stale in_progress ticket in active sprint → auto run for idle assignee;
+fresh ticket → no run; busy assignee → PM run instead; interval 0 → disabled;
+no active sprint → skipped.
+
+## MAP-051 · Timeline sprint bar covers its tickets; dashboard alert list removed · · Owner
+Frontend fixes. (1) Timeline `layoutScheduledRows`: the sprint bar width is now
+`max(calendar_range_width, tickets_total_width)` — a sprint whose tickets'
+combined estimated duration exceeds its calendar range (or has no dates) no longer
+lets ticket blocks spill past the black bar. (2) Dashboard: the bottom
+"alerts/informasi gagal" block (blocked tickets, failed runs, unstarted epics)
+is removed. (3) Chat unread bullet: `lastAgentChatAt` is now stamped with the
+event's own `created_at` (never `Date.now()`), and only when it's newer than the
+stored value — the SSE replay on (re)connect no longer re-lights the header
+bullet after the chat page was opened; the chat page also re-marks read when a
+new agent message arrives while it's open.
+
+## MAP-052 · Handoff role-mention to self loops forever · Bugfix · Engineer
+Found by the MAP-050 suite: a report mentioning its OWN role (the only lead
+mentioning "lead") resolved to itself and handed off forever (previously only
+name-mentions self-dropped in `report.py`; with `max_handoff_depth` raised the
+chain never stopped). `_handoff` now drops a role-mention that resolves to the
+reporting agent itself, with a note — same rule as name self-mention.
+
+## MAP-053 · Git menu — branch tree + commit history · M · Engineer
+Read-only Git menu per workspace showing: branch list, lane-assigned commit graph
+(gitk-style), paginated commit history (per branch, 100/page load-more), and
+per-commit detail (metadata, changed files with +/− stats, unified diff).
+Backend: `core/git.py` — `run_git()` with read-only allowlist, lane layout
+algorithm, all commands read-only. `api/git.py` — 4 GET endpoints under
+`/workspaces/{id}/git`. Frontend: `/w/[key]/git` page with SVG graph,
+branch filter chips, commit list, detail panel with diff. Manual + 30s
+refetch. **Dep:** MAP-006 (workspace CRUD)
+**AC:** branch list shows all local branches with HEAD marker; graph renders
+correct lane topology for branch/merge history; commit detail shows file stats
+and diff; load more pagination works; non-git repo_path shows friendly empty
+state; read-only enforcement (no write subcommands callable).

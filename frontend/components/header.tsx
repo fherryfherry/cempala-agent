@@ -10,6 +10,7 @@ import { AgentAvatars } from "@/components/agent-avatars";
 import { LogoBanner } from "@/components/logo";
 import { NotificationBell } from "@/components/notification-bell";
 import { WorkspaceSwitcher } from "@/components/workspace-switcher";
+import { readUnreadChatCount } from "@/components/events-context";
 
 function readLastAgentChat(workspaceId: string): string | null {
   try {
@@ -45,16 +46,19 @@ export function Header() {
     enabled: !!workspaceId,
   });
 
-  // Unread chat bullet: localStorage-tracked last agent comment vs last time the
+  // Unread chat badge: localStorage-tracked unread message count vs last time the
   // chat page was opened, kept in sync across pages via a custom window event
-  // (the Header lives outside the workspace's EventsProvider).
-  const [hasUnreadChat, setHasUnreadChat] = useState(false);
+  // (the Header lives outside the workspace's EventsProvider). The count comes
+  // straight from storage; the timestamp comparison only decides whether the
+  // workspace was visited after the last message when the count was wiped.
+  const [unreadChatCount, setUnreadChatCount] = useState(0);
   useEffect(() => {
     if (!workspaceId) return;
     const refresh = () => {
       const lastAgent = readLastAgentChat(workspaceId);
       const lastRead = readChatLastRead(workspaceId);
-      setHasUnreadChat(!!lastAgent && (!lastRead || lastAgent > lastRead));
+      const counted = readUnreadChatCount(workspaceId);
+      setUnreadChatCount(counted > 0 ? counted : lastAgent && (!lastRead || lastAgent > lastRead) ? 1 : 0);
     };
     refresh();
     window.addEventListener("map:agent-chat", refresh);
@@ -95,6 +99,19 @@ export function Header() {
           />
         </Link>
 
+        {!activeKey && (
+          <Link
+            href="/settings"
+            aria-current={pathname === "/settings" ? "page" : undefined}
+            className={cn(
+              "ml-auto flex items-center px-3 text-sm text-zinc-600 hover:text-foreground dark:text-zinc-400",
+              pathname === "/settings" && "text-foreground",
+            )}
+          >
+            Settings
+          </Link>
+        )}
+
         {activeKey && (
           <>
             <nav className="flex h-14 items-stretch gap-0.5 text-sm text-zinc-600 dark:text-zinc-400">
@@ -119,11 +136,11 @@ export function Header() {
                 )}
               >
                 Chat
-                {hasUnreadChat && (
-                  <span
-                    aria-label="New PM messages"
-                    className="absolute top-1.5 right-1.5 flex size-2 rounded-full bg-red-500 ring-2 ring-white dark:ring-zinc-950"
-                  />
+                {unreadChatCount > 0 && (
+                  <span className="absolute top-0.5 right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] leading-none font-semibold text-white shadow ring-2 ring-white dark:ring-zinc-950">
+                    <span aria-hidden className="absolute inset-0 animate-ping rounded-full bg-red-500 opacity-60" />
+                    <span className="relative">{unreadChatCount > 9 ? "9+" : unreadChatCount}</span>
+                  </span>
                 )}
               </Link>
               <Link
@@ -191,6 +208,17 @@ export function Header() {
                 )}
               >
                 Agents
+              </Link>
+              <Link
+                href={`/w/${activeKey}/git`}
+                aria-current={pathname === `/w/${activeKey}/git` ? "page" : undefined}
+                className={cn(
+                  "flex items-center px-3 hover:bg-zinc-100 hover:text-foreground dark:hover:bg-zinc-800",
+                  pathname === `/w/${activeKey}/git` &&
+                    "bg-zinc-100 text-foreground dark:bg-zinc-800",
+                )}
+              >
+                Git
               </Link>
               <Link
                 href={`/w/${activeKey}/settings`}
