@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -11,6 +11,7 @@ import {
   pauseWorkspace,
   resetWorkspace,
   resumeWorkspace,
+  terminateWorkspace,
   updateWorkspace,
   type AgentRole,
   type TimeUnit,
@@ -65,6 +66,7 @@ export default function SettingsPage() {
   const params = useParams<{ key: string }>();
   const workspaceKey = params.key;
   const queryClient = useQueryClient();
+  const router = useRouter();
 
   const workspaces = useQuery({ queryKey: ["workspaces"], queryFn: listWorkspaces });
   const workspace = workspaces.data?.find((ws) => ws.key === workspaceKey);
@@ -124,6 +126,7 @@ export default function SettingsPage() {
       <GuardrailsForm workspace={workspace} />
       <PauseResumeCard workspace={workspace} pause={pause} resume={resume} />
       <ResetDataCard workspace={workspace} />
+      <TerminateWorkspaceCard workspace={workspace} />
       <SecurityWarningCard />
     </div>
   );
@@ -718,6 +721,68 @@ function ResetDataCard({ workspace }: { workspace: Workspace }) {
                   onClick={() => mutation.mutate()}
                 >
                   {mutation.isPending ? "Resetting…" : "Reset data"}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function TerminateWorkspaceCard({ workspace }: { workspace: Workspace }) {
+  const queryClient = useQueryClient();
+  const router = useRouter();
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
+  const mutation = useMutation({
+    mutationFn: () => terminateWorkspace(workspace.id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["workspaces"] });
+      setConfirmOpen(false);
+      toast.success("Workspace terminated");
+      router.push("/");
+    },
+    onError: (err: unknown) => {
+      toast.error(err instanceof ApiError ? err.message : "Terminate failed");
+    },
+  });
+
+  return (
+    <Card className="border-red-300 dark:border-red-900">
+      <CardHeader>
+        <CardTitle>Terminate workspace</CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        <p className="text-sm text-zinc-600">
+          Permanently deletes &quot;{workspace.name}&quot; and everything in it — every
+          ticket, chat, and activity record, plus the workspace itself. This pauses the
+          workspace, stops all running agents, and cannot be undone. The repo folder on
+          disk is left intact.
+        </p>
+        <div>
+          <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+            <DialogTrigger render={<Button variant="destructive">Terminate workspace</Button>} />
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Terminate &quot;{workspace.name}&quot;?</DialogTitle>
+              </DialogHeader>
+              <p className="text-sm text-zinc-600">
+                This pauses the workspace, kills all running agents, and permanently
+                deletes every ticket, chat, and activity record along with the workspace
+                itself. It cannot be undone. The repo folder on disk is not deleted.
+              </p>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setConfirmOpen(false)}>
+                  Cancel
+                </Button>
+                <Button
+                  variant="destructive"
+                  disabled={mutation.isPending}
+                  onClick={() => mutation.mutate()}
+                >
+                  {mutation.isPending ? "Terminating…" : "Terminate workspace"}
                 </Button>
               </DialogFooter>
             </DialogContent>
