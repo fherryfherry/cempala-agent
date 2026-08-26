@@ -193,17 +193,23 @@ rm -f map.db map.db-wal map.db-shm
 alembic upgrade head
 ```
 
+### Run migrations
+
+```bash
+make migrate
+```
+
 ### Run tests
 
 ```bash
 cd backend
 make test
-# or: pytest
+# or: .venv/bin/pytest
 ```
 
 Single test:
 ```bash
-cd backend && pytest tests/test_report.py::test_missing_block -q
+cd backend && .venv/bin/pytest tests/test_report.py::test_missing_block -q
 ```
 
 ### Database migrations
@@ -285,6 +291,158 @@ cd backend
 alembic upgrade head --sql | head -50   # preview SQL
 alembic stamps                               # show current stamp
 # If stuck: alembic stamp head              # force stamp to head
+```
+
+---
+
+## Deployment (Git-Based to VM)
+
+### Overview
+
+Deployment is git-based: push to the `main` branch on the VM host triggers a Docker rebuild. Traffic flows through Cloudflare → Nginx Proxy Manager → WireGuard tunnel → containers.
+
+```
+Browser → Cloudflare → NPM (WireGuard VM) → WireGuard tunnel → VM (Docker/Nginx)
+```
+
+### Prerequisites
+
+| Component | Purpose |
+|-----------|---------|
+| VM with Ubuntu/Debian | Host for Docker containers |
+| WireGuard | VPN tunnel from Cloudflare VM to backend VM |
+| Nginx Proxy Manager | Reverse proxy + Let's Encrypt TLS |
+| Cloudflare | DNS + CDN + DDoS protection |
+
+### Step 1 — VM Setup
+
+```bash
+# On the VM
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y docker.io docker-compose nginx wireguard
+
+# Enable and start Docker
+sudo systemctl enable docker
+sudo systemctl start docker
+```
+
+### Step 2 — WireGuard Configuration
+
+```bash
+# On the Cloudflare side (NPM VM), generate key pair:
+wg genkey | tee privatekey | wg pubkey > publickey
+
+# On the backend VM, generate key pair:
+wg genkey | tee privatekey | wg pubkey > publickey
+
+# Exchange public keys and configure /etc/wireguard/wg0.conf on BOTH VMs:
+# Backend VM (10.66.0.2):
+[Interface]
+Address = 10.66.0.2/24
+PrivateKey = <backend_private_key>
+ListenPort = 51820
+
+[Peer]
+PublicKey = <npm_public_key>
+Endpoint = <npm_vm_ip>:51820
+AllowedIPs = 10.66.0.0/24
+PersistentKeepalive = 25
+
+# NPM VM (10.66.0.1):
+[Interface]
+Address = 10.66.0.1/24
+PrivateKey = <npm_private_key>
+ListenPort = 51820
+
+[Peer]
+PublicKey = <backend_public_key>
+Endpoint = <backend_vm_ip>:51820
+AllowedIPs = 10.66.0.0/24
+PersistentKeepalive = 25
+```
+
+Enable and start WireGuard:
+```bash
+sudo systemctl enable wg-quick@wg0
+sudo systemctl start wg-quick@wg0
+```
+
+### Step 3 — Nginx Proxy Manager
+
+Install Nginx Proxy Manager (e.g., via Docker Compose):
+```yaml
+# docker-compose.yml on NPM VM
+version: '3'
+services:
+  app:
+    image: jlesage/nginx-proxy-manager
+    container_name: npm
+    ports:
+      - "80:8080"
+      - "443:8443"
+      - "81:8181"  # admin UI
+    volumes:
+      - ./data:/data
+      - ./letsencrypt:/etc/letsencrypt
+    restart: unless-stopped
+```
+
+```bash
+docker-compose up -d
+# Admin UI: http://<npm_ip>:81
+# Default: admin@example.com / admin
+```
+
+Add a proxy host:
+- Domain: `your-domain.com`
+- Forward hostname: `10.66.0.2` (backend VM WireGuard IP)
+- Forward port: `8000` (backend)
+- Enable SSL with Let's Encrypt
+
+### Step 4 — Deploy Script
+
+On the backend VM, create a deploy hook:
+
+```bash
+# /opt/cempala/deploy.sh
+#!/bin/bash
+set -e
+cd /opt/cempala
+git pull origin main
+docker-compose build --no-cache
+docker-compose up -d
+docker image prune -f
+```
+
+Set up git remote on the VM:
+```bash
+git remote add vm ssh://user@<vm_ip>:/opt/cempala
+```
+
+Or use a GitHub webhook to trigger `/opt/cempala/deploy.sh` on push to `main`.
+
+### Step 5 — Cloudflare DNS
+
+Point your domain's A record to the NPM VM's public IP:
+```
+A  your-domain.com  203.0.113.10   # NPM VM public IP
+```
+
+Enable Cloudflare proxy (orange cloud) for HTTPS.
+
+### Step 6 — First Deploy
+
+```bash
+# On the VM
+cd /opt/cempala
+git clone <repo_url> .
+docker-compose up -d --build
+```
+
+Verify:
+```bash
+curl https://your-domain.com/api/health
+docker ps
 ```
 
 ---
