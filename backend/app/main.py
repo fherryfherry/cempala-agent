@@ -17,6 +17,7 @@ from app.api.comments import comments_router
 from app.api.conversations import conversations_router, workspace_conversations_router
 from app.api.errors import AppError, app_error_handler, validation_error_handler
 from app.api.events import router as events_router
+from app.api.global_settings import router as global_settings_router
 from app.api.models import router as models_router
 from app.api.routines import routines_router, workspace_routines_router
 from app.api.runs import runs_router, ticket_run_router, workspace_runs_router
@@ -60,6 +61,7 @@ app.add_exception_handler(AppError, app_error_handler)
 app.add_exception_handler(RequestValidationError, validation_error_handler)
 app.include_router(workspaces_router, prefix="/api")
 app.include_router(models_router, prefix="/api")
+app.include_router(global_settings_router, prefix="/api")
 app.include_router(workspace_agents_router, prefix="/api")
 app.include_router(agents_router, prefix="/api")
 app.include_router(agent_memory_router, prefix="/api")
