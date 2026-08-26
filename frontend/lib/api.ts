@@ -154,7 +154,7 @@ export interface Agent {
   workspace_id: string;
   name: string;
   role: Role;
-  model: string;
+  model: string | null;
   tool_kind: ToolKind;
   system_prompt: string | null;
   avatar_template: AvatarTemplate | null;
@@ -168,7 +168,7 @@ export interface Agent {
 export interface AgentCreate {
   name: string;
   role: Role;
-  model: string;
+  model?: string | null;
   tool_kind: ToolKind;
   system_prompt?: string;
   avatar_template?: AvatarTemplate | null;
@@ -241,6 +241,21 @@ export function deleteAgentMemory(memoryId: string): Promise<void> {
 
 export function getModels(): Promise<string[]> {
   return apiFetch<string[]>("/models");
+}
+
+export interface OrchestratorModel {
+  model: string | null;
+}
+
+export function getOrchestratorModel(): Promise<OrchestratorModel> {
+  return apiFetch<OrchestratorModel>("/settings/orchestrator-model");
+}
+
+export function setOrchestratorModel(model: string | null): Promise<OrchestratorModel> {
+  return apiFetch<OrchestratorModel>("/settings/orchestrator-model", {
+    method: "PUT",
+    body: JSON.stringify({ model }),
+  });
 }
 
 export type TicketStatus =

@@ -59,6 +59,23 @@ class Workspace(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class GlobalSetting(Base):
+    """Global key-value settings (global to the whole portal, workspace-agnostic).
+
+    Primary row used by the AI-orchestrator feature: name="orchestrator_model",
+    value is a `provider/model` string or null. Credentials never live here — they
+    belong to `opencode auth`.
+    """
+
+    __tablename__ = "global_setting"
+
+    name: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[object] = mapped_column(JSON, nullable=True, default=None)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
+
+
 class Sprint(Base):
     __tablename__ = "sprint"
 
@@ -105,7 +122,7 @@ class Agent(Base):
         ),
         nullable=False,
     )
-    model: Mapped[str] = mapped_column(String, nullable=False)
+    model: Mapped[str | None] = mapped_column(String, nullable=True)
     tool_kind: Mapped[str] = mapped_column(
         Enum("opencode", "claude", "agy", "codex", name="agent_tool_kind"), nullable=False
     )

@@ -699,7 +699,7 @@ function EditAgentDialog({
   const queryClient = useQueryClient();
   const [name, setName] = useState(agent.name);
   const [toolKind, setToolKind] = useState<ToolKind>(agent.tool_kind as ToolKind);
-  const [model, setModel] = useState(agent.model);
+  const [model, setModel] = useState(agent.model ?? "");
   const [systemPrompt, setSystemPrompt] = useState(agent.system_prompt ?? "");
   const [avatar, setAvatar] = useState<AvatarSelection>({
     template: agent.avatar_template,
