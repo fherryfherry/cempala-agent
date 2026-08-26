@@ -32,11 +32,13 @@ function GitGraphRow({
   totalLanes,
   isSelected,
   onSelect,
+  workspaceTimezone,
 }: {
   commit: GitGraphCommit;
   totalLanes: number;
   isSelected: boolean;
   onSelect: () => void;
+  workspaceTimezone: string;
 }) {
   const x = commit.lane * LANE_W + LANE_W / 2;
   const width = Math.max(totalLanes, 1) * LANE_W;
@@ -103,7 +105,7 @@ function GitGraphRow({
         <div className="flex items-center gap-1.5 mt-0.5 text-zinc-400">
           <span>{commit.author_name}</span>
           <span>&middot;</span>
-          <span>{formatShortTime(commit.author_date)}</span>
+          <span>{formatShortTime(commit.author_date, workspaceTimezone)}</span>
           {commit.decorations.map((d) => (
             <Badge
               key={d}
@@ -435,6 +437,7 @@ export default function GitPage() {
               totalLanes={totalLanes}
               isSelected={selectedCommit?.sha === c.sha}
               onSelect={() => handleSelectCommit(c)}
+              workspaceTimezone={workspaceTimezone}
             />
           ))}
           {stillHasMore && (

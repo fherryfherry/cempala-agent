@@ -70,12 +70,12 @@ const ROLES: Role[] = [
 const TOOL_KINDS: { value: ToolKind; enabled: boolean }[] = [
   { value: "opencode", enabled: true },
   { value: "claude", enabled: true },
-  { value: "agy", enabled: false },
-  { value: "codex", enabled: false },
+  { value: "agy", enabled: true },
+  { value: "codex", enabled: true },
 ];
 
 /** Provider prefixes each tool supports (from `opencode models`). null = all
- * providers; empty array = no models yet (tool not implemented). */
+ * providers; only relevant to `opencode`, the one tool with a dynamic listing. */
 const TOOL_MODEL_PROVIDERS: Record<ToolKind, string[] | null> = {
   opencode: null,
   claude: [],
@@ -83,12 +83,36 @@ const TOOL_MODEL_PROVIDERS: Record<ToolKind, string[] | null> = {
   codex: [],
 };
 
-/** `claude` has no `opencode models`-style listing command — its `--model` flag
- * takes a fixed set of aliases instead of a `provider/model` string. */
+/** `claude`/`agy`/`codex` have no `opencode models`-style listing command — their
+ * `--model` flags take a fixed set of aliases instead of a `provider/model` string. */
 const CLAUDE_MODEL_ALIASES = ["sonnet", "opus", "fable"];
+const CODEX_MODEL_ALIASES = ["gpt-5.1-codex", "gpt-5.1-codex-mini"];
+const AGY_MODEL_ALIASES = [
+  "gemini-3.7-flash-high",
+  "gemini-3.7-flash-medium",
+  "gemini-3.7-flash-low",
+  "gemini-3.6-flash-high",
+  "gemini-3.6-flash-medium",
+  "gemini-3.6-flash-low",
+  "gemini-3.5-flash-high",
+  "gemini-3.5-flash-medium",
+  "gemini-3.5-flash-low",
+  "gemini-3.1-pro-high",
+  "gemini-3.1-pro-low",
+  "claude-sonnet-4-6",
+  "claude-opus-4-6-thinking",
+  "gpt-oss-120b-medium",
+];
+
+const STATIC_ALIAS_MODELS: Partial<Record<ToolKind, string[]>> = {
+  claude: CLAUDE_MODEL_ALIASES,
+  codex: CODEX_MODEL_ALIASES,
+  agy: AGY_MODEL_ALIASES,
+};
 
 function modelsForTool(toolKind: ToolKind, models: string[]): string[] {
-  if (toolKind === "claude") return CLAUDE_MODEL_ALIASES;
+  const aliases = STATIC_ALIAS_MODELS[toolKind];
+  if (aliases) return aliases;
   const providers = TOOL_MODEL_PROVIDERS[toolKind];
   if (!providers) return models;
   return models.filter((m) => providers.some((p) => m.startsWith(`${p}/`)));
@@ -115,9 +139,11 @@ function ModelSelect({
 }) {
   const available = modelsForTool(toolKind, models ?? []);
 
-  // `claude` has its own static alias list — an opencode `/api/models` fetch
-  // failure (isError/isLoading) is irrelevant to it, so skip straight to the picker.
-  if (toolKind !== "claude" && isError) {
+  // Tools with their own static alias list don't depend on the opencode `/api/models`
+  // fetch — a failure/loading state there is irrelevant to them, skip straight to the picker.
+  const hasStaticAliases = Boolean(STATIC_ALIAS_MODELS[toolKind]);
+
+  if (!hasStaticAliases && isError) {
     return (
       <>
         <Input
@@ -131,7 +157,7 @@ function ModelSelect({
     );
   }
 
-  if (toolKind !== "claude" && isLoading) {
+  if (!hasStaticAliases && isLoading) {
     return (
       <Select value={model} onValueChange={(v) => onModelChange(v ?? "")}>
         <SelectTrigger className="w-full">

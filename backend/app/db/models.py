@@ -15,6 +15,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    TypeDecorator,
     UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -26,6 +27,21 @@ def _uuid() -> str:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+class UTCDateTime(TypeDecorator):
+    """DateTime(timezone=True) is a no-op on SQLite: values round-trip as naive
+    datetimes, which then serialize without a UTC offset and get misread as
+    local time on the frontend. Every column of this type is always written via
+    _now(), so a naive value read back is always semantically UTC."""
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_result_value(self, value, dialect):
+        if value is not None and value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value
 
 
 class Base(DeclarativeBase):
@@ -56,7 +72,7 @@ class Workspace(Base):
     )
     timezone: Mapped[str] = mapped_column(String, default="Asia/Jakarta", nullable=False)
     main_branch: Mapped[str] = mapped_column(String, default="main", nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
 
 
 class GlobalSetting(Base):
@@ -96,7 +112,7 @@ class Sprint(Base):
     # duration_estimate and never populated via a ```map block (see orchestrator.py).
     start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
 
 
 class Agent(Base):
@@ -135,7 +151,7 @@ class Agent(Base):
         default="idle",
         nullable=False,
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
 
 
 class Conversation(Base):
@@ -149,11 +165,11 @@ class Conversation(Base):
     # Optional context link to a ticket this chat is about (display-only, not a
     # storage coupling — chat lives in its own tables, ADR: chat != comments).
     linked_ticket_key: Mapped[str | None] = mapped_column(String, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_now, onupdate=_now
+        UTCDateTime, default=_now, onupdate=_now
     )
-    last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_message_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     # JSON-serialized {"sprints": [...], "tickets": [...]} drafts, set when the PM
     # proposes a new sprint while none is active (no active sprint = nothing gets
     # created until the owner replies with an APPROVAL_RE match in this chat).
@@ -177,7 +193,7 @@ class ConversationMessage(Base):
     )
     is_system: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
 
 
 class ConversationAttachment(Base):
@@ -194,7 +210,7 @@ class ConversationAttachment(Base):
     content_type: Mapped[str] = mapped_column(String, nullable=False)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     path: Mapped[str] = mapped_column(String, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
 
 
 class AgentMemory(Base):
@@ -211,7 +227,7 @@ class AgentMemory(Base):
         Enum("agent", "owner", name="agent_memory_origin"), nullable=False
     )
     source_ticket_key: Mapped[str | None] = mapped_column(String, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
 
 
 class Routine(Base):
@@ -237,10 +253,10 @@ class Routine(Base):
         default="idle",
         nullable=False,
     )
-    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    last_run_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_now, onupdate=_now
+        UTCDateTime, default=_now, onupdate=_now
     )
 
 
@@ -290,17 +306,17 @@ class Ticket(Base):
         Enum("feature", "improvement", "fix", "security", "performance", name="ticket_category"),
         nullable=True,
     )
-    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Set when a human unblocks the ticket (blocked -> anything else). Loop detection
     # (app/core/loop_detector.py) ignores runs before this point, so an unblocked ticket
     # gets a genuinely fresh window instead of instantly re-tripping on old history.
-    loop_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    loop_reset_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     cost_used: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     handoff_depth: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_now, onupdate=_now
+        UTCDateTime, default=_now, onupdate=_now
     )
 
 
@@ -317,7 +333,7 @@ class TicketAutoCheck(Base):
         String, ForeignKey("ticket.id", ondelete="CASCADE"), primary_key=True
     )
     skip_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    last_nudge_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_nudge_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
 
 
 class ArtifactGroup(Base):
@@ -328,7 +344,7 @@ class ArtifactGroup(Base):
         String, ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(String, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
 
 
 class Attachment(Base):
@@ -353,7 +369,7 @@ class Attachment(Base):
     # Agent-supplied note from the ```map `artifacts:` entry (origin="agent" only); always
     # NULL for origin="upload".
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
 
 
 class Comment(Base):
@@ -368,7 +384,7 @@ class Comment(Base):
     )
     is_system: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
 
 
 class CommentMention(Base):
@@ -428,8 +444,8 @@ class Run(Base):
     cost: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     report: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
 
 class Event(Base):
@@ -463,4 +479,4 @@ class Event(Base):
         nullable=False,
     )
     payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)

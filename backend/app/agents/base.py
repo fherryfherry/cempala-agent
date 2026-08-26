@@ -55,12 +55,13 @@ class AgentTool(Protocol):
 
 
 def _tools() -> dict[str, type]:
-    """Deferred import to dodge a circular import (opencode_tool/stub_tool import base)."""
+    """Deferred import to dodge a circular import (each *_tool module imports base)."""
+    from app.agents.agy_tool import AgyTool
     from app.agents.claude_tool import ClaudeTool
+    from app.agents.codex_tool import CodexTool
     from app.agents.opencode_tool import OpenCodeTool
-    from app.agents.stub_tool import StubTool
 
-    return {"opencode": OpenCodeTool, "claude": ClaudeTool, "agy": StubTool, "codex": StubTool}
+    return {"opencode": OpenCodeTool, "claude": ClaudeTool, "agy": AgyTool, "codex": CodexTool}
 
 
 TOOLS: dict[str, type] = _tools()

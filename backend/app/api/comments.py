@@ -97,12 +97,11 @@ async def create_comment(key: str, body: CommentCreate, session: AsyncSession = 
             if agent.id == body.author_agent_id:
                 continue  # self-mention discarded
             session.add(CommentMention(comment_id=comment.id, agent_id=agent.id))
-            # Owner comments (author_agent_id is None) trigger a run directly, same as
-            # an agent-report mention (MAP-029/MAP-010: "Pemicuan run belum di sini
-            # (MAP-029)" is now wired). Agent-authored comments already get their
-            # mentions handled through the ```map report path in the orchestrator, so
-            # only fire here for human-authored ones to avoid double-scheduling.
-            if body.author_agent_id is None and agent.enabled and agent.status != "disabled":
+            # Owner comments AND agent-authored ones (e.g. the MCP `post_comment` tool,
+            # used mid-run to leave a follow-up on any ticket) trigger a run the same
+            # way — self-mention is already excluded above, so this can't double-fire
+            # an agent against its own report.
+            if agent.enabled and agent.status != "disabled":
                 to_trigger.append(agent)
 
     await session.commit()

@@ -270,21 +270,25 @@ async def create_tickets_and_sprints(
     tickets: list[TicketDraft],
     run_id: str | None,
     actor_name: str,
-) -> tuple[list[dict], list[str], list[Sprint]]:
+) -> tuple[list[dict], list[str], list[Sprint], list[Ticket]]:
     """Create sprints/tickets from parsed ```map `sprints:`/`tickets[]` drafts,
-    chat-flavored: no ticket-context epic fallback (unlike the ticket-run path),
-    no auto-schedule (sprint activation's `_kick_off_sprint_tickets` covers that
-    instead). Shared by `_finish_routine_run`/`_finish_chat_run` (immediate
-    creation) and `conversations.create_message` (deferred creation, once the
-    owner approves a sprint proposal — no `run` in scope there, hence the
+    chat-flavored: no ticket-context epic fallback (unlike the ticket-run path).
+    Does not itself schedule any run — this function only `flush()`s, it never
+    commits (it runs mid-transaction inside its caller's larger report-processing
+    transaction), and `schedule()` always commits internally. Callers schedule
+    newly-assigned tickets themselves (`orchestrator._auto_schedule_assignee`)
+    right after their own commit. Shared by `_finish_routine_run`/`_finish_chat_run`
+    (immediate creation) and `conversations.create_message` (deferred creation,
+    once the owner approves a sprint proposal — no `run` in scope there, hence the
     optional `run_id`).
 
-    Returns `(tickets_report, epic_skip_notes, new_sprints)` — the last one is
-    only `Sprint`s that didn't already exist by name (NOT every sprint touched,
-    e.g. a `tickets[].sprint` reference to an already-existing sprint is left
-    out) so a caller deciding whether to *activate* a sprint never reactivates
-    an unrelated pre-existing one — including a completed one — just because a
-    ticket happened to name it.
+    Returns `(tickets_report, epic_skip_notes, new_sprints, created_tickets)` —
+    `new_sprints` is only `Sprint`s that didn't already exist by name (NOT every
+    sprint touched, e.g. a `tickets[].sprint` reference to an already-existing
+    sprint is left out) so a caller deciding whether to *activate* a sprint never
+    reactivates an unrelated pre-existing one — including a completed one — just
+    because a ticket happened to name it. `created_tickets` is every `Ticket` row
+    built here (already flushed, `id`/`assignee_id`/`sprint_id` populated).
     """
     from app.api.tickets import _next_key  # reuse the same atomic-counter key logic
 
@@ -308,6 +312,7 @@ async def create_tickets_and_sprints(
 
     tickets_report: list[dict] = []
     epic_skip_notes: list[str] = []
+    created_tickets: list[Ticket] = []
     for draft in tickets:
         assignee_id = None
         if draft.assignee:
@@ -362,8 +367,9 @@ async def create_tickets_and_sprints(
                 },
             )
         tickets_report.append({"title": draft.title, "key": child.key})
+        created_tickets.append(child)
 
-    return tickets_report, epic_skip_notes, list(new_sprints.values())
+    return tickets_report, epic_skip_notes, list(new_sprints.values()), created_tickets
 
 
 async def _get_or_create_artifact_group(
@@ -714,6 +720,40 @@ async def schedule(
     return run
 
 
+async def _auto_schedule_assignee(
+    session: AsyncSession, session_factory: async_sessionmaker, ticket: Ticket
+) -> None:
+    """Mirrors the owner clicking "Run": fires whenever a ticket lands on an
+    assignee, except backlog tickets (not queued for work yet) — owner request.
+    Guardrail trips/paused workspace are swallowed, same as `_kick_off_sprint_tickets`:
+    the assignment/creation itself must still succeed either way.
+    """
+    if ticket.status == "backlog" or ticket.assignee_id is None:
+        return
+    agent = await session.get(Agent, ticket.assignee_id)
+    if agent is None or not agent.enabled or agent.status == "disabled":
+        return
+    # Dedup guard: `_execute_pending_proposal` (conversations.py) can already have
+    # kicked this exact ticket off via `activate_sprint` -> `_kick_off_sprint_tickets`
+    # moments earlier in the same request when a brand-new sprint goes active in the
+    # same PM batch — without this check that path double-schedules.
+    already = await session.scalar(
+        select(Run.id)
+        .where(
+            Run.ticket_id == ticket.id,
+            Run.agent_id == agent.id,
+            Run.status.in_(("queued", "running")),
+        )
+        .limit(1)
+    )
+    if already is not None:
+        return
+    try:
+        await schedule(session, session_factory, ticket=ticket, agent=agent, trigger="manual")
+    except (GuardrailBlocked, RuntimeError):
+        pass
+
+
 async def schedule_routine_run(
     session: AsyncSession,
     session_factory: async_sessionmaker,
@@ -916,27 +956,35 @@ async def _record_body_mentions(
     *,
     workspace_id: str,
     author_agent_id: str | None,
-) -> None:
+) -> list[Agent]:
     """Record `comment_mention` rows for `@name` occurrences in an agent-authored
-    comment body (ticket report summaries and `comments[]` targets).
+    comment body (ticket report summaries and `comments[]` targets), and return
+    the mentioned agents (self-mentions excluded) so callers that have an
+    actionable channel for them can schedule a run.
 
-    Informational only, mirroring the UI contract (the `@name` link/badge): no run
-    is scheduled here. A ticket run's actionable mentions already come from the
-    ```map `mention:` field (`_resolve_handoff_targets`), and double-scheduling from
-    the same report would bypass handoff guardrails. Self-mentions are dropped.
+    `comments[]` callers (`_finish_routine_run`/`_finish_chat_run`) use the
+    returned list to schedule — a no-ticket-mode report can't declare `mention:`
+    at all, so this is the only channel those comments have. The ticket-run
+    summary caller (`_finish_run`) deliberately ignores the return value: a
+    ticket run's actionable mentions come from the ```map `mention:` field
+    (`_handoff`) only, so scheduling from `summary:` prose too would risk
+    double-scheduling the same agent from one report.
     """
     names = set(_MENTION_RE.findall(body))
     if not names:
-        return
+        return []
     mentioned = (
         await session.scalars(
             select(Agent).where(Agent.workspace_id == workspace_id, Agent.name.in_(names))
         )
     ).all()
+    result: list[Agent] = []
     for mentioned_agent in mentioned:
         if mentioned_agent.id == author_agent_id:
             continue  # self-mention dropped, same as owner comments
         session.add(CommentMention(comment_id=comment.id, agent_id=mentioned_agent.id))
+        result.append(mentioned_agent)
+    return result
 
 
 async def _write_system_comment(
@@ -2118,6 +2166,8 @@ async def _finish_routine_run(
     terminal: AdapterEvent | None,
     accumulated_text: str,
     guardrail_cancel_reason: str | None = None,
+    *,
+    session_factory: async_sessionmaker | None = None,
 ) -> None:
     """Finish a routine run (no ticket): parse the ```map block and execute its
     side-effect actions (comments/tickets/updates/memory/artifacts) — never a status
@@ -2209,9 +2259,19 @@ async def _finish_routine_run(
         )
         session.add(comment)
         await session.flush()
-        await _record_body_mentions(
+        mentioned = await _record_body_mentions(
             session, comment, draft.body, workspace_id=workspace_id, author_agent_id=agent.id
         )
+        if session_factory is not None:
+            for mentioned_agent in mentioned:
+                if not mentioned_agent.enabled or mentioned_agent.status == "disabled":
+                    continue
+                try:
+                    await schedule(
+                        session, session_factory, ticket=target, agent=mentioned_agent, trigger="mention"
+                    )
+                except (GuardrailBlocked, RuntimeError):
+                    continue
         await event_bus.publish(
             session,
             run_id=run.id,
@@ -2327,8 +2387,9 @@ async def _finish_routine_run(
     # Gated on `parsed.sprints` too, not just `parsed.tickets` — see the same note
     # in `_finish_chat_run`.
     tickets_report: list[dict] = []
+    created_tickets: list[Ticket] = []
     if parsed.tickets or parsed.sprints:
-        tickets_report, routine_epic_skip_notes, _ = await create_tickets_and_sprints(
+        tickets_report, routine_epic_skip_notes, _, created_tickets = await create_tickets_and_sprints(
             session,
             workspace,
             sprints=parsed.sprints,
@@ -2382,6 +2443,10 @@ async def _finish_routine_run(
         routine.last_run_at = _now()
     agent.status = "idle"
     await session.commit()
+
+    if session_factory is not None:
+        for t in created_tickets:
+            await _auto_schedule_assignee(session, session_factory, t)
 
 
 async def _finish_chat_run(
@@ -2557,9 +2622,19 @@ async def _finish_chat_run(
         )
         session.add(comment)
         await session.flush()
-        await _record_body_mentions(
+        mentioned = await _record_body_mentions(
             session, comment, draft.body, workspace_id=workspace_id, author_agent_id=agent.id
         )
+        if session_factory is not None:
+            for mentioned_agent in mentioned:
+                if not mentioned_agent.enabled or mentioned_agent.status == "disabled":
+                    continue
+                try:
+                    await schedule(
+                        session, session_factory, ticket=target, agent=mentioned_agent, trigger="mention"
+                    )
+                except (GuardrailBlocked, RuntimeError):
+                    continue
         await event_bus.publish(
             session,
             run_id=run.id,
@@ -2671,11 +2746,14 @@ async def _finish_chat_run(
     if source_skip_notes:
         run.error = "; ".join(source_skip_notes)
 
-    # `tickets[]` without a parent -> backlog tickets (todo, NOT auto-scheduled).
+    # `tickets[]` without a parent -> backlog tickets (todo). Any created ticket
+    # that lands with an assignee (and isn't itself `backlog` status) gets its run
+    # auto-scheduled after this function's own commit, below.
     # Gated on `parsed.sprints` too, not just `parsed.tickets` — a PM
     # activating/completing/declaring a sprint with no new tickets in the same
     # report is a valid, common shape and must not be silently skipped.
     tickets_report: list[dict] = []
+    created_tickets: list[Ticket] = []
     if parsed.tickets or parsed.sprints:
         has_active_sprint = (
             await session.scalar(
@@ -2686,7 +2764,7 @@ async def _finish_chat_run(
         ) is not None
 
         if has_active_sprint:
-            tickets_report, chat_epic_skip_notes, _ = await create_tickets_and_sprints(
+            tickets_report, chat_epic_skip_notes, _, created_tickets = await create_tickets_and_sprints(
                 session,
                 workspace,
                 sprints=parsed.sprints,
@@ -2759,6 +2837,10 @@ async def _finish_chat_run(
     run.status = "done"
     agent.status = "idle"
     await session.commit()
+
+    if session_factory is not None:
+        for t in created_tickets:
+            await _auto_schedule_assignee(session, session_factory, t)
 
 
 async def _handle_failed_chat_run(
@@ -2868,7 +2950,13 @@ async def _finish_run(
             )
             return
         await _finish_routine_run(
-            session, run, agent, terminal, accumulated_text, guardrail_cancel_reason
+            session,
+            run,
+            agent,
+            terminal,
+            accumulated_text,
+            guardrail_cancel_reason,
+            session_factory=session_factory,
         )
         return
 

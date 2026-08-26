@@ -1,6 +1,7 @@
 """API tests for MAP-006 workspace CRUD."""
 
 import tempfile
+from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -70,6 +71,19 @@ def test_create_workspace_success(client, tmp_path):
     }
     assert body["workflow_prompt"] == DEFAULT_WORKFLOW_PROMPT
     assert body["description"] is None
+
+
+def test_created_at_is_utc_aware(client, tmp_path):
+    # Regression: SQLite silently drops tzinfo on read for DateTime(timezone=True)
+    # columns, so a naive value serializes without a UTC offset and the frontend's
+    # `new Date(iso)` misreads it as local browser time instead of UTC.
+    resp = client.post(
+        "/api/workspaces",
+        json={"name": "Acme", "key": "ACM", "repo_path": str(tmp_path)},
+    )
+    assert resp.status_code == 201, resp.text
+    created_at = datetime.fromisoformat(resp.json()["created_at"])
+    assert created_at.tzinfo is not None
 
 
 def test_create_workspace_with_description(client, tmp_path):

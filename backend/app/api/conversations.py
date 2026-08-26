@@ -265,13 +265,15 @@ async def _execute_pending_proposal(
     sprints = [SprintDraft(**d) for d in data.get("sprints", [])]
     tickets = [TicketDraft(**d) for d in data.get("tickets", [])]
 
-    tickets_report, epic_skip_notes, new_sprints = await orchestrator.create_tickets_and_sprints(
-        session,
-        workspace,
-        sprints=sprints,
-        tickets=tickets,
-        run_id=None,
-        actor_name=pm.name,
+    tickets_report, epic_skip_notes, new_sprints, created_tickets = (
+        await orchestrator.create_tickets_and_sprints(
+            session,
+            workspace,
+            sprints=sprints,
+            tickets=tickets,
+            run_id=None,
+            actor_name=pm.name,
+        )
     )
 
     activated: list[Sprint] = []
@@ -284,6 +286,9 @@ async def _execute_pending_proposal(
             not_activated.append(sprint)
 
     await session.commit()
+
+    for t in created_tickets:
+        await orchestrator._auto_schedule_assignee(session, db_session.async_session, t)
 
     body_lines = ["Proposal disetujui owner."]
     if activated:

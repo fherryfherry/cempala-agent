@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.errors import AppError
 from app.api.workspaces import _get_workspace_or_404
 from app.core.state_machine import can_transition
+from app.db import session as db_session
 from app.db.models import Agent, Attachment, Comment, CommentMention, Run, Ticket, Workspace
 from app.db.session import get_session
 from app.schemas.ticket import (
@@ -128,6 +129,10 @@ async def create_ticket(
         await session.rollback()
         raise AppError(422, "invalid_reference", "assignee_id or parent_id does not exist")
     await session.refresh(ticket)
+    if ticket.assignee_id is not None:
+        from app.core import orchestrator
+
+        await orchestrator._auto_schedule_assignee(session, db_session.async_session, ticket)
     return ticket
 
 
@@ -178,6 +183,7 @@ async def update_ticket(key: str, body: TicketUpdate, session: AsyncSession = De
     ticket = await _get_ticket_or_404(session, key)
 
     old_status = ticket.status
+    old_assignee_id = ticket.assignee_id
     if body.status is not None and body.status != old_status:
         actor_role = None
         if body.actor_agent_id is not None:
@@ -232,6 +238,10 @@ async def update_ticket(key: str, body: TicketUpdate, session: AsyncSession = De
         await session.rollback()
         raise AppError(422, "invalid_reference", "assignee_id does not exist")
     await session.refresh(ticket)
+    if body.assignee_id is not None and body.assignee_id != old_assignee_id:
+        from app.core import orchestrator
+
+        await orchestrator._auto_schedule_assignee(session, db_session.async_session, ticket)
     return ticket
 
 
