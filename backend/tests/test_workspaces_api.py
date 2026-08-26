@@ -294,3 +294,50 @@ def test_reset_wipes_tickets_comments_sprints_and_counter(client, tmp_path):
         f"/api/workspaces/{ws_id}/tickets", json={"title": "fresh", "is_new_epic": True}
     ).json()
     assert new_ticket["key"] == "ACM-001"
+
+
+def test_terminate_deletes_workspace_and_all_data(client, tmp_path):
+    create = client.post(
+        "/api/workspaces", json={"name": "Acme", "key": "ACM", "repo_path": str(tmp_path)}
+    )
+    ws_id = create.json()["id"]
+
+    ticket = client.post(
+        f"/api/workspaces/{ws_id}/tickets", json={"title": "t1", "is_new_epic": True}
+    ).json()
+    client.post(f"/api/tickets/{ticket['key']}/comments", json={"body": "hi"})
+    client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "Sprint 1"})
+
+    resp = client.post(f"/api/workspaces/{ws_id}/terminate")
+    assert resp.status_code == 204
+
+    assert client.get(f"/api/workspaces/{ws_id}").status_code == 404
+    assert client.get(f"/api/workspaces/{ws_id}/tickets").status_code == 404
+    assert client.get(f"/api/workspaces/{ws_id}/agents").status_code == 404
+    assert client.get(f"/api/tickets/{ticket['key']}").status_code == 404
+
+
+def test_terminate_does_not_touch_disk(client):
+    import os
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        marker = os.path.join(tmp_dir, "keep-me.txt")
+        with open(marker, "w") as f:
+            f.write("hello")
+
+        create = client.post(
+            "/api/workspaces", json={"name": "Acme", "key": "ACM", "repo_path": tmp_dir}
+        )
+        ws_id = create.json()["id"]
+
+        resp = client.post(f"/api/workspaces/{ws_id}/terminate")
+        assert resp.status_code == 204
+
+        assert os.path.isdir(tmp_dir)
+        assert os.path.isfile(marker)
+
+
+def test_terminate_missing_workspace_404(client):
+    resp = client.post("/api/workspaces/nope/terminate")
+    assert resp.status_code == 404

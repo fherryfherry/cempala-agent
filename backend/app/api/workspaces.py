@@ -1,3 +1,4 @@
+import asyncio
 import os
 from pathlib import Path
 
@@ -7,7 +8,15 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.errors import AppError
-from app.db.models import ArtifactGroup, Run, Sprint, Ticket, Workspace
+from app.db.models import (
+    ArtifactGroup,
+    Conversation,
+    Routine,
+    Run,
+    Sprint,
+    Ticket,
+    Workspace,
+)
 from app.db.session import get_session
 from app.schemas.workspace import (
     DEFAULT_GUARDRAILS,
@@ -215,5 +224,86 @@ async def reset_workspace(workspace_id: str, session: AsyncSession = Depends(get
 @router.delete("/{workspace_id}", status_code=204)
 async def delete_workspace(workspace_id: str, session: AsyncSession = Depends(get_session)):
     ws = await _get_workspace_or_404(session, workspace_id)
+    await session.delete(ws)
+    await session.commit()
+
+
+# How long terminate waits for running/queued runs to stop before giving up.
+# Module-level so tests can monkeypatch it to a small value.
+_TERMINATE_TIMEOUT_SEC = 60.0
+
+
+def _workspace_runs_stmt(workspace_id: str):
+    """Select every run belonging to a workspace — ticket, chat, and routine runs.
+
+    Run has no direct workspace_id; it links via Ticket (ticket runs), Routine
+    (routine runs), or Conversation (chat runs). Mirrors list_runs in app/api/runs.py.
+    """
+    return (
+        select(Run)
+        .outerjoin(Ticket, Run.ticket_id == Ticket.id)
+        .where(
+            (Ticket.workspace_id == workspace_id)
+            | (
+                Run.routine_id.in_(
+                    select(Routine.id).where(Routine.workspace_id == workspace_id)
+                )
+            )
+            | (
+                Run.conversation_id.in_(
+                    select(Conversation.id).where(Conversation.workspace_id == workspace_id)
+                )
+            )
+        )
+    )
+
+
+@router.post("/{workspace_id}/terminate", status_code=204)
+async def terminate_workspace(workspace_id: str, session: AsyncSession = Depends(get_session)):
+    """Permanently delete a workspace and all its data.
+
+    Pauses the workspace (kill switch), waits for every running/queued run to
+    actually stop (so a background run's own DB writes can't race the delete out
+    from under it), then deletes all tickets/sprints/artifact groups and the
+    workspace row (cascades to agents, runs, events, conversations, routines,
+    memories). The repo folder on disk is NOT touched.
+    """
+    from app.core import orchestrator  # deferred: circular import otherwise
+
+    ws = await _get_workspace_or_404(session, workspace_id)
+    ws.paused = True
+
+    runs = (await session.scalars(_workspace_runs_stmt(workspace_id))).all()
+    for run in runs:
+        if run.status == "running":
+            await orchestrator.stop(run.id)
+        elif run.status == "queued":
+            await orchestrator.cancel_queued(run.agent_id, run.id)
+            run.status = "cancelled"
+
+    await session.commit()
+
+    # Wait for running runs to actually finish (their _finish_run commits before
+    # the status leaves running/queued, so once none remain it's safe to delete).
+    deadline = asyncio.get_event_loop().time() + _TERMINATE_TIMEOUT_SEC
+    while True:
+        active = await session.scalar(
+            _workspace_runs_stmt(workspace_id).where(
+                Run.status.in_(("running", "queued"))
+            )
+        )
+        if active is None:
+            break
+        if asyncio.get_event_loop().time() >= deadline:
+            raise AppError(
+                409,
+                "runs_in_progress",
+                "runs did not stop within the timeout; workspace is paused, try again",
+            )
+        await asyncio.sleep(0.5)
+
+    await session.execute(delete(Ticket).where(Ticket.workspace_id == workspace_id))
+    await session.execute(delete(Sprint).where(Sprint.workspace_id == workspace_id))
+    await session.execute(delete(ArtifactGroup).where(ArtifactGroup.workspace_id == workspace_id))
     await session.delete(ws)
     await session.commit()
