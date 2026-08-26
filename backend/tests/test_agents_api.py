@@ -71,6 +71,15 @@ def test_create_agent_success(client, tmp_path):
     assert body["workspace_id"] == ws_id
 
 
+def test_create_agent_without_model(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    payload = _agent_payload()
+    del payload["model"]
+    resp = client.post(f"/api/workspaces/{ws_id}/agents", json=payload)
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["model"] is None
+
+
 def test_create_duplicate_name_409(client, tmp_path):
     ws_id = _make_workspace(client, tmp_path)
     payload = _agent_payload()
