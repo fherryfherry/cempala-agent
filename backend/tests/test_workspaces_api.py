@@ -9,7 +9,7 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db import session as db_session
-from app.db.models import Base
+from app.db.models import Agent, Base, Run, Ticket
 from app.db.session import get_session
 from app.main import app
 from app.schemas.workspace import DEFAULT_WORKFLOW_PROMPT
@@ -341,3 +341,54 @@ def test_terminate_does_not_touch_disk(client):
 def test_terminate_missing_workspace_404(client):
     resp = client.post("/api/workspaces/nope/terminate")
     assert resp.status_code == 404
+
+
+def test_terminate_waits_for_running_run_then_succeeds(client, tmp_path, monkeypatch):
+    import asyncio
+
+    from app.core import orchestrator
+
+    create = client.post(
+        "/api/workspaces", json={"name": "Acme", "key": "ACM", "repo_path": str(tmp_path)}
+    )
+    ws_id = create.json()["id"]
+
+    async def _seed_running_run():
+        async with db_session.async_session() as s:
+            agent = Agent(
+                workspace_id=ws_id, name="eng", role="engineer",
+                model="opencode/big-pickle", tool_kind="opencode", status="working",
+            )
+            s.add(agent)
+            await s.flush()
+            ticket = Ticket(
+                workspace_id=ws_id, key="ACM-1", title="t", status="in_progress",
+            )
+            s.add(ticket)
+            await s.flush()
+            run = Run(
+                ticket_id=ticket.id, agent_id=agent.id, status="running",
+                trigger="manual", tool_kind="opencode", model="opencode/big-pickle",
+            )
+            s.add(run)
+            await s.commit()
+            return run.id
+
+    run_id = asyncio.run(_seed_running_run())
+
+    # Simulate the run finishing shortly after terminate starts polling.
+    async def _fake_stop(run_id):
+        async def _finish():
+            await asyncio.sleep(0.2)
+            async with db_session.async_session() as s:
+                r = await s.get(Run, run_id)
+                r.status = "cancelled"
+                await s.commit()
+        asyncio.create_task(_finish())
+        return True
+
+    monkeypatch.setattr(orchestrator, "stop", _fake_stop)
+
+    resp = client.post(f"/api/workspaces/{ws_id}/terminate")
+    assert resp.status_code == 204
+    assert client.get(f"/api/workspaces/{ws_id}").status_code == 404
