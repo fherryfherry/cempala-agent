@@ -32,7 +32,20 @@ def mcp_config_path(workspace_id: str, agent_id: str) -> str | None:
         "mcp": {
             "map-tickets": {
                 "type": "local",
-                "command": [sys.executable, "-m", "app.mcp_server"],
+                # Workspace/agent ids passed BOTH as CLI flags and env vars:
+                # opencode's MCP launcher may not forward the `env` block to the
+                # subprocess (observed in dogfooding — comments landed as
+                # owner-authored), so the flags are the reliable channel
+                # (app/mcp_server.py falls back to them, MAP-048).
+                "command": [
+                    sys.executable,
+                    "-m",
+                    "app.mcp_server",
+                    "--workspace-id",
+                    workspace_id,
+                    "--agent-id",
+                    agent_id,
+                ],
                 "env": {
                     "PYTHONPATH": str(backend_dir),
                     "MAP_API_BASE": settings.MAP_API_BASE,
@@ -43,6 +56,42 @@ def mcp_config_path(workspace_id: str, agent_id: str) -> str | None:
         }
     }
     fd, path = tempfile.mkstemp(suffix=".json", prefix="map-mcp-")
+    with os.fdopen(fd, "w") as f:
+        json.dump(config, f)
+    return path
+
+
+def claude_mcp_config_path(workspace_id: str, agent_id: str) -> str | None:
+    """Same idea as `mcp_config_path`, but in Claude Code's `--mcp-config` shape
+
+    (`{"mcpServers": {name: {command, args, env}}}`, one string `command` + a
+    separate `args` array — not opencode's single `command: [...]` array).
+    """
+    if not settings.MAP_MCP_ENABLED:
+        return None
+    backend_dir = Path(__file__).resolve().parent.parent.parent
+    config = {
+        "mcpServers": {
+            "map-tickets": {
+                "command": sys.executable,
+                "args": [
+                    "-m",
+                    "app.mcp_server",
+                    "--workspace-id",
+                    workspace_id,
+                    "--agent-id",
+                    agent_id,
+                ],
+                "env": {
+                    "PYTHONPATH": str(backend_dir),
+                    "MAP_API_BASE": settings.MAP_API_BASE,
+                    "MAP_WORKSPACE_ID": workspace_id,
+                    "MAP_AGENT_ID": agent_id,
+                },
+            }
+        }
+    }
+    fd, path = tempfile.mkstemp(suffix=".json", prefix="map-mcp-claude-")
     with os.fdopen(fd, "w") as f:
         json.dump(config, f)
     return path

@@ -33,6 +33,7 @@ def test_mcp_server_stdio_initialize_and_tools(tmp_path):
         ticket_id="ticket-1",
         repo_path=str(tmp_path),
         prompt="x",
+        agent_name="mcp-test-agent",
     )
     config_path = mcp_config_path(ctx.workspace_id, ctx.agent_id)
     assert config_path is not None

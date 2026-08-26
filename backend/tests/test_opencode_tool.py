@@ -30,6 +30,8 @@ def _ctx(tmp_path, **overrides) -> RunContext:
         ticket_id="ticket-1",
         repo_path=str(tmp_path),
         prompt="do the thing",
+        agent_name="Test Agent",
+        ticket_key="",
     )
     defaults.update(overrides)
     return RunContext(**defaults)
@@ -401,3 +403,79 @@ def test_cancel_actually_kills_child_process(tmp_path, monkeypatch):
     for pid in pids:
         result = subprocess.run(["ps", "-p", str(pid)], capture_output=True, text=True)
         assert result.returncode != 0, f"pid {pid} is still alive after cancel"
+
+
+def test_git_author_identity_env(tmp_path, monkeypatch):
+    """GIT_AUTHOR_NAME/EMAIL and GIT_COMMITTER_NAME/EMAIL are set on the subprocess."""
+    script = _write_script(
+        tmp_path / "opencode",
+        """
+printf '{"type": "assistant_text", "text": "git-author-name:%s", "session_id": "sess-1"}\n' "$GIT_AUTHOR_NAME"
+printf '{"type": "assistant_text", "text": "git-author-email:%s", "session_id": "sess-1"}\n' "$GIT_AUTHOR_EMAIL"
+printf '{"type": "assistant_text", "text": "git-committer-name:%s", "session_id": "sess-1"}\n' "$GIT_COMMITTER_NAME"
+printf '{"type": "assistant_text", "text": "git-committer-email:%s", "session_id": "sess-1"}\n' "$GIT_COMMITTER_EMAIL"
+printf '{"type": "run_ended", "status": "done", "session_id": "sess-1"}\n'
+""",
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    events = asyncio.run(_collect(_ctx(tmp_path, agent_name="Budi")))
+    final = events[-1]
+    assert final.type == "run_ended"
+    assert final.payload["status"] == "done"
+    output = "".join(
+        e.payload.get("text", "")
+        for e in events
+        if e.type == "assistant_text"
+    )
+    assert "git-author-name:Budi" in output
+    assert "git-author-email:budi@agent.local" in output
+    assert "git-committer-name:Budi" in output
+    assert "git-committer-email:budi@agent.local" in output
+
+
+def test_git_author_identity_fallback_to_agent_id(tmp_path, monkeypatch):
+    """When agent_name is empty, agent_id is used for the git name."""
+    script = _write_script(
+        tmp_path / "opencode",
+        """
+printf '{"type": "assistant_text", "text": "git-author-name:%s", "session_id": "sess-1"}\n' "$GIT_AUTHOR_NAME"
+printf '{"type": "assistant_text", "text": "git-author-email:%s", "session_id": "sess-1"}\n' "$GIT_AUTHOR_EMAIL"
+printf '{"type": "run_ended", "status": "done", "session_id": "sess-1"}\n'
+""",
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    events = asyncio.run(_collect(_ctx(tmp_path, agent_name="", agent_id="agent-XYZ-123")))
+    final = events[-1]
+    assert final.type == "run_ended"
+    output = "".join(
+        e.payload.get("text", "")
+        for e in events
+        if e.type == "assistant_text"
+    )
+    assert "git-author-name:agent-XYZ-123" in output
+    assert "git-author-email:agent-xyz-123@agent.local" in output
+
+
+def test_git_author_identity_special_chars_in_name(tmp_path, monkeypatch):
+    """Names with spaces, parentheses, etc. are slugified for the email."""
+    script = _write_script(
+        tmp_path / "opencode",
+        """
+printf '{"type": "assistant_text", "text": "git-author-name:%s", "session_id": "sess-1"}\n' "$GIT_AUTHOR_NAME"
+printf '{"type": "assistant_text", "text": "git-author-email:%s", "session_id": "sess-1"}\n' "$GIT_AUTHOR_EMAIL"
+printf '{"type": "run_ended", "status": "done", "session_id": "sess-1"}\n'
+""",
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    events = asyncio.run(_collect(_ctx(tmp_path, agent_name="Budi (Engineer)")))
+    final = events[-1]
+    assert final.type == "run_ended"
+    output = "".join(
+        e.payload.get("text", "")
+        for e in events
+        if e.type == "assistant_text"
+    )
+    assert "git-author-name:Budi (Engineer)" in output

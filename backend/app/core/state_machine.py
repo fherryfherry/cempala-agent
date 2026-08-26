@@ -24,7 +24,9 @@ STATUSES = {
     "blocked",
 }
 
-ALL_ROLES = frozenset({"pm", "lead", "engineer", "designer", "qa", "pentester"})
+ALL_ROLES = frozenset(
+    {"pm", "lead", "engineer", "designer", "qa", "pentester", "business_analyst", "system_architect"}
+)
 
 
 def can_transition(from_status: str, to_status: str, actor_role: str | None) -> tuple[bool, str]:

@@ -7,26 +7,32 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   ApiError,
-  createComment,
-  createTicket,
-  deleteAttachment,
+  conversationAttachmentUrl,
+  createConversation,
+  deleteConversationAttachment,
   formatAgentName,
-  getTicket,
   listAgents,
+  listArtifacts,
+  listConversationAttachments,
+  listConversationMessages,
+  listConversations,
+  listRuns,
   listTickets,
   listWorkspaces,
-  updateTicket,
-  uploadAttachment,
+  postConversationMessage,
+  uploadConversationAttachment,
   type Agent,
-  type Attachment,
-  type Comment,
+  type Conversation,
+  type ConversationAttachment,
+  type ConversationMessage,
   type AvatarTemplate,
 } from "@/lib/api";
 import { useWorkspaceEvents, type WorkspaceEvent } from "@/components/events-context";
 import { AgentAvatar } from "@/components/agent-avatar";
 import { formatShortTime } from "@/lib/format";
 import { Markdown } from "@/components/markdown";
-import { Badge } from "@/components/ui/badge";
+import { MentionAutocomplete, type MentionOption } from "@/components/mention-autocomplete";
+import { linkifyMentions } from "@/lib/mention-link";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -46,60 +52,6 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { AttachmentPreviewDialog } from "@/components/attachment-preview";
-
-/** Derive a short title from the opening chat message: first ~50 chars, cut at a word boundary. */
-function deriveTitle(message: string): string {
-  const trimmed = message.trim();
-  if (trimmed.length <= 50) return trimmed;
-  const cut = trimmed.slice(0, 50);
-  const lastSpace = cut.lastIndexOf(" ");
-  const base = (lastSpace > 0 ? cut.slice(0, lastSpace) : cut).trimEnd();
-  return `${base}…`;
-}
-
-/** The mention prefix that triggers the PM's run is a backend implementation detail — hide it from the owner's own bubble. */
-function stripMentionPrefix(body: string, pmName: string): string {
-  const prefix = `@${pmName} `;
-  return body.startsWith(prefix) ? body.slice(prefix.length) : body;
-}
-
-/** Web Speech API constructor, resolved once at module load (window may not exist in SSR). */
-function getSpeechRecognitionCtor(): typeof SpeechRecognition | undefined {
-  if (typeof window === "undefined") return undefined;
-  return (
-    (window as Window & { SpeechRecognition?: typeof SpeechRecognition }).SpeechRecognition ??
-    (window as Window & { webkitSpeechRecognition?: typeof SpeechRecognition }).webkitSpeechRecognition
-  );
-}
-
-// System comments are mostly bookkeeping (status-change restatements, artifact
-// publish notes, memory notes) that would drown the chat if shown verbatim. Only
-// the ones that carry real information for the owner — run failures, blocks,
-// guardrail trips, PM breakdown notices — get rendered. Same spirit as
-// events-context.tsx's buildActivityToastMessage, kept here because the chat
-// thread and the notification bell have different spam tolerances.
-const CHAT_HIDDEN_SYSTEM_PREFIXES = [
-  "Status changed from",
-  "Artifact dipublikasikan",
-  "Beberapa artifact",
-  "Memory disimpan",
-  "Diperbarui oleh",
-  "Plan disetujui",
-];
-
-function isChatVisible(c: Comment): boolean {
-  if (!c.is_system) return true;
-  return !CHAT_HIDDEN_SYSTEM_PREFIXES.some((p) => c.body.startsWith(p));
-}
-
-/** Linkify `KEY-NNN` ticket keys in message text into markdown links to their
- * ticket page. `react-markdown` renders the produced `[KEY-NNN](...)` syntax
- * into clickable anchors inside the bubble. */
-function linkifyTicketKeys(body: string, workspaceKey: string): string {
-  return body.replace(/\b([A-Z][A-Z0-9]*-\d{3})\b/g, (key) => `[\`${key}\`](/w/${workspaceKey}/ticket/${key})`);
-}
-
-type Mode = { type: "draft" } | { type: "ticket"; key: string };
 
 /** Quick-send suggestions shown above the composer, like ChatGPT suggestion chips. */
 const SUGGESTIONS: { label: string; message: string; icon: LucideIcon }[] = [
@@ -141,6 +93,25 @@ const SUGGESTIONS: { label: string; message: string; icon: LucideIcon }[] = [
   },
 ];
 
+/** Web Speech API constructor, resolved once at module load (window may not exist in SSR). */
+function getSpeechRecognitionCtor(): typeof SpeechRecognition | undefined {
+  if (typeof window === "undefined") return undefined;
+  return (
+    (window as Window & { SpeechRecognition?: typeof SpeechRecognition }).SpeechRecognition ??
+    (window as Window & { webkitSpeechRecognition?: typeof SpeechRecognition }).webkitSpeechRecognition
+  );
+}
+
+/** Derive a short title from the opening chat message: first ~50 chars, cut at a word boundary. */
+function deriveTitle(message: string): string {
+  const trimmed = message.trim();
+  if (trimmed.length <= 50) return trimmed;
+  const cut = trimmed.slice(0, 50);
+  const lastSpace = cut.lastIndexOf(" ");
+  const base = (lastSpace > 0 ? cut.slice(0, lastSpace) : cut).trimEnd();
+  return `${base}…`;
+}
+
 export default function ChatPage() {
   const params = useParams<{ key: string }>();
   const workspaceKey = params.key;
@@ -156,35 +127,56 @@ export default function ChatPage() {
   });
   const pm = agents.data?.find((a) => a.role === "pm" && a.enabled);
 
-  const tickets = useQuery({
-    queryKey: ["tickets", workspace?.id],
-    queryFn: () => listTickets(workspace!.id),
-    enabled: !!workspace && !!pm,
+  const conversations = useQuery({
+    queryKey: ["conversations", workspace?.id],
+    queryFn: () => listConversations(workspace!.id),
+    enabled: !!workspace,
   });
 
   // Opening the chat page marks the workspace's chat as read (clears the header
-  // unread bullet), regardless of which conversation is shown.
+  // unread badge), regardless of which conversation is shown.
   useEffect(() => {
     if (!workspace?.id) return;
     try {
       localStorage.setItem(`chatLastReadAt:${workspace.id}`, new Date().toISOString());
+      localStorage.setItem(`unreadChatCount:${workspace.id}`, "0");
     } catch {
       // ignore
     }
     window.dispatchEvent(new CustomEvent("map:chat-read", { detail: { workspaceId: workspace.id } }));
   }, [workspace?.id]);
 
-  // Conversation shown in the thread panel. `selectedMode` is null until the user
-  // explicitly picks one; while null, the latest conversation is auto-shown
-  // (derived below — opening the chat page jumps straight into the newest chat).
-  const [selectedMode, setSelectedMode] = useState<Mode | null>(null);
+  // While the user is ON the chat page, any new agent chat message (agent
+  // comments or conversation messages, via SSE) re-marks the chat as read — the
+  // page is showing them, so the header badge must stay off even when a reply
+  // arrives mid-view. Listening for the same custom event the header uses keeps
+  // the two in sync without reading SSE directly here.
+  useEffect(() => {
+    if (!workspace?.id) return;
+    const onAgentChat = () => {
+      try {
+        localStorage.setItem(`chatLastReadAt:${workspace.id}`, new Date().toISOString());
+        localStorage.setItem(`unreadChatCount:${workspace.id}`, "0");
+      } catch {
+        // ignore
+      }
+      window.dispatchEvent(new CustomEvent("map:chat-read", { detail: { workspaceId: workspace.id } }));
+    };
+    window.addEventListener("map:agent-chat", onAgentChat);
+    return () => window.removeEventListener("map:agent-chat", onAgentChat);
+  }, [workspace?.id]);
 
-  const conversations = [...(tickets.data ?? [])]
-    .filter((t) => t.assignee_id === pm?.id && !t.parent_id)
-    .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
-  const autoMode: Mode | null =
-    conversations.length > 0 ? { type: "ticket", key: conversations[0].key } : null;
-  const mode: Mode = selectedMode ?? autoMode ?? { type: "draft" };
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Draft mode = "+ New chat" pressed: the composer is shown immediately without a
+  // title/ticket form; the conversation is created on first send, titled from the
+  // message (same flow as the pre-conversation chat page).
+  const [draftMode, setDraftMode] = useState(false);
+
+  const sorted = [...(conversations.data ?? [])].sort((a, b) =>
+    (b.last_message_at ?? b.created_at).localeCompare(a.last_message_at ?? a.created_at),
+  );
+  const activeId = selectedId ?? sorted[0]?.id ?? null;
+  const active = sorted.find((c) => c.id === activeId) ?? null;
 
   if (workspaces.isLoading) {
     return <p className="px-6 py-10 text-sm text-zinc-500">Loading workspace…</p>;
@@ -222,43 +214,74 @@ export default function ChatPage() {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => setSelectedMode({ type: "draft" })}
-            className={mode.type === "draft" ? "bg-zinc-100 dark:bg-zinc-900/60" : ""}
+            onClick={() => setDraftMode(true)}
+            className={draftMode ? "bg-zinc-100 dark:bg-zinc-900/60" : ""}
           >
-            + New conversation
+            + New chat
           </Button>
           <CardContent className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto p-0">
-            {conversations.length === 0 && (
+            {sorted.length === 0 && !draftMode && (
               <p className="px-2 py-2 text-xs text-zinc-500">No conversations yet.</p>
             )}
-            {conversations.map((t) => (
+            {sorted.map((c) => (
               <button
-                key={t.id}
-                onClick={() => setSelectedMode({ type: "ticket", key: t.key })}
+                key={c.id}
+                onClick={() => {
+                  setSelectedId(c.id);
+                  setDraftMode(false);
+                }}
                 className={`flex flex-col gap-1 border-b border-black/5 px-3 py-2 text-left text-xs last:border-b-0 hover:bg-zinc-50 dark:border-white/5 dark:hover:bg-zinc-900/40 ${
-                  mode.type === "ticket" && mode.key === t.key ? "bg-zinc-100 dark:bg-zinc-900/60" : ""
+                  c.id === activeId ? "bg-zinc-100 dark:bg-zinc-900/60" : ""
                 }`}
               >
-                <span className="truncate font-medium text-zinc-800 dark:text-zinc-200">{t.title}</span>
-                <Badge variant="secondary" className="w-fit">
-                  {t.status}
-                </Badge>
+                <span className="flex items-center gap-1.5">
+                  <span className="truncate font-medium text-zinc-800 dark:text-zinc-200">
+                    {c.title}
+                  </span>
+                  {c.linked_ticket_key && (
+                    <Link
+                      href={`/w/${workspaceKey}/ticket/${c.linked_ticket_key}`}
+                      onClick={(e) => e.stopPropagation()}
+                      className="shrink-0 font-mono text-[10px] text-zinc-400 hover:underline"
+                    >
+                      {c.linked_ticket_key}
+                    </Link>
+                  )}
+                </span>
+                <span className="truncate text-zinc-400">
+                  {c.last_message_at
+                    ? formatShortTime(c.last_message_at, workspace.timezone)
+                    : "Belum ada pesan"}
+                </span>
               </button>
             ))}
           </CardContent>
         </Card>
 
-        <ThreadPanel
-          workspaceId={workspace.id}
-          workspaceKey={workspace.key}
-          timezone={workspace.timezone}
-          pm={pm}
-          mode={mode}
-          onCreated={(key) => {
-            setSelectedMode({ type: "ticket", key });
-            queryClient.invalidateQueries({ queryKey: ["tickets", workspace.id] });
-          }}
-        />
+        {active && !draftMode ? (
+          <ThreadPanel
+            key={active.id}
+            workspaceId={workspace.id}
+            workspaceKey={workspace.key}
+            timezone={workspace.timezone}
+            pm={pm}
+            conversation={active}
+          />
+        ) : (
+          <ThreadPanel
+            key="draft"
+            workspaceId={workspace.id}
+            workspaceKey={workspace.key}
+            timezone={workspace.timezone}
+            pm={pm}
+            conversation={null}
+            onCreated={(id) => {
+              setDraftMode(false);
+              setSelectedId(id);
+              queryClient.invalidateQueries({ queryKey: ["conversations", workspace.id] });
+            }}
+          />
+        )}
       </div>
     </div>
   );
@@ -269,36 +292,43 @@ function ThreadPanel({
   workspaceKey,
   timezone,
   pm,
-  mode,
+  conversation,
   onCreated,
 }: {
   workspaceId: string;
   workspaceKey: string;
   timezone: string;
   pm: Agent;
-  mode: Mode;
-  onCreated: (key: string) => void;
+  conversation: Conversation | null;
+  onCreated?: (id: string) => void;
 }) {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState("");
   const [stagedFile, setStagedFile] = useState<File | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  // Whether the user was scrolled near the bottom before the latest content change —
-  // new messages auto-scroll only when true, so scrolling up to read history doesn't
-  // get yanked back down by an incoming message.
   const stickToBottomRef = useRef(true);
   const [hasNewMessage, setHasNewMessage] = useState(false);
-  const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null);
-  const [suggestionsHovered, setSuggestionsHovered] = useState(false);
+  const [previewAttachment, setPreviewAttachment] = useState<ConversationAttachment | null>(null);
   const [attachOpen, setAttachOpen] = useState(false);
+  const [suggestionsHovered, setSuggestionsHovered] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [speechSupported] = useState(() => getSpeechRecognitionCtor() !== undefined);
-  const suggestionsHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attachHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attachOpenTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const suggestionsHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const speechRecognitionRef = useRef<SpeechRecognition | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  function handleSuggestionsEnter() {
+    if (suggestionsHideTimer.current) clearTimeout(suggestionsHideTimer.current);
+    setSuggestionsHovered(true);
+  }
+
+  function handleSuggestionsLeave() {
+    if (suggestionsHideTimer.current) clearTimeout(suggestionsHideTimer.current);
+    suggestionsHideTimer.current = setTimeout(() => setSuggestionsHovered(false), 400);
+  }
 
   useEffect(() => {
     const ctor = getSpeechRecognitionCtor();
@@ -330,16 +360,6 @@ function ThreadPanel({
     };
   }, [isRecording]);
 
-  function handleSuggestionsEnter() {
-    if (suggestionsHideTimer.current) clearTimeout(suggestionsHideTimer.current);
-    setSuggestionsHovered(true);
-  }
-
-  function handleSuggestionsLeave() {
-    if (suggestionsHideTimer.current) clearTimeout(suggestionsHideTimer.current);
-    suggestionsHideTimer.current = setTimeout(() => setSuggestionsHovered(false), 400);
-  }
-
   function handleAttachEnter() {
     if (attachHideTimer.current) clearTimeout(attachHideTimer.current);
     if (attachOpenTimer.current) clearTimeout(attachOpenTimer.current);
@@ -368,45 +388,101 @@ function ThreadPanel({
     setIsRecording(true);
   }
 
-  const isTicket = mode.type === "ticket";
-  const ticketKey = isTicket ? mode.key : null;
-
-  // The backend now publishes live `comment`/`status_change` SSE events (events-context.tsx
-  // invalidates this query on receipt), so this poll is just a redundant safety net for a
-  // missed/dropped SSE message — cheap enough to leave as belt-and-suspenders for MVP chat.
-  const ticket = useQuery({
-    queryKey: ["ticket", ticketKey],
-    queryFn: () => getTicket(ticketKey!),
-    enabled: !!ticketKey,
-    refetchInterval: ticketKey ? 2000 : false,
+  const messages = useQuery({
+    queryKey: ["conversation", conversation?.id],
+    queryFn: () => listConversationMessages(conversation!.id),
+    enabled: !!conversation,
+    refetchInterval: conversation ? 2000 : false,
   });
 
-  const comments: Comment[] = (ticket.data?.comments ?? []).filter((c) => isChatVisible(c));
-  const attachments = ticket.data?.attachments ?? [];
-  const pmIsTyping = (ticket.data?.runs ?? []).some(
-    (r) => r.agent_id === pm.id && (r.status === "running" || r.status === "queued"),
-  );
-  const activeRun = (ticket.data?.runs ?? []).find(
-    (r) => r.agent_id === pm.id && (r.status === "running" || r.status === "queued"),
-  );
+  const attachments = useQuery({
+    queryKey: ["conversation-attachments", conversation?.id],
+    queryFn: () => listConversationAttachments(conversation!.id),
+    enabled: !!conversation,
+  });
 
-  // Live SSE assistant_text chunks for this ticket's PM run. On mount the SSE
-  // stream replays the workspace's event history, so a run already in progress
-  // when the page loaded is covered without any extra fetch.
-  const { events: liveEvents } = useWorkspaceEvents();
+  const agents = useQuery({
+    queryKey: ["agents", workspaceId],
+    queryFn: () => listAgents(workspaceId),
+    enabled: !!workspaceId,
+  });
+  const artifacts = useQuery({
+    queryKey: ["artifacts", workspaceId],
+    queryFn: () => listArtifacts(workspaceId),
+    enabled: !!workspaceId,
+  });
+  const tickets = useQuery({
+    queryKey: ["tickets", workspaceId],
+    queryFn: () => listTickets(workspaceId),
+    enabled: !!workspaceId,
+  });
+
+  const mentionOptions: MentionOption[] = useMemo(() => {
+    const opts: MentionOption[] = (agents.data ?? [])
+      .filter((a) => a.enabled)
+      .map((a) => ({
+        id: `agent-${a.id}`,
+        label: a.name,
+        sublabel: formatAgentName(a.name, a.role),
+        group: "Agents",
+        insert: a.name,
+      }));
+    for (const g of artifacts.data ?? []) {
+      for (const a of g.attachments) {
+        opts.push({
+          id: `artifact-${a.id}`,
+          label: a.filename,
+          sublabel: g.name,
+          group: "Artifacts",
+          insert: a.filename,
+        });
+      }
+    }
+    for (const t of tickets.data ?? []) {
+      opts.push({
+        id: `ticket-${t.id}`,
+        label: t.key,
+        sublabel: t.title,
+        group: "Tickets",
+        insert: t.key,
+      });
+    }
+    return opts;
+  }, [agents.data, artifacts.data, tickets.data]);
 
   const pmLabel = formatAgentName(pm.name, pm.role);
+  const pmAvatar = {
+    template: pm.avatar_template as AvatarTemplate | null,
+    color: pm.avatar_color,
+  };
+
+  // Live SSE assistant_text chunks for this conversation's active chat run.
+  const { events: liveEvents } = useWorkspaceEvents();
+  const activeRun = useQuery({
+    queryKey: ["runs", workspaceId],
+    queryFn: () => listRuns(workspaceId),
+    enabled: !!workspaceId,
+    refetchInterval: 2000,
+  });
+  const chatRuns = (activeRun.data ?? []).filter((r) => r.conversation_id === conversation?.id);
+  const pmIsTyping = chatRuns.some((r) => r.status === "running" || r.status === "queued");
+  const activeRunId = chatRuns.find(
+    (r) => r.status === "running" || r.status === "queued",
+  )?.id;
+
   const transcriptEvents = useMemo(() => {
-    if (!ticketKey || !activeRun) return null;
+    if (!activeRunId) return null;
     return liveEvents
       .filter(
         (e): e is WorkspaceEvent =>
           e.type === "assistant_text" &&
           typeof e.payload.text === "string" &&
-          e.run_id === activeRun.id,
+          e.run_id === activeRunId,
       )
       .sort((a, b) => (a.created_at ?? "").localeCompare(b.created_at ?? ""));
-  }, [liveEvents, activeRun, ticketKey]);
+  }, [liveEvents, activeRunId]);
+
+  const allMessages = messages.data ?? [];
 
   // Opening/switching a conversation always jumps straight to the latest message.
   useEffect(() => {
@@ -415,11 +491,8 @@ function ThreadPanel({
     el.scrollTop = el.scrollHeight;
     stickToBottomRef.current = true;
     setHasNewMessage(false);
-  }, [ticketKey]);
+  }, [conversation?.id]);
 
-  // New messages/typing keep pinned to the bottom while the user hasn't scrolled up
-  // to read history; otherwise hold the scroll position and surface the "new
-  // message" button instead (tracked by handleScroll below).
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -428,7 +501,7 @@ function ThreadPanel({
     } else {
       setHasNewMessage(true);
     }
-  }, [comments.length, transcriptEvents, pmIsTyping]);
+  }, [allMessages.length, transcriptEvents, pmIsTyping]);
 
   function handleScroll() {
     const el = scrollRef.current;
@@ -448,31 +521,25 @@ function ThreadPanel({
 
   const sendMutation = useMutation({
     mutationFn: async ({ message, file }: { message: string; file: File | null }) => {
-      const body = `@${pm.name} ${message}`;
-      let key: string;
-      if (mode.type === "draft") {
-        const newTicket = await createTicket(workspaceId, {
+      // Draft mode: the conversation doesn't exist yet — create it on first send,
+      // titled from the message (same flow as the pre-conversation chat page).
+      let convId = conversation?.id;
+      if (!convId) {
+        const created = await createConversation(workspaceId, {
           title: deriveTitle(message),
-          description: message,
-          assignee_id: pm.id,
-          is_new_epic: true,
         });
-        await updateTicket(newTicket.key, { status: "todo" });
-        key = newTicket.key;
-      } else {
-        key = mode.key;
+        convId = created.id;
       }
-      // Attachments are ticket-level (not per-comment) — the next run picks up
-      // whatever's on the ticket via `-f`, so upload before/independent of the comment.
-      if (file) await uploadAttachment(key, file);
-      await createComment(key, { body });
-      return key;
+      if (file) await uploadConversationAttachment(convId, file);
+      return { convId, message: await postConversationMessage(convId, message) };
     },
-    onSuccess: (key) => {
+    onSuccess: ({ convId }) => {
       setDraft("");
       setStagedFile(null);
-      queryClient.invalidateQueries({ queryKey: ["ticket", key] });
-      if (mode.type === "draft") onCreated(key);
+      queryClient.invalidateQueries({ queryKey: ["conversation", convId] });
+      queryClient.invalidateQueries({ queryKey: ["conversations", workspaceId] });
+      queryClient.invalidateQueries({ queryKey: ["conversation-attachments", convId] });
+      if (conversation === null && onCreated) onCreated(convId);
     },
     onError: (err: unknown) => {
       toast.error(err instanceof ApiError ? err.message : "Failed to send message");
@@ -480,9 +547,11 @@ function ThreadPanel({
   });
 
   const deleteAttachmentMutation = useMutation({
-    mutationFn: (id: string) => deleteAttachment(id),
+    mutationFn: (id: string) => deleteConversationAttachment(id),
     onSuccess: () => {
-      if (ticketKey) queryClient.invalidateQueries({ queryKey: ["ticket", ticketKey] });
+      if (conversation) {
+        queryClient.invalidateQueries({ queryKey: ["conversation-attachments", conversation.id] });
+      }
     },
     onError: (err: unknown) => {
       toast.error(err instanceof ApiError ? err.message : "Failed to remove attachment");
@@ -500,32 +569,52 @@ function ThreadPanel({
     sendMutation.mutate({ message: suggestion.message, file: null });
   }
 
+  function insertMention(insert: string) {
+    const cursor = textareaRef.current?.selectionStart ?? draft.length;
+    const upToCursor = draft.slice(0, cursor);
+    const replaced = upToCursor.replace(/@([a-zA-Z0-9][a-zA-Z0-9-]*)$/, `@${insert} `);
+    const newDraft = replaced + draft.slice(cursor);
+    setDraft(newDraft);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }
+
+  const mentionCatalog = useMemo(
+    () => ({
+      agents: agents.data ?? [],
+      artifacts: (artifacts.data ?? []).flatMap((g) => g.attachments),
+      tickets: tickets.data ?? [],
+    }),
+    [agents.data, artifacts.data, tickets.data],
+  );
+
   return (
     <Card className="flex h-full min-h-0 flex-col gap-2 p-3">
       <div className="relative min-h-0 flex-1">
         <div ref={scrollRef} onScroll={handleScroll} className="h-full overflow-y-auto">
-          {mode.type === "draft" && (
+          {conversation === null && (
             <p className="flex h-full items-center justify-center text-sm text-zinc-400">
               Start a new conversation with the PM…
             </p>
           )}
-          {isTicket && ticket.isLoading && (
+          {conversation !== null && messages.isLoading && (
             <p className="text-sm text-zinc-500">Loading conversation…</p>
           )}
-          {isTicket && ticket.data && (
+          {conversation !== null && !messages.isLoading && allMessages.length === 0 && !pmIsTyping && (
+            <p className="flex h-full items-center justify-center text-sm text-zinc-400">
+              Belum ada pesan. Tulis pesan pertama untuk PM…
+            </p>
+          )}
+          {allMessages.length > 0 && (
             <ChatMessages
-              key={ticketKey ?? "none"}
-              comments={comments}
+              messages={allMessages}
               transcriptEvents={transcriptEvents}
               pmName={pm.name}
               pmLabel={pmLabel}
-              pmAvatar={{
-                template: pm.avatar_template,
-                color: pm.avatar_color,
-              }}
+              pmAvatar={pmAvatar}
               pmIsTyping={pmIsTyping}
               timezone={timezone}
               workspaceKey={workspaceKey}
+              mentionCatalog={mentionCatalog}
             />
           )}
         </div>
@@ -556,9 +645,7 @@ function ThreadPanel({
               disabled={sendMutation.isPending}
               style={{ transitionDelay: `${(SUGGESTIONS.length - 1 - i) * 30}ms` }}
               className={`flex translate-y-2 cursor-pointer items-center gap-1.5 rounded-full border border-black/10 bg-white/60 px-3 py-1.5 text-xs text-zinc-600 opacity-0 shadow-sm backdrop-blur transition-all duration-200 hover:bg-white/90 dark:border-white/10 dark:bg-zinc-900/60 dark:text-zinc-300 dark:hover:bg-zinc-900/90 ${
-                suggestionsHovered
-                  ? "translate-y-0 opacity-100"
-                  : "translate-y-2 opacity-0"
+                suggestionsHovered ? "translate-y-0 opacity-100" : "translate-y-2 opacity-0"
               }`}
             >
               <s.icon className="size-3.5 shrink-0" />
@@ -575,9 +662,9 @@ function ThreadPanel({
         </div>
       </div>
 
-      {isTicket && attachments.length > 0 && (
+      {conversation !== null && attachments.data && attachments.data.length > 0 && (
         <div className="flex flex-wrap gap-1 border-t border-black/5 pt-1.5 dark:border-white/5">
-          {attachments.map((a) => (
+          {attachments.data.map((a) => (
             <div
               key={a.id}
               className="flex items-center gap-0.5 rounded-full border border-black/10 py-0.5 pr-0.5 pl-1.5 text-xs dark:border-white/10"
@@ -591,23 +678,14 @@ function ThreadPanel({
                 <EyeIcon className="size-2.5 shrink-0 text-zinc-500" />
                 <span className="max-w-36 truncate">{a.filename}</span>
               </button>
-              {a.origin === "agent" ? (
-                <span
-                  title="Dipublikasikan agent (artifacts) — tidak bisa dihapus dari chat"
-                  className="rounded-full bg-zinc-100 px-1 py-px text-[10px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
-                >
-                  agent
-                </span>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => deleteAttachmentMutation.mutate(a.id)}
-                  className="rounded-full p-px text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800"
-                  aria-label={`Remove ${a.filename}`}
-                >
-                  <XIcon className="size-2.5" />
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={() => deleteAttachmentMutation.mutate(a.id)}
+                className="rounded-full p-px text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800"
+                aria-label={`Remove ${a.filename}`}
+              >
+                <XIcon className="size-2.5" />
+              </button>
             </div>
           ))}
         </div>
@@ -615,7 +693,13 @@ function ThreadPanel({
 
       {previewAttachment && (
         <AttachmentPreviewDialog
-          attachment={previewAttachment}
+          attachment={{
+            id: previewAttachment.id,
+            filename: previewAttachment.filename,
+            content_type: previewAttachment.content_type,
+            size_bytes: previewAttachment.size_bytes,
+          }}
+          url={conversationAttachmentUrl(previewAttachment.id)}
           onClose={() => setPreviewAttachment(null)}
         />
       )}
@@ -640,9 +724,7 @@ function ThreadPanel({
             </button>
           </div>
         )}
-        <div
-          className="flex items-center gap-2 rounded-[1.75rem] border border-black/10 bg-white/60 p-2 backdrop-blur focus-within:border-zinc-400 dark:border-white/10 dark:bg-zinc-900/60 dark:focus-within:border-zinc-600"
-        >
+        <div className="flex items-center gap-2 rounded-[1.75rem] border border-black/10 bg-white/60 p-2 backdrop-blur focus-within:border-zinc-400 dark:border-white/10 dark:bg-zinc-900/60 dark:focus-within:border-zinc-600">
           <div className="relative">
             <button
               type="button"
@@ -677,22 +759,17 @@ function ThreadPanel({
             </div>
           </div>
 
-          <textarea
-            ref={textareaRef}
+          <MentionAutocomplete
             value={draft}
-            rows={1}
-            onChange={(e) => {
-              setDraft(e.target.value);
-              e.target.style.height = "auto";
-              e.target.style.height = `${e.target.scrollHeight}px`;
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                handleSend();
-              }
-            }}
-            placeholder={mode.type === "draft" ? "Start a new conversation with the PM…" : "Reply to the PM…"}
+            onChange={setDraft}
+            options={mentionOptions}
+            textareaRef={textareaRef}
+            onInsert={insertMention}
+            placeholder={
+              conversation === null
+                ? "Start a new conversation with the PM…"
+                : "Tulis pesan ke PM…"
+            }
             disabled={sendMutation.isPending}
             className="max-h-48 flex-1 resize-none overflow-y-auto border-0 bg-transparent px-2 py-2 text-sm leading-5 text-zinc-900 outline-none placeholder:text-zinc-400 dark:text-zinc-100 dark:placeholder:text-zinc-500"
           />
@@ -737,13 +814,8 @@ function ThreadPanel({
   );
 }
 
-/**
- * Message list for one conversation with the latest-10-first pagination:
- * the 10 newest messages render at the bottom; a "Tampilkan lebih banyak" button
- * above them reveals 10 more (older) messages per click.
- */
 function ChatMessages({
-  comments,
+  messages,
   transcriptEvents,
   pmName,
   pmLabel,
@@ -751,8 +823,9 @@ function ChatMessages({
   pmIsTyping,
   timezone,
   workspaceKey,
+  mentionCatalog,
 }: {
-  comments: Comment[];
+  messages: ConversationMessage[];
   transcriptEvents: WorkspaceEvent[] | null;
   pmName: string;
   pmLabel: string;
@@ -760,43 +833,40 @@ function ChatMessages({
   pmIsTyping: boolean;
   timezone: string;
   workspaceKey: string;
+  mentionCatalog: { agents: { name: string }[]; artifacts: { filename: string }[]; tickets: { key: string }[] };
 }) {
-  const [visibleCount, setVisibleCount] = useState(10);
-  const visible = comments.slice(-visibleCount);
-  const hiddenCount = comments.length - visible.length;
+  const [visibleCount, setVisibleCount] = useState(20);
+  const visible = messages.slice(-visibleCount);
+  const hiddenCount = messages.length - visible.length;
 
   return (
     <div className="flex flex-col gap-3">
-      {comments.length === 0 && !pmIsTyping && transcriptEvents === null && (
-        <p className="text-sm text-zinc-400">No messages yet.</p>
-      )}
       {hiddenCount > 0 && (
         <button
           type="button"
           className="self-center rounded-md border border-black/10 px-3 py-1 text-xs text-zinc-500 hover:bg-zinc-100 dark:border-white/10 dark:hover:bg-zinc-800"
-          onClick={() => setVisibleCount((n) => n + 10)}
+          onClick={() => setVisibleCount((n) => n + 20)}
         >
           Tampilkan lebih banyak ({hiddenCount} pesan lagi)
         </button>
       )}
-      {visible.map((c) => {
-        if (c.is_system) {
+      {visible.map((m) => {
+        if (m.is_system) {
           return (
-            <div key={c.id} className="flex justify-center">
+            <div key={m.id} className="flex justify-center">
               <div className="flex max-w-[85%] flex-col gap-0.5 rounded-lg border border-dashed border-zinc-300 bg-zinc-50 px-3 py-1.5 text-xs text-zinc-500 dark:border-zinc-700 dark:bg-zinc-900/40 dark:text-zinc-400">
                 <p className="flex items-center gap-1.5 text-[10px] font-medium opacity-80">
                   <span>System</span>
-                  <span className="font-normal">{formatShortTime(c.created_at, timezone)}</span>
+                  <span className="font-normal">{formatShortTime(m.created_at, timezone)}</span>
                 </p>
-                <Markdown>{linkifyTicketKeys(c.body, workspaceKey)}</Markdown>
+                <Markdown>{linkifyMentions(m.body, workspaceKey, mentionCatalog)}</Markdown>
               </div>
             </div>
           );
         }
-        const isOwner = c.author_agent_id === null;
-        const text = isOwner ? stripMentionPrefix(c.body, pmName) : c.body;
+        const isOwner = m.author_agent_id === null;
         return (
-          <div key={c.id} className={`flex ${isOwner ? "justify-end" : "justify-start"}`}>
+          <div key={m.id} className={`flex ${isOwner ? "justify-end" : "justify-start"}`}>
             <div
               className={`max-w-[75%] rounded-lg px-3 py-2 text-sm ${
                 isOwner
@@ -807,9 +877,11 @@ function ChatMessages({
               <p className="mb-0.5 flex items-center gap-1.5 text-[10px] font-medium opacity-70">
                 {!isOwner && <AgentAvatar name={pmName} {...pmAvatar} size={14} />}
                 <span>{isOwner ? "You" : pmLabel}</span>
-                <span className="font-normal">{formatShortTime(c.created_at, timezone)}</span>
+                <span className="font-normal">{formatShortTime(m.created_at, timezone)}</span>
               </p>
-              <Markdown invert={isOwner}>{linkifyTicketKeys(text, workspaceKey)}</Markdown>
+              <Markdown invert={isOwner}>
+                {linkifyMentions(m.body, workspaceKey, mentionCatalog)}
+              </Markdown>
             </div>
           </div>
         );
@@ -828,7 +900,7 @@ function ChatMessages({
       ))}
       {pmIsTyping && (
         <div className="flex justify-start">
-          <div className="max-w-[75%] rounded-lg bg-zinc-100 px-3 py-2 text-sm text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+          <div className="rounded-lg bg-zinc-100 px-3 py-2 text-sm text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
             <p className="mb-0.5 flex items-center gap-1.5 text-[10px] font-medium opacity-70">
               <AgentAvatar name={pmName} {...pmAvatar} size={14} />
               <span>{pmLabel}</span>

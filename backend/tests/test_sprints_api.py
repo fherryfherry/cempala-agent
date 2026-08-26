@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.config import settings
 from app.db import session as db_session
 from app.db.models import Base
 from app.db.session import get_session
@@ -106,6 +107,76 @@ def test_update_sprint_goal_and_duration(client, tmp_path):
 def test_update_unknown_sprint_404(client):
     resp = client.patch("/api/sprints/does-not-exist", json={"goal": "x"})
     assert resp.status_code == 404
+
+
+def test_activating_sprint_triggers_runs_for_unfinished_tickets(client, tmp_path, monkeypatch):
+    """Owner request: activating a sprint kicks off runs for all its tickets that
+    still need work and have an assignee. Done tickets are skipped — if everything
+    is done, nothing is triggered."""
+    monkeypatch.setattr(settings, "OPENCODE_BIN", "/nonexistent/opencode-for-tests")
+
+    ws_id = _make_workspace(client, tmp_path)
+    eng = client.post(
+        f"/api/workspaces/{ws_id}/agents",
+        json={"name": "eng-1", "role": "engineer", "model": "m", "tool_kind": "opencode"},
+    ).json()
+    qa = client.post(
+        f"/api/workspaces/{ws_id}/agents",
+        json={"name": "qa-1", "role": "qa", "model": "m", "tool_kind": "opencode"},
+    ).json()
+
+    s1 = client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "Sprint 1"}).json()
+    s2 = client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "Sprint 2"}).json()
+
+    # Ticket A: todo, assigned -> should be triggered.
+    ta = client.post(
+        f"/api/workspaces/{ws_id}/tickets",
+        json={"title": "A", "is_new_epic": True, "assignee_id": eng["id"], "sprint_id": s2["id"]},
+    ).json()
+    # Ticket B: done, assigned -> skipped.
+    tb = client.post(
+        f"/api/workspaces/{ws_id}/tickets",
+        json={"title": "B", "is_new_epic": True, "assignee_id": qa["id"], "sprint_id": s2["id"]},
+    ).json()
+    client.patch(f"/api/tickets/{tb['key']}", json={"status": "done"})
+    # Ticket C: todo, no assignee -> skipped (no agent to run it).
+    client.post(
+        f"/api/workspaces/{ws_id}/tickets",
+        json={"title": "C", "is_new_epic": True, "sprint_id": s2["id"]},
+    )
+
+    resp = client.patch(f"/api/sprints/{s2['id']}", json={"status": "active"})
+    assert resp.status_code == 200, resp.text
+
+    runs = client.get(f"/api/workspaces/{ws_id}/runs").json()
+    assert len(runs) == 1
+    assert runs[0]["ticket_id"] == ta["id"]
+    assert runs[0]["agent_id"] == eng["id"]
+    assert runs[0]["trigger"] == "manual"
+
+
+def test_activating_sprint_with_all_done_triggers_nothing(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "OPENCODE_BIN", "/nonexistent/opencode-for-tests")
+
+    ws_id = _make_workspace(client, tmp_path)
+    eng = client.post(
+        f"/api/workspaces/{ws_id}/agents",
+        json={"name": "eng-1", "role": "engineer", "model": "m", "tool_kind": "opencode"},
+    ).json()
+    s1 = client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "Sprint 1"}).json()
+    s2 = client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "Sprint 2"}).json()
+
+    t = client.post(
+        f"/api/workspaces/{ws_id}/tickets",
+        json={"title": "A", "is_new_epic": True, "assignee_id": eng["id"], "sprint_id": s2["id"]},
+    ).json()
+    client.patch(f"/api/tickets/{t['key']}", json={"status": "done"})
+
+    resp = client.patch(f"/api/sprints/{s2['id']}", json={"status": "active"})
+    assert resp.status_code == 200, resp.text
+
+    runs = client.get(f"/api/workspaces/{ws_id}/runs").json()
+    assert runs == []
 
 
 def test_create_sprint_with_dates_round_trips(client, tmp_path):

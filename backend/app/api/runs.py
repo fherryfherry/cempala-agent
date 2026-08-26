@@ -20,14 +20,16 @@ from app.api.workspaces import _get_workspace_or_404
 from app.core import orchestrator
 from app.core.guardrails import GuardrailBlocked
 from app.db import session as db_session
-from app.db.models import Agent, Event, Routine, Run, Ticket
+from app.db.models import Agent, Conversation, Event, Routine, Run, Ticket
 from app.db.session import get_session
 from app.schemas.run import EventOut, RunCreate, RunDetail, RunOut
 
-# Run statuses a retry is offered for — the two "stopped without a real terminal
-# report" outcomes. `cancelled` (owner-initiated Stop) and `done` are deliberately
-# excluded: those aren't failures to recover from.
-_RETRYABLE_RUN_STATUSES = frozenset({"failed", "interrupted"})
+# Run statuses a retry/resume is offered for — the "stopped without a real terminal
+# report" outcomes. `cancelled` is included (owner-initiated Stop ⇒ Resume), but only
+# when `error` is None: a `cancelled` run with `error` set was killed by a runtime
+# guardrail (timeout/cost), which is a deliberate brake that must not be resumed
+# (ADR-014). `done` is intentionally excluded: it finished, nothing to recover.
+_RETRYABLE_RUN_STATUSES = frozenset({"failed", "interrupted", "cancelled"})
 
 runs_router = APIRouter(prefix="/runs", tags=["runs"])
 ticket_run_router = APIRouter(prefix="/tickets/{key}/run", tags=["runs"])
@@ -74,7 +76,8 @@ async def start_run(key: str, body: RunCreate, session: AsyncSession = Depends(g
 async def retry_run(run_id: str, session: AsyncSession = Depends(get_session)):
     """Re-trigger the same agent on the same ticket a `failed`/`interrupted` run left
 
-    behind. Mechanically identical to pressing "Run" again for that ticket+agent —
+    behind, or re-trigger a `cancelled` run the owner stopped (UI calls this "Resume").
+    Mechanically identical to pressing "Run" again for that ticket+agent —
     `orchestrator.execute()`'s session-continuation lookup (status-agnostic) already
     picks up the old run's `session_id` if one was persisted, so this needs no
     special-casing to "resume" (docs/02-tsd.md §4.2/§4.5).
@@ -92,7 +95,21 @@ async def retry_run(run_id: str, session: AsyncSession = Depends(get_session)):
         raise AppError(
             409,
             "not_retryable",
-            f"run {run_id} has status '{run.status}', not failed/interrupted",
+            f"run {run_id} has status '{run.status}', not failed/interrupted/cancelled",
+        )
+    # A `cancelled` run with `error` set was killed by a runtime guardrail (timeout,
+    # cost), not by the owner pressing Stop — never resume a deliberate brake.
+    if run.status == "cancelled" and run.error is not None:
+        raise AppError(
+            409,
+            "not_retryable",
+            f"run {run_id} was cancelled by a guardrail, not the owner; it cannot be resumed",
+        )
+    if run.ticket_id is None:
+        raise AppError(
+            409,
+            "not_retryable",
+            f"run {run_id} has no ticket (routine/chat run) and cannot be retried",
         )
 
     ticket = await session.get(Ticket, run.ticket_id)
@@ -172,7 +189,16 @@ async def list_runs(
         .outerjoin(Ticket, Run.ticket_id == Ticket.id)
         .where(
             (Ticket.workspace_id == workspace_id)
-            | (Run.routine_id.in_(select(Routine.id).where(Routine.workspace_id == workspace_id)))
+            | (
+                Run.routine_id.in_(
+                    select(Routine.id).where(Routine.workspace_id == workspace_id)
+                )
+            )
+            | (
+                Run.conversation_id.in_(
+                    select(Conversation.id).where(Conversation.workspace_id == workspace_id)
+                )
+            )
         )
     )
     if status is not None:

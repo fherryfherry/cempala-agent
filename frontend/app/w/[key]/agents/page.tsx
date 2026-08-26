@@ -56,11 +56,20 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-const ROLES: Role[] = ["pm", "lead", "engineer", "designer", "qa", "pentester"];
+const ROLES: Role[] = [
+  "pm",
+  "business_analyst",
+  "lead",
+  "system_architect",
+  "engineer",
+  "designer",
+  "qa",
+  "pentester",
+];
 
 const TOOL_KINDS: { value: ToolKind; enabled: boolean }[] = [
   { value: "opencode", enabled: true },
-  { value: "claude", enabled: false },
+  { value: "claude", enabled: true },
   { value: "agy", enabled: false },
   { value: "codex", enabled: false },
 ];
@@ -74,7 +83,12 @@ const TOOL_MODEL_PROVIDERS: Record<ToolKind, string[] | null> = {
   codex: [],
 };
 
+/** `claude` has no `opencode models`-style listing command — its `--model` flag
+ * takes a fixed set of aliases instead of a `provider/model` string. */
+const CLAUDE_MODEL_ALIASES = ["sonnet", "opus", "fable"];
+
 function modelsForTool(toolKind: ToolKind, models: string[]): string[] {
+  if (toolKind === "claude") return CLAUDE_MODEL_ALIASES;
   const providers = TOOL_MODEL_PROVIDERS[toolKind];
   if (!providers) return models;
   return models.filter((m) => providers.some((p) => m.startsWith(`${p}/`)));
@@ -101,7 +115,9 @@ function ModelSelect({
 }) {
   const available = modelsForTool(toolKind, models ?? []);
 
-  if (isError) {
+  // `claude` has its own static alias list — an opencode `/api/models` fetch
+  // failure (isError/isLoading) is irrelevant to it, so skip straight to the picker.
+  if (toolKind !== "claude" && isError) {
     return (
       <>
         <Input
@@ -115,7 +131,7 @@ function ModelSelect({
     );
   }
 
-  if (isLoading) {
+  if (toolKind !== "claude" && isLoading) {
     return (
       <Select value={model} onValueChange={(v) => onModelChange(v ?? "")}>
         <SelectTrigger className="w-full">
@@ -535,6 +551,7 @@ function SquadTemplateDialog({
     onSuccess: ({ created, failed }) => {
       queryClient.invalidateQueries({ queryKey: ["agents", workspaceId] });
       setCreatedCount(created.length);
+      setNames(suggestSlotNames(selected.slots, [...existingNames, ...created]));
       if (failed.length > 0) {
         setError(
           `${failed.length} agent gagal dibuat: ${failed
@@ -681,6 +698,7 @@ function EditAgentDialog({
 }) {
   const queryClient = useQueryClient();
   const [name, setName] = useState(agent.name);
+  const [toolKind, setToolKind] = useState<ToolKind>(agent.tool_kind as ToolKind);
   const [model, setModel] = useState(agent.model);
   const [systemPrompt, setSystemPrompt] = useState(agent.system_prompt ?? "");
   const [avatar, setAvatar] = useState<AvatarSelection>({
@@ -695,6 +713,7 @@ function EditAgentDialog({
     mutationFn: () =>
       updateAgent(agent.id, {
         name,
+        tool_kind: toolKind,
         model,
         system_prompt: systemPrompt || undefined,
         avatar_template: avatar.template,
@@ -738,13 +757,19 @@ function EditAgentDialog({
 
           <div className="flex flex-col gap-1.5">
             <Label>Tool</Label>
-            <Select value={agent.tool_kind} onValueChange={() => {}}>
+            <Select
+              value={toolKind}
+              onValueChange={(v) => {
+                setToolKind(v as ToolKind);
+                setModel(""); // previous model may not exist for the new tool
+              }}
+            >
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 {TOOL_KINDS.map((t) => (
-                  <SelectItem key={t.value} value={t.value} disabled>
+                  <SelectItem key={t.value} value={t.value} disabled={!t.enabled}>
                     {t.value}
                     {!t.enabled ? " (coming soon)" : ""}
                   </SelectItem>
@@ -756,7 +781,7 @@ function EditAgentDialog({
           <div className="flex flex-col gap-1.5">
             <Label>Model</Label>
             <ModelSelect
-              toolKind={agent.tool_kind}
+              toolKind={toolKind}
               model={model}
               onModelChange={setModel}
               models={models.data}

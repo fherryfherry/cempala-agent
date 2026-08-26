@@ -377,7 +377,9 @@ function RoutineFormDialog({
               <Label>Agent</Label>
               <Select value={agentId} onValueChange={(v) => v && setAgentId(v)}>
                 <SelectTrigger>
-                  <SelectValue placeholder="Pilih agent" />
+                  <SelectValue placeholder="Pilih agent">
+                    {agents.find((a) => a.id === agentId)?.name ?? "Pilih agent"}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {agents.map((a) => (

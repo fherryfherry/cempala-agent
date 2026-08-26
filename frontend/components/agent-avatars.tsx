@@ -115,7 +115,9 @@ export function AgentAvatars({
         const agent = rotatedOrder[i];
         return (
           <AgentTooltip key={agent.id} agent={agent}>
-            <span
+            <Link
+              href={`/w/${workspaceKey}/activity?agent=${agent.id}`}
+              title={`${agent.name} (${agent.role}): ${agent.status} — open activity`}
               className={cn(
                 "absolute top-0 flex cursor-pointer items-center justify-center rounded-full bg-background shadow-sm select-none",
                 agent.status === "working" && "animate-pulse",
@@ -136,7 +138,7 @@ export function AgentAvatars({
                 color={agent.avatar_color}
                 size={AVATAR_SIZE}
               />
-            </span>
+            </Link>
           </AgentTooltip>
         );
       })}

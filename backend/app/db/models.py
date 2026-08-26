@@ -55,6 +55,7 @@ class Workspace(Base):
         JSON, nullable=False, default=list
     )
     timezone: Mapped[str] = mapped_column(String, default="Asia/Jakarta", nullable=False)
+    main_branch: Mapped[str] = mapped_column(String, default="main", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
@@ -91,7 +92,17 @@ class Agent(Base):
     )
     name: Mapped[str] = mapped_column(String, nullable=False)
     role: Mapped[str] = mapped_column(
-        Enum("pm", "lead", "engineer", "designer", "qa", "pentester", name="agent_role"),
+        Enum(
+            "pm",
+            "lead",
+            "engineer",
+            "designer",
+            "qa",
+            "pentester",
+            "business_analyst",
+            "system_architect",
+            name="agent_role",
+        ),
         nullable=False,
     )
     model: Mapped[str] = mapped_column(String, nullable=False)
@@ -107,6 +118,65 @@ class Agent(Base):
         default="idle",
         nullable=False,
     )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class Conversation(Base):
+    __tablename__ = "conversation"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    workspace_id: Mapped[str] = mapped_column(
+        String, ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    # Optional context link to a ticket this chat is about (display-only, not a
+    # storage coupling — chat lives in its own tables, ADR: chat != comments).
+    linked_ticket_key: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
+    last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # JSON-serialized {"sprints": [...], "tickets": [...]} drafts, set when the PM
+    # proposes a new sprint while none is active (no active sprint = nothing gets
+    # created until the owner replies with an APPROVAL_RE match in this chat).
+    pending_proposal: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ConversationMessage(Base):
+    __tablename__ = "conversation_message"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    conversation_id: Mapped[str] = mapped_column(
+        String, ForeignKey("conversation.id", ondelete="CASCADE"), nullable=False
+    )
+    # Set for agent/system messages produced by a chat run; NULL for owner messages.
+    run_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("run.id", ondelete="SET NULL"), nullable=True
+    )
+    # NULL = owner message.
+    author_agent_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("agent.id", ondelete="SET NULL"), nullable=True
+    )
+    is_system: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ConversationAttachment(Base):
+    __tablename__ = "conversation_attachment"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    conversation_id: Mapped[str] = mapped_column(
+        String, ForeignKey("conversation.id", ondelete="CASCADE"), nullable=False
+    )
+    message_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("conversation_message.id", ondelete="SET NULL"), nullable=True
+    )
+    filename: Mapped[str] = mapped_column(String, nullable=False)
+    content_type: Mapped[str] = mapped_column(String, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    path: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
@@ -217,6 +287,22 @@ class Ticket(Base):
     )
 
 
+class TicketAutoCheck(Base):
+    """Auto-check backoff state (MAP-050 anti-spam), kept off the `Ticket` row on
+    purpose: any write to `Ticket` — even an unrelated `cost_used` bump — fires
+    `onupdate` on `Ticket.updated_at`, which would reset the same staleness clock
+    this table is meant to slow down.
+    """
+
+    __tablename__ = "ticket_auto_check"
+
+    ticket_id: Mapped[str] = mapped_column(
+        String, ForeignKey("ticket.id", ondelete="CASCADE"), primary_key=True
+    )
+    skip_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_nudge_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class ArtifactGroup(Base):
     __tablename__ = "artifact_group"
 
@@ -285,9 +371,14 @@ class Run(Base):
     __table_args__ = (Index("ix_run_status", "status"),)
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
-    # NULL for routine runs (trigger="routine") — those have no ticket.
+    # NULL for routine runs (trigger="routine") and chat runs (trigger="chat") —
+    # those have no ticket.
     ticket_id: Mapped[str | None] = mapped_column(
         String, ForeignKey("ticket.id", ondelete="CASCADE"), nullable=True
+    )
+    # Set only for chat runs (trigger="chat") — links the run to its Conversation.
+    conversation_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("conversation.id", ondelete="SET NULL"), nullable=True
     )
     agent_id: Mapped[str] = mapped_column(
         String, ForeignKey("agent.id", ondelete="CASCADE"), nullable=False
@@ -300,7 +391,9 @@ class Run(Base):
         nullable=False,
     )
     trigger: Mapped[str] = mapped_column(
-        Enum("manual", "mention", "handoff", "auto", "routine", name="run_trigger"),
+        Enum(
+            "manual", "mention", "handoff", "auto", "routine", "chat", name="run_trigger"
+        ),
         nullable=False,
     )
     # Set only for routine runs — links the run to its Routine for status sync.
@@ -344,6 +437,7 @@ class Event(Base):
             "tool_result",
             "status_change",
             "comment",
+            "conversation_message",
             "handoff",
             "error",
             "run_ended",

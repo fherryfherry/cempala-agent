@@ -225,6 +225,11 @@ function layoutScheduledRows(
     }
     const sprintTickets = allTickets.filter((t) => t.sprint_id === sprint.id);
     const { epics, standalone, endPx } = layoutSprintTickets(sprintTickets, barLeft);
+    // The sprint bar must cover every ticket packed below it: if the tickets'
+    // total estimated duration exceeds the sprint's calendar range (or the sprint
+    // has no dates at all), widen the bar to reach endPx so no ticket spills past
+    // the black block. Keeps the calendar range as the floor otherwise.
+    barWidth = Math.max(barWidth, endPx - barLeft);
     maxRightEdge = Math.max(maxRightEdge, barLeft + barWidth, endPx);
     return { sprint, epics, standalone, barLeft, barWidth, incomplete };
   });

@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -21,10 +21,11 @@ import {
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Markdown } from "@/components/markdown";
 import { AgentAvatar } from "@/components/agent-avatar";
+import { MentionAutocomplete, type MentionOption } from "@/components/mention-autocomplete";
+import { linkifyMentions } from "@/lib/mention-link";
 import { formatTimestamp } from "@/lib/datetime";
 
 const PRIORITY_VARIANT: Record<TicketPriority, "outline" | "secondary" | "destructive" | "default"> = {
@@ -146,6 +147,9 @@ export default function TicketDetailPage() {
             {formatTimestamp(t.updated_at, workspace.timezone)}
           </p>
           <div className="mt-2 flex items-center gap-2">
+            {t.parent_id === null && (
+              <Badge className="bg-violet-600 text-white hover:bg-violet-600">epic</Badge>
+            )}
             <Badge variant={PRIORITY_VARIANT[t.priority]}>{t.priority}</Badge>
             <Badge variant="secondary">{t.status}</Badge>
             {t.category && (
@@ -304,6 +308,7 @@ export default function TicketDetailPage() {
       <CommentsSection
         ticketKey={ticketKey}
         workspaceId={workspace.id}
+        workspaceKey={workspaceKey}
         timezone={workspace.timezone}
         comments={t.comments}
         agentName={agentName}
@@ -315,12 +320,14 @@ export default function TicketDetailPage() {
 function CommentsSection({
   ticketKey,
   workspaceId,
+  workspaceKey,
   timezone,
   comments,
   agentName,
 }: {
   ticketKey: string;
   workspaceId: string;
+  workspaceKey: string;
   timezone: string;
   comments: import("@/lib/api").Comment[];
   agentName: (id: string | null) => string | null;
@@ -328,7 +335,6 @@ function CommentsSection({
   const queryClient = useQueryClient();
   const agents = useQuery({ queryKey: ["agents", workspaceId], queryFn: () => listAgents(workspaceId) });
   const [body, setBody] = useState("");
-  const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [visibleCount, setVisibleCount] = useState(15);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -343,33 +349,37 @@ function CommentsSection({
     },
   });
 
-  const matches =
-    mentionQuery !== null
-      ? (agents.data ?? []).filter((a) =>
-          a.name.toLowerCase().startsWith(mentionQuery.toLowerCase()),
-        )
-      : [];
+  const mentionOptions: MentionOption[] = (agents.data ?? [])
+    .filter((a) => a.enabled)
+    .map((a) => ({
+      id: `agent-${a.id}`,
+      label: a.name,
+      sublabel: a.role,
+      group: "Agents",
+      insert: a.name,
+    }));
+
   const agentOf = (id: string | null) => agents.data?.find((x) => x.id === id);
   const visible = comments.slice(-visibleCount);
   const hiddenCount = comments.length - visible.length;
 
-  function handleChange(value: string) {
-    setBody(value);
-    const cursor = textareaRef.current?.selectionStart ?? value.length;
-    const upToCursor = value.slice(0, cursor);
-    const match = upToCursor.match(/@([a-zA-Z0-9-]*)$/);
-    setMentionQuery(match ? match[1] : null);
-  }
-
   function insertMention(name: string) {
     const cursor = textareaRef.current?.selectionStart ?? body.length;
     const upToCursor = body.slice(0, cursor);
-    const replaced = upToCursor.replace(/@([a-zA-Z0-9-]*)$/, `@${name} `);
+    const replaced = upToCursor.replace(/@([a-zA-Z0-9][a-zA-Z0-9-]*)$/, `@${name} `);
     const newBody = replaced + body.slice(cursor);
     setBody(newBody);
-    setMentionQuery(null);
     requestAnimationFrame(() => textareaRef.current?.focus());
   }
+
+  const mentionCatalog = useMemo(
+    () => ({
+      agents: agents.data ?? [],
+      artifacts: [],
+      tickets: [],
+    }),
+    [agents.data],
+  );
 
   return (
     <Card>
@@ -413,7 +423,9 @@ function CommentsSection({
                   {formatTimestamp(c.created_at, timezone)}
                 </span>
               </div>
-              <Markdown className="mt-1">{c.body}</Markdown>
+              <Markdown className="mt-1">
+                {linkifyMentions(c.body, workspaceKey, mentionCatalog)}
+              </Markdown>
               {c.mentions.length > 0 && (
                 <div className="mt-1 flex gap-1">
                   {c.mentions.map((m) => (
@@ -434,26 +446,15 @@ function CommentsSection({
             if (body.trim()) mutation.mutate();
           }}
         >
-          <Textarea
-            ref={textareaRef}
+          <MentionAutocomplete
             value={body}
-            onChange={(e) => handleChange(e.target.value)}
+            onChange={setBody}
+            options={mentionOptions}
+            textareaRef={textareaRef}
+            onInsert={insertMention}
             placeholder="Write a comment… use @ to mention an agent"
+            className="min-h-20 w-full resize-y rounded-md border border-zinc-200 bg-background px-3 py-2 text-sm outline-none focus:border-zinc-400 dark:border-zinc-800 dark:focus:border-zinc-600"
           />
-          {mentionQuery !== null && matches.length > 0 && (
-            <div className="absolute bottom-full left-0 z-10 mb-1 w-56 rounded-md border border-zinc-200 bg-white py-1 shadow-md dark:border-zinc-800 dark:bg-zinc-900">
-              {matches.map((a) => (
-                <button
-                  key={a.id}
-                  type="button"
-                  className="block w-full px-3 py-1.5 text-left text-sm hover:bg-zinc-100 dark:hover:bg-zinc-800"
-                  onClick={() => insertMention(a.name)}
-                >
-                  {a.name} <span className="text-xs text-zinc-400">({a.role})</span>
-                </button>
-              ))}
-            </div>
-          )}
           <Button type="submit" disabled={mutation.isPending || !body.trim()} className="self-start">
             {mutation.isPending ? "Posting…" : "Post comment"}
           </Button>

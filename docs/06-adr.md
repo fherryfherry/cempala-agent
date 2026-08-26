@@ -128,7 +128,7 @@ re-building the agent loop.
 ## ADR-007 · The adapter pattern is kept even with only one active implementation
 
 **Decision.** The `AgentTool.run(ctx) -> AsyncIterator[Event]` protocol stays, with `OpenCodeTool`
-as the only real implementation and `StubTool` for `claude`/`agy`/`codex`.
+and `ClaudeTool` as real implementations and `StubTool` for `agy`/`codex`.
 
 **Context.** An abstraction with one implementation is usually over-engineering. Here it pays for
 itself in two concrete ways: (a) users explicitly asked for a per-agent tool selection, so the
@@ -138,11 +138,16 @@ not through a special `if` in the orchestrator.
 If not for those, `OpenCodeTool` could simply be called directly.
 
 **Consequences.** The UI shows not-yet-available tools as disabled, not silently failing (MAP-021).
-The current `Event` shape is shaped by opencode's JSON format; a second adapter would likely
-force the protocol to change — that's reasonable and cheap while there are few consumers.
+The `Event`/`AdapterEvent` shape was originally opencode's JSON format, but `ClaudeTool` (the
+second real adapter, shelling out to the `claude` CLI's `--output-format stream-json`) mapped onto
+it without protocol changes — `assistant_text`/`tool_call`/`tool_result`/`error`/`run_ended` turned
+out generic enough for both CLIs. The per-run MCP config *did* need a parallel code path
+(`claude_mcp_config_path` in `mcp_config.py`), since Claude's `--mcp-config` uses a differently
+shaped JSON (`mcpServers: {name: {command, args, env}}`) from opencode's (`mcp: {name: {type,
+command: [...], env}}`).
 
-**Revisit when.** A third adapter arrives, or a year passes without a second one (at that point,
-remove the abstraction).
+**Revisit when.** A third real adapter arrives (`agy`/`codex` still stubbed), or a year passes
+without one (at that point, remove the abstraction).
 
 ---
 
@@ -324,12 +329,16 @@ entity make sense.
 (`core/guardrails.py`) before a `Run` is created — at that point all 6 scheduling paths (manual,
 retry, mention, handoff, auto `tickets[]`, wake-parent-PM) have already passed. Rule: a ticket
 whose `sprint_id` is `NULL` (backlog) or points to a sprint that isn't `status == "active"`
-cannot be run — it gets `blocked` + a system comment, like any other guardrail. **Exemption**: any
-role in `workspace.sprint_creator_roles` (default only `pm`) — those roles are responsible for
-planning sprints, so they must always be able to respond to any ticket (including brand-new
-tickets from chat not yet triaged into any sprint) to do that triage. This guardrail is always
-active, no toggle in `workspace.guardrails`/Settings (owner request: this rule is team working
-policy, not a limit to tune per workspace).
+cannot be run. The run is refused (409 `guardrail_blocked`) with a system comment naming the
+guardrail — but the ticket's **status is never touched**: a ticket outside the active sprint is
+not a failure, it's just not due yet, and an agent must not be able to move any status on it
+(owner request after dogfooding: agents were observed moving such tickets to `blocked` via the
+guardrail's old block-on-trip path). **Exemption**: any role in `workspace.sprint_creator_roles`
+(default only `pm`) — those roles are responsible for planning sprints, so they must always be
+able to respond to any ticket (including brand-new tickets from chat not yet triaged into any
+sprint) to do that triage. This guardrail is always active, no toggle in
+`workspace.guardrails`/Settings (owner request: this rule is team working policy, not a limit
+to tune per workspace).
 
 **Context.** Owner request: the PM decides when the next sprint becomes active (via the existing
 `PATCH /sprints/{id}` mechanism, ADR in [03-agent-design.md](03-agent-design.md) §4); other
@@ -358,6 +367,9 @@ Two alternatives rejected:
 - `core/orchestrator.py::schedule()` now passes `agent.role` and `workspace.sprint_creator_roles`
   to `check_guardrails()` — two new keyword-only parameters, defaulting to `None`/`[]` so other
   callers aren't broken.
+- `schedule()`'s `GuardrailBlocked` handler special-cases `ticket_not_in_active_sprint`: it
+  writes the system comment but skips `_block_ticket()` — no status transition, no
+  `status_change` event. All other guardrails still block the ticket as before.
 - The `_make_ticket` fixture in nearly all orchestrator test files (`test_orchestrator.py`,
   `test_guardrails.py`, `test_handoff.py`, `test_kill_switch.py`, `test_loop_detector.py`,
   `test_run_retry_api.py`, `test_agent_memory_orchestrator.py`) now creates/reuses the
@@ -372,3 +384,85 @@ Two alternatives rejected:
 **Revisit when.** The owner wants other agents (not just `sprint_creator_roles`) to be able to
 respond to tickets outside the active sprint for specific cases (e.g. an urgent hotfix) — at that
 point this guardrail may need a new explicit bypass path, rather than the existing role exemption.
+
+## ADR-014 · Auto-retry failed runs with a re-adapted prompt, not a resume
+
+**Decision.** A *retryable* failed run (missing/malformed ```map block, opencode subprocess
+failure) is retried automatically up to `workspace.guardrails["max_auto_retries"]` (default 3,
+per workspace, editable on the Settings page) before the ticket is blocked. Each retry is a new
+`Run` row (`trigger="auto"`, `parent_run_id` chained to the failed run) scheduled through the
+existing `schedule()` queue, so every attempt persists its own `event` trace, passes through
+all schedule-time guardrails again, and is visible in the live feed like any other run. The
+ticket is NOT blocked between attempts; only when the budget is exhausted does it get blocked,
+with the reason naming `max_auto_retries`.
+
+**Context.** In dogfooding, most failures were format/adaptation problems — the agent finished
+but forgot or malformed its ```map block (MAP-033), or opencode crashed/errored. Those are
+exactly the failures a re-run can fix, and opencode's own continuation session (`-s`) is
+useless for them: the conversation that produced the bad output is the very thing to discard.
+The retry instead rebuilds a fresh prompt (ADR-001's build-prompt contract unchanged) with a
+"PERINGATAN: RUN SEBELUMNYA GAGAL" notice carrying the parent run's `error` and the tail of the
+agent's accumulated `assistant_text` (replayed from the `event` table), plus an instruction to
+re-read the ```map contract and change approach. No `-s` resume.
+
+**Decisions inside the design:**
+- **Retryable failure set is explicit, per call site** — decided in `_finish_run`'s failure
+  branches (`retryable=`), not by string-matching `run.error`. Missing ```map / opencode
+  failures retry; state-machine rejections, runtime guardrail trips (`cancelled`), user stops,
+  and routine runs do not. Never retry a deliberate brake.
+- **Manual Resume is the one exception to "never resume a stop"** — `POST /runs/{id}/retry`
+  also accepts `cancelled` runs with `error=None`, which is exactly an owner-initiated Stop
+  (the UI labels this Resume). It is an explicit owner decision, so it is not "resuming a
+  brake"; the session-continuation lookup (`-s`) already handles the opencode side. A
+  `cancelled` run with `error` set is a runtime guardrail kill and stays non-retryable.
+- **Budget is per (ticket, agent)** — the attempt count walks the `parent_run_id` chain; the
+  chain only exists between auto-retries, so any manual retry (`POST /runs/{id}/retry`) or
+  `trigger="mention"` run breaks it and resets the budget — the same "fresh window on owner
+  intervention" semantics as `loop_reset_at`/`handoff_depth`. Agent B's failures never consume
+  agent A's budget on the same ticket.
+- **No schema change** — reuses `trigger="auto"` + `parent_run_id`. `max_auto_retries=0`
+  restores the pre-MAP fail → block behavior, which keeps the old tests meaningful.
+- **Guardrails still apply to retries** — `max_cost_per_ticket` accumulates failed attempts'
+  cost, so even a 3x retry budget is bounded by the cost brake.
+
+## ADR-014 · Chat is a first-class entity, separate from ticket comments
+
+**Decision.** Chat with the PM lives in its own tables (`conversation`,
+`conversation_message`, `conversation_attachment`) instead of being comments on a
+ticket. Chat runs are no-ticket runs (`Run.ticket_id=NULL`, new `trigger="chat"`,
+`Run.conversation_id`). The PM's reply is the ```map `summary` written into the
+conversation; the two-way follow-up onto real tickets is the ```map `comments[]`
+field (previously routine-only, now also valid in chat runs). Owner comments on
+tickets stay exactly as they were — manual comments on the ticket detail page.
+
+**Context.** The original design reused the epic ticket as the chat container: every
+owner chat message was a `Comment` on a PM-assigned epic, and the ticket detail page
+rendered those comments. That coupling had three problems: (1) chat history polluted
+the ticket's comment thread (and vice versa — ticket comments showed up in the chat
+feed); (2) chat runs were subject to ticket guardrails (`ticket_not_in_active_sprint`,
+`max_cost_per_ticket`, `handoff_depth`) that made no sense for a conversation; (3) the
+"chat" concept was invisible in the data model — no way to list conversations, attach
+files to a chat without attaching them to a ticket, or distinguish a chat message from
+a comment.
+
+**Alternatives rejected.**
+- **Keep comments, add `chat_id` nullable** — less code, but the comment table stays
+  the shared sink for both concepts; the separation is cosmetic, not structural.
+- **Chat runs still on a ticket** — keeps the sprint guardrail problem and the
+  ticket-as-chat-container smell; rejected for the same reasons as the status quo.
+
+**Consequences.**
+- New tables + migration; `run.trigger` gains `"chat"`; `Event.type` gains
+  `"conversation_message"` (SQLite enums are unconstrained VARCHAR, so no ALTER
+  needed).
+- Chat runs only check `max_concurrent_runs` (now counting no-ticket runs too, so a
+  chat run can't sneak past the cap). Failures land as System messages in the
+  conversation — there is no ticket to block.
+- One chat run per conversation at a time: a second owner message while a run is
+  queued/running is persisted and answered by the in-flight run (its prompt includes
+  the full transcript), not scheduled as a second run.
+- Old chat data (comments on epic tickets) is NOT migrated — it stays as ticket
+  comments, readable as history.
+- The `_PM_MENTION_EXTRA_INSTRUCTIONS` exploratory-chat flow (owner chat on a ticket
+  via `@mention`) remains for ticket-scoped conversations; the new chat page is the
+  ticket-free channel.

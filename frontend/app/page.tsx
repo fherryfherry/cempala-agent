@@ -33,7 +33,7 @@ export default function Home() {
   );
 
   const hasWorkspaces = (workspaces.data?.length ?? 0) > 0;
-  const showCreateForm = creating || !hasWorkspaces;
+  const showCreateForm = creating || (!workspaces.isLoading && !hasWorkspaces);
 
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-8 px-6 py-10">

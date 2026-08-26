@@ -16,6 +16,7 @@ from app.db import session as db_session
 from app.db.models import Base, Run, Ticket
 from app.db.session import get_session
 from app.main import app
+from app.schemas.workspace import DEFAULT_GUARDRAILS
 
 
 @pytest.fixture
@@ -57,11 +58,16 @@ def _write_python_binary(path, code):
 
 
 def _make_workspace(client, tmp_path, key="MAP", **overrides):
+    guardrails = overrides.pop("guardrails", None)
     payload = {"name": "Map", "key": key, "repo_path": str(tmp_path)}
     payload.update(overrides)
     resp = client.post("/api/workspaces", json=payload)
     assert resp.status_code == 201, resp.text
-    return resp.json()["id"]
+    ws_id = resp.json()["id"]
+    if guardrails is not None:
+        patch = client.patch(f"/api/workspaces/{ws_id}", json={"guardrails": guardrails})
+        assert patch.status_code == 200, patch.text
+    return ws_id
 
 
 def _make_agent(client, ws_id, role, name):
@@ -194,21 +200,70 @@ def test_retry_done_run_not_retryable_409(client, tmp_path):
 
 
 def test_retry_cancelled_run_not_retryable_409(client, tmp_path):
+    """A `cancelled` run killed by a runtime guardrail (error set) is a deliberate
+    brake — never resumable."""
     ws_id = _make_workspace(client, tmp_path)
     eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
     ticket = _make_ticket(client, ws_id)
 
     run_id = _run_sync(
-        _insert_run(db_session.async_session, ticket_id=ticket["id"], agent_id=eng_id, status="cancelled")
+        _insert_run(
+            db_session.async_session,
+            ticket_id=ticket["id"],
+            agent_id=eng_id,
+            status="cancelled",
+            trigger="auto",
+        )
     )
+    _run_sync(_set_run_error(db_session.async_session, run_id, "max_cost_per_run exceeded"))
 
     resp = client.post(f"/api/runs/{run_id}/retry")
     assert resp.status_code == 409
     assert resp.json()["error"]["code"] == "not_retryable"
 
 
-def test_retry_failed_run_unblocks_ticket_and_completes(client, tmp_path, monkeypatch):
+def test_resume_cancelled_run_completes(client, tmp_path, monkeypatch):
+    """A `cancelled` run stopped by the owner (error None) is resumable — the UI
+    shows this as "Resume". Same mechanics as retry: new run, session continued."""
     ws_id = _make_workspace(client, tmp_path)
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+    ticket = _make_ticket(client, ws_id)
+    _set_status(client, ticket["key"], "in_progress")
+
+    run_id = _run_sync(
+        _insert_run(
+            db_session.async_session,
+            ticket_id=ticket["id"],
+            agent_id=eng_id,
+            status="cancelled",
+            session_id="sess-stop",
+        )
+    )
+
+    script = _write_python_binary(tmp_path / "opencode", _valid_map_script())
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.post(f"/api/runs/{run_id}/retry")
+    assert resp.status_code == 201, resp.text
+    new_run = resp.json()
+    assert new_run["id"] != run_id
+    assert new_run["ticket_id"] == ticket["id"]
+
+    final = _wait_for_run(client, new_run["id"])
+    assert final["status"] == "done", final
+
+
+async def _set_run_error(maker, run_id, error):
+    async with maker() as session:
+        run = await session.get(Run, run_id)
+        run.error = error
+        await session.commit()
+
+
+def test_retry_failed_run_unblocks_ticket_and_completes(client, tmp_path, monkeypatch):
+    ws_id = _make_workspace(
+        client, tmp_path, guardrails={**DEFAULT_GUARDRAILS, "max_auto_retries": 0}
+    )
     eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
     ticket = _make_ticket(client, ws_id)
     _set_status(client, ticket["key"], "todo")
@@ -269,7 +324,9 @@ def test_retry_resumes_prior_session(client, tmp_path, monkeypatch):
     respond, just without a valid ```map block) should have that session_id passed
     to opencode again via `-s` on retry.
     """
-    ws_id = _make_workspace(client, tmp_path)
+    ws_id = _make_workspace(
+        client, tmp_path, guardrails={**DEFAULT_GUARDRAILS, "max_auto_retries": 0}
+    )
     eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
     ticket = _make_ticket(client, ws_id)
     _set_status(client, ticket["key"], "todo")
@@ -302,7 +359,9 @@ def test_retry_resets_stale_handoff_depth_guardrail(client, tmp_path, monkeypatc
     would immediately re-trip that guardrail on a naive `schedule()` retry. Retry
     resets it first (same as PATCH-unblock), so the retry itself succeeds.
     """
-    ws_id = _make_workspace(client, tmp_path)
+    ws_id = _make_workspace(
+        client, tmp_path, guardrails={**DEFAULT_GUARDRAILS, "max_auto_retries": 0}
+    )
     patch_resp = client.patch(
         f"/api/workspaces/{ws_id}", json={"guardrails": {"max_handoff_depth": 1}}
     )

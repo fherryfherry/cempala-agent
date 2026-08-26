@@ -23,6 +23,8 @@ const ROLE_LABELS: Record<Role, string> = {
   designer: "Designer",
   qa: "QA",
   pentester: "Security Reviewer",
+  business_analyst: "Business Analyst",
+  system_architect: "System Architect",
 };
 
 // Common Indonesian first names, used to suggest a natural agent name instead of a
@@ -59,7 +61,8 @@ export function suggestSlotNames(
   });
 }
 
-// Six roles map 1:1 to the six person avatar templates, each with a distinct color.
+// Six person avatar templates exist; the two newest roles reuse a template with a distinct
+// color rather than needing a 7th/8th bust drawn.
 const AVATARS: Record<Role, { avatar_template: AvatarTemplate; avatar_color: string }> = {
   pm: { avatar_template: "person-1", avatar_color: "#10b981" },
   lead: { avatar_template: "person-2", avatar_color: "#0ea5e9" },
@@ -67,6 +70,8 @@ const AVATARS: Record<Role, { avatar_template: AvatarTemplate; avatar_color: str
   designer: { avatar_template: "person-4", avatar_color: "#f59e0b" },
   qa: { avatar_template: "person-5", avatar_color: "#f43f5e" },
   pentester: { avatar_template: "person-6", avatar_color: "#14b8a6" },
+  business_analyst: { avatar_template: "person-3", avatar_color: "#6366f1" },
+  system_architect: { avatar_template: "person-4", avatar_color: "#f97316" },
 };
 
 export const AGENT_TEMPLATES: AgentTemplate[] = [

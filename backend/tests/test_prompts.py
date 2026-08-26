@@ -38,6 +38,78 @@ def test_base_always_present():
     assert "pm-1 (Project Manager)" in prompt
 
 
+def test_base_prompt_forbids_working_non_active_sprint_tickets():
+    prompt = build_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, TICKET)
+    assert "HANYA boleh mengerjakan tiket yang berada di sprint AKTIF" in prompt
+    assert "tiket backlog atau sprint yang belum aktif TIDAK boleh dikerjakan" in prompt
+    assert "status: blocked" in prompt
+
+
+def test_sprint_creator_role_gets_triage_exemption():
+    prompt = build_prompt(
+        _agent("pm-1", "pm"),
+        "/repo",
+        ROSTER,
+        TICKET,
+        sprint_creator_roles={"pm"},
+    )
+    assert "PENGECUALIAN untukmu (kamu penyusun sprint)" in prompt
+    assert "triase/planning" in prompt
+
+
+def test_non_sprint_creator_role_gets_no_exemption():
+    for role in ("lead", "engineer", "designer", "qa", "pentester"):
+        prompt = build_prompt(
+            _agent(f"{role}-1", role),
+            "/repo",
+            ROSTER,
+            TICKET,
+            sprint_creator_roles={"pm"},
+        )
+        assert "PENGECUALIAN untukmu" not in prompt
+
+
+def test_ticket_context_shows_active_sprint():
+    prompt = build_prompt(
+        _agent("eng-1", "engineer"),
+        "/repo",
+        ROSTER,
+        TicketInfo(
+            key="MAP-001",
+            title="Bikin halaman login",
+            status="in_progress",
+            priority="high",
+            description="x",
+            sprint_name="Sprint 1",
+            sprint_active=True,
+        ),
+    )
+    assert "Sprint: Sprint 1 (AKTIF)" in prompt
+
+
+def test_ticket_context_shows_non_active_sprint():
+    prompt = build_prompt(
+        _agent("eng-1", "engineer"),
+        "/repo",
+        ROSTER,
+        TicketInfo(
+            key="MAP-001",
+            title="Bikin halaman login",
+            status="in_progress",
+            priority="high",
+            description="x",
+            sprint_name="Sprint 3",
+            sprint_active=False,
+        ),
+    )
+    assert "Sprint: Sprint 3 (BELUM AKTIF)" in prompt
+
+
+def test_ticket_context_shows_backlog_when_no_sprint():
+    prompt = build_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, TICKET)
+    assert "Sprint: (tidak ada — backlog)" in prompt
+
+
 def test_default_role_block_used_when_no_system_prompt():
     prompt = build_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, TICKET)
     assert DEFAULT_ROLE_PROMPTS["engineer"] in prompt
@@ -81,6 +153,24 @@ def test_tickets_instruction_absent_for_lead_engineer_designer():
         assert "tickets:" not in prompt
 
 
+def test_tickets_instruction_present_for_business_analyst():
+    prompt = build_prompt(_agent("ba-1", "business_analyst"), "/repo", ROSTER, TICKET)
+    assert "tickets:" in prompt
+
+
+def test_tickets_instruction_absent_for_system_architect():
+    prompt = build_prompt(_agent("arch-1", "system_architect"), "/repo", ROSTER, TICKET)
+    assert "tickets:" not in prompt
+    assert "tickets[]" not in prompt
+
+
+def test_default_role_block_present_for_new_roles():
+    prompt_ba = build_prompt(_agent("ba-1", "business_analyst"), "/repo", ROSTER, TICKET)
+    assert DEFAULT_ROLE_PROMPTS["business_analyst"] in prompt_ba
+    prompt_arch = build_prompt(_agent("arch-1", "system_architect"), "/repo", ROSTER, TICKET)
+    assert DEFAULT_ROLE_PROMPTS["system_architect"] in prompt_arch
+
+
 def test_engineer_prompt_never_contains_tickets_instruction_default_and_custom():
     default_prompt = build_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, TICKET)
     custom_prompt = build_prompt(
@@ -116,6 +206,30 @@ def test_anti_loop_present_for_reviewer_roles_with_review_round():
             "JANGAN meminta lagi." in prompt
         )
         assert "status: blocked, dan jelaskan kenapa perbaikannya tidak berhasil." in prompt
+
+
+def test_anti_loop_present_for_system_architect_with_review_round():
+    prompt = build_prompt(
+        _agent("arch-1", "system_architect"),
+        "/repo",
+        ROSTER,
+        TICKET,
+        review_round=2,
+        previous_review_feedback=["Rancangan belum menangani retry."],
+    )
+    assert "Ini review ke-2 untuk tiket ini." in prompt
+
+
+def test_anti_loop_absent_for_business_analyst_even_with_review_round():
+    prompt = build_prompt(
+        _agent("ba-1", "business_analyst"),
+        "/repo",
+        ROSTER,
+        TICKET,
+        review_round=2,
+        previous_review_feedback=["x"],
+    )
+    assert "Ini review ke-" not in prompt
 
 
 def test_anti_loop_absent_for_non_reviewer_roles_even_with_review_round():
@@ -167,9 +281,11 @@ def test_updates_instruction_present_for_pm_qa_pentester():
 
 
 def test_updates_instruction_absent_for_lead_engineer_designer():
-    for role in ("lead", "engineer", "designer"):
+    for role in ("engineer", "designer"):
         prompt = build_prompt(_agent(f"{role}-x", role), "/repo", ROSTER, TICKET)
-        assert "updates:" not in prompt
+        contract_start = prompt.rfind("```map")
+        contract_block = prompt[contract_start:]
+        assert "updates:" not in contract_block
 
 
 def test_previous_run_summaries_included():
@@ -348,7 +464,8 @@ def test_mcp_tools_block_in_normal_prompt():
     prompt = build_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, TICKET)
     assert "list_tickets" in prompt
     assert "post_comment" in prompt
-    assert "sumber kebenaran status tiket" in prompt
+    assert "update_ticket" in prompt
+    assert "updates:" in prompt
 
 
 def test_mcp_tools_block_in_routine_prompt():
@@ -358,7 +475,18 @@ def test_mcp_tools_block_in_routine_prompt():
         _agent("pm-1", "pm"), "/repo", ROSTER, routine_prompt="cek tiket macet"
     )
     assert "list_tickets" in prompt
-    assert "jangan menebak status" in prompt
+    assert "update_ticket" in prompt
+    assert "updates:" in prompt
+
+
+def test_routine_prompt_teaches_at_mention_syntax_in_comments():
+    from app.agents.prompts import build_routine_prompt
+
+    prompt = build_routine_prompt(
+        _agent("pm-1", "pm"), "/repo", ROSTER, routine_prompt="cek tiket macet"
+    )
+    assert '"@lead-1"' in prompt
+    assert "JANGAN pernah memanggil agent dengan `@` di dalam blok" in prompt
 
 
 def test_agent_memory_block_absent_by_default():
@@ -390,6 +518,33 @@ def test_agent_memory_block_appears_before_ticket_context():
     assert prompt.index("Catatan dari pekerjaanmu sebelumnya") < prompt.index("Tiket saat ini:")
 
 
+def test_chat_prompt_teaches_at_mention_syntax_in_comments():
+    from app.agents.prompts import build_chat_prompt
+
+    prompt = build_chat_prompt(
+        _agent("pm-1", "pm"),
+        "/repo",
+        ROSTER,
+        conversation_title="Diskusi fitur",
+        messages=[],
+    )
+    assert '"@lead-1"' in prompt
+    assert "JANGAN pernah memanggil agent dengan `@` di dalam blok" in prompt
+
+
 def test_map_contract_mentions_memory_field():
     prompt = build_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, TICKET)
     assert "memory:" in prompt
+
+
+def test_base_block_teaches_at_mention_syntax_in_text():
+    prompt = build_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, TICKET)
+    assert "@lead-1" in prompt
+    assert "tanpa `@` itu cuma teks biasa" in prompt
+
+
+def test_map_contract_clarifies_no_at_in_mention_field():
+    prompt = build_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, TICKET)
+    assert "mention: [<nama agent dari daftar tim:" in prompt
+    assert "NAMA SAJA, tanpa @" in prompt
+    assert "TANPA tanda `@`" in prompt

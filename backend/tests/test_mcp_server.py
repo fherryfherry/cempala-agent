@@ -166,6 +166,11 @@ def test_mcp_tools_end_to_end(client, tmp_path, monkeypatch):
     assert "diperbarui" in out
     assert client.get(f"/api/tickets/{ticket['key']}").json()["status"] == "todo"
 
+    # delete_ticket (PM can delete; ticket gone)
+    out = asyncio.run(_call("delete_ticket", {"key": ticket["key"]}))
+    assert "dihapus" in out
+    assert client.get(f"/api/tickets/{ticket['key']}").status_code == 404
+
     # memory tools
     out = asyncio.run(_call("create_memory", {"note": "ingat ini"}))
     assert "Memory disimpan" in out
@@ -181,3 +186,33 @@ def test_mcp_tools_end_to_end(client, tmp_path, monkeypatch):
     # error path: unknown ticket
     out = asyncio.run(_call("get_ticket", {"key": "MAP-999"}))
     assert "Gagal" in out
+
+
+def test_ids_resolve_from_cli_args_when_env_missing(monkeypatch):
+    """MAP-048: opencode's MCP launcher may drop the env block of a local config,
+    so the server must also read workspace/agent ids from CLI flags."""
+    import sys
+
+    import app.mcp_server as mcp_mod
+
+    monkeypatch.delenv("MAP_WORKSPACE_ID", raising=False)
+    monkeypatch.delenv("MAP_AGENT_ID", raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["mcp_server.py", "--workspace-id", "ws-1", "--agent-id", "ag-1"],
+    )
+
+    ws, agent = mcp_mod._ids_from_env_or_args()
+    assert ws == "ws-1"
+    assert agent == "ag-1"
+
+
+def test_ids_prefer_env_over_cli(monkeypatch):
+    import app.mcp_server as mcp_mod
+
+    monkeypatch.setenv("MAP_WORKSPACE_ID", "ws-env")
+    monkeypatch.setenv("MAP_AGENT_ID", "ag-env")
+    ws, agent = mcp_mod._ids_from_env_or_args()
+    assert ws == "ws-env"
+    assert agent == "ag-env"

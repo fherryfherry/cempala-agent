@@ -7,6 +7,27 @@ import { toast } from "sonner";
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api";
 
+/** Reads the per-workspace unread chat message count stored by EventsProvider
+ * (header.tsx shows it as the badge on the Chat nav link). */
+export function readUnreadChatCount(workspaceId: string): number {
+  try {
+    const n = Number.parseInt(localStorage.getItem(`unreadChatCount:${workspaceId}`) ?? "", 10);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Increments the unread chat count; called only for genuinely new (non-replayed)
+ * agent chat activity, so the badge stays exact across SSE reconnects. */
+function bumpUnreadChatCount(workspaceId: string): void {
+  try {
+    localStorage.setItem(`unreadChatCount:${workspaceId}`, String(readUnreadChatCount(workspaceId) + 1));
+  } catch {
+    // storage unavailable — badge just won't persist; SSE still works.
+  }
+}
+
 export type EventType =
   | "run_started"
   | "assistant_text"
@@ -15,6 +36,7 @@ export type EventType =
   | "tool_result"
   | "status_change"
   | "comment"
+  | "conversation_message"
   | "handoff"
   | "error"
   | "run_ended";
@@ -72,6 +94,21 @@ export function buildActivityToastMessage(ev: WorkspaceEvent): string | null {
   return null;
 }
 
+/** Second line for a notification dropdown item: comment snippet, or the ticket's title
+ * when it moved status (skipped on creation — the title's already in line 1). */
+function buildNotificationDetail(ev: WorkspaceEvent): string | null {
+  if (ev.type === "comment") {
+    const p = ev.payload as { body_preview?: string };
+    return p.body_preview || null;
+  }
+  if (ev.type === "status_change") {
+    const p = ev.payload as { ticket_title?: string; from?: string | null };
+    if (p.from == null) return null;
+    return p.ticket_title || null;
+  }
+  return null;
+}
+
 const MAX_BUFFER = 200;
 // Separate from MAX_BUFFER: comment/status_change events are a small fraction of the
 // raw stream (assistant_text/tool_call chunks dominate during an active run), so a
@@ -81,6 +118,7 @@ const MAX_NOTIFICATIONS = 100;
 export interface NotificationItem {
   id: string;
   message: string;
+  detail: string | null;
   ticketKey: string | null;
   createdAt: string;
 }
@@ -170,9 +208,10 @@ export function EventsProvider({
           // Unlike the toast below, the bell's history includes replayed-on-connect
           // events too — that's what makes it "history" rather than a second toast.
           const notifTicketKey = typeof ticketKey === "string" ? ticketKey : null;
+          const detail = buildNotificationDetail(ev);
           setNotifications((prev) => [
             ...prev.slice(-(MAX_NOTIFICATIONS - 1)),
-            { id: ev.id, message, ticketKey: notifTicketKey, createdAt },
+            { id: ev.id, message, detail, ticketKey: notifTicketKey, createdAt },
           ]);
 
           // Toast only genuinely new activity: events older than (or equal to) the
@@ -192,14 +231,53 @@ export function EventsProvider({
       if (ev.type === "comment") {
         // Track agent chat activity so the Chat nav link can show an unread bullet
         // (header.tsx reads localStorage; the chat page clears it on view).
-        if (ev.payload?.is_system !== true) {
-          const agentCommentAt = new Date().toISOString();
+        // Use the event's OWN timestamp (not Date.now()): the SSE stream replays
+        // history on (re)connect, and a replay would otherwise stamp "now" and
+        // re-light the bullet even after the chat page cleared it. Also never
+        // regress an existing mark — older replayed events must not overwrite a
+        // newer one.
+        if (ev.payload?.is_system !== true && ev.created_at) {
+          let wrote = false;
           try {
-            localStorage.setItem(`lastAgentChatAt:${workspaceId}`, agentCommentAt);
+            const prev = localStorage.getItem(`lastAgentChatAt:${workspaceId}`);
+            if (!prev || ev.created_at > prev) {
+              localStorage.setItem(`lastAgentChatAt:${workspaceId}`, ev.created_at);
+              wrote = true;
+            }
           } catch {
             // storage unavailable — bullet just won't persist; SSE still works.
           }
-          window.dispatchEvent(new CustomEvent("map:agent-chat", { detail: { workspaceId, at: agentCommentAt } }));
+          if (wrote) {
+            bumpUnreadChatCount(workspaceId);
+            window.dispatchEvent(new CustomEvent("map:agent-chat", { detail: { workspaceId, at: ev.created_at } }));
+          }
+        }
+      }
+      if (ev.type === "conversation_message") {
+        // Chat activity: invalidate the conversation list + the specific
+        // conversation, and mark the workspace chat as unread (same bullet as
+        // agent comments, so the header needs no new key). Same replay-safe
+        // timestamp handling as the comment branch above.
+        scheduleInvalidate(queryClient, ["conversations", workspaceId]);
+        const conversationId = ev.payload?.conversation_id;
+        if (typeof conversationId === "string") {
+          scheduleInvalidate(queryClient, ["conversation", conversationId]);
+        }
+        if (ev.payload?.is_system !== true && ev.created_at) {
+          let wrote = false;
+          try {
+            const prev = localStorage.getItem(`lastAgentChatAt:${workspaceId}`);
+            if (!prev || ev.created_at > prev) {
+              localStorage.setItem(`lastAgentChatAt:${workspaceId}`, ev.created_at);
+              wrote = true;
+            }
+          } catch {
+            // storage unavailable — bullet just won't persist; SSE still works.
+          }
+          if (wrote) {
+            bumpUnreadChatCount(workspaceId);
+            window.dispatchEvent(new CustomEvent("map:agent-chat", { detail: { workspaceId, at: ev.created_at } }));
+          }
         }
       }
       if (ev.type === "run_started" || ev.type === "run_ended") {

@@ -18,10 +18,12 @@ ROLE_LABELS: dict[str, str] = {
     "designer": "Designer",
     "qa": "QA",
     "pentester": "Security Reviewer",
+    "business_analyst": "Business Analyst",
+    "system_architect": "System Architect",
 }
 
 # Reviewer roles get the anti-loop addition (docs/03-agent-design.md §7).
-REVIEWER_ROLES = frozenset({"lead", "qa", "pentester"})
+REVIEWER_ROLES = frozenset({"lead", "qa", "pentester", "system_architect"})
 
 # Default per-role prompt bodies, verbatim from docs/03-agent-design.md §4.
 # Used unless agent.system_prompt overrides them.
@@ -57,6 +59,11 @@ saling terkait, perlu di-reassign — pakai `updates:` buat mencatatnya. Jangan 
 baru untuk hal yang seharusnya jadi update ke tiket yang sudah ada.""",
     "lead": """\
 Kamu Lead Engineer. Tugasmu me-review, bukan mengimplementasikan. Jangan mengubah file.
+
+Kalau tiket ini BELUM ada implementasi (baru requirement dari Business Analyst/PM, belum ada
+`git diff` untuk direview): tentukan pendekatan teknis singkat, lalu assign ke Engineer/Designer/
+System Architect yang paling cocok — status: in_progress, mention agent yang kamu assign.
+Kalau sudah ada implementasi untuk direview, lanjutkan alur review di bawah.
 
 Baca perubahan yang dibuat (`git diff`, lalu baca file terkait).
 Cek: apakah acceptance criteria tiket terpenuhi? Ada bug nyata? Ada yang menduplikasi kode
@@ -118,6 +125,40 @@ Tiap temuan: severity (low/medium/high), file:baris, dampak konkret, perbaikan y
 BERSIH (tak ada high/medium) → status: done, mention PM, summary berisi hasil audit.
 ADA TEMUAN                    → status: in_progress, mention engineer, isi `tickets[]` satu per
                                 temuan high/medium. Temuan low cukup di summary.""",
+    "business_analyst": """\
+Kamu Business Analyst. Kamu TIDAK menulis atau mengubah kode/test/desain teknis. Tugasmu
+memperjelas KEBUTUHAN, bukan solusinya.
+
+1. Baca tiket ini: apakah requirement dan acceptance criteria-nya sudah jelas dan bisa dicek?
+   Kalau belum, lengkapi lewat `summary`/komentar: user story (siapa, ingin apa, kenapa),
+   acceptance criteria yang konkret dan terukur, dan batasan/edge case yang perlu diperhatikan.
+2. Kalau ada kebutuhan bisnis yang belum punya tiket sama sekali (mis. dari hasil diskusi/chat),
+   catat jadi tiket baru lewat `tickets[]` (backlog) — satu tiket per kebutuhan yang berdiri
+   sendiri, judul dan deskripsi bahasa manusia, bukan bahasa teknis.
+3. Requirement sudah jelas dan siap dipecah teknis → status: in_progress, mention Lead Engineer.
+4. Requirement masih ambigu setelah kamu gali (tujuan bisnisnya sendiri tidak jelas) →
+   status: blocked, mention PM, jelaskan pertanyaanmu di summary.
+
+Jangan menentukan solusi teknis (arsitektur, pilihan library, struktur data) — itu urusan Lead
+Engineer/System Architect.""",
+    "system_architect": """\
+Kamu System Architect. Tugasmu merancang, bukan mengimplementasikan. Jangan mengubah file
+kode/test.
+
+1. Baca requirement/acceptance criteria tiket ini dan pola/konvensi arsitektur yang sudah ada
+   di repo sebelum merancang apa pun. Jangan merancang ulang dari nol kalau pola yang sudah ada
+   sudah cukup — reuse dulu.
+2. Tuliskan rancangan teknis: pendekatan/pattern yang dipakai, komponen/modul yang tersentuh,
+   trade-off penting, dan batasan yang harus diikuti saat implementasi. Simpan sebagai file
+   (mis. markdown/diagram) dan deklarasikan lewat `artifacts:` (group mis. "Rancangan
+   Arsitektur"), atau ringkas lewat komentar tiket kalau singkat.
+3. Rancangan sudah cukup jelas untuk mulai diimplementasikan → status: in_progress, mention
+   Engineer (atau Designer, sesuai kebutuhan tiket) yang akan mengimplementasikan.
+4. Dipanggil ulang untuk review rancangan pada implementasi yang sudah berjalan → jelaskan
+   konkret apa yang perlu diperbaiki dan file/komponen mana.
+
+Kamu tidak boleh membuat tiket baru sendiri — kalau perlu tiket teknis baru (spike/tech-debt),
+catat di summary dan minta PM/Lead yang membuatnya.""",
 }
 
 
@@ -135,6 +176,8 @@ class TicketInfo:
     status: str
     priority: str
     description: str = ""
+    sprint_name: str | None = None
+    sprint_active: bool | None = None
 
 
 @dataclass
@@ -153,6 +196,14 @@ class WorkspaceTicketSummary:
     sprint_name: str | None = None
     assignee: str | None = None
     updated_at: str | None = None
+
+
+@dataclass
+class ChatMessageInfo:
+    author: str
+    body: str
+    created_at: str
+    is_system: bool = False
 
 
 def _workspace_tickets_block(tickets: list[WorkspaceTicketSummary]) -> str:
@@ -182,21 +233,43 @@ DAFTAR TIKET DI WORKSPACE INI (menu Board — sumber kebenaran status/umur tiket
 {chr(10).join(lines)}"""
 
 
-def _base_block(agent: AgentInfo, workspace_repo_path: str, team_roster: list[AgentInfo]) -> str:
+def _base_block(
+    agent: AgentInfo,
+    workspace_repo_path: str,
+    team_roster: list[AgentInfo],
+    sprint_creator_roles: set[str] | None = None,
+) -> str:
     roster_lines = "\n".join(
         f"- {member.name} ({ROLE_LABELS.get(member.role, member.role)})" for member in team_roster
     )
+    allowed_sprint_roles = sprint_creator_roles or {"pm"}
+    sprint_rule = (
+        "- Tiket dikerjakan per sprint (timebox kerja). Kamu HANYA boleh mengerjakan tiket yang "
+        "berada di sprint AKTIF saat ini — tiket backlog atau sprint yang belum aktif TIDAK "
+        "boleh dikerjakan. Kalau tiket yang kamu pegang tidak ada di sprint aktif, JANGAN "
+        "kerjakan: status: blocked, sebutkan bahwa tiketnya belum masuk sprint aktif."
+    )
+    if agent.role in allowed_sprint_roles:
+        sprint_rule += (
+            " PENGECUALIAN untukmu (kamu penyusun sprint): kamu boleh merespons tiket di luar "
+            "sprint aktif untuk keperluan triase/planning (menyusun sprint, memecah tiket), "
+            "tapi JANGAN mengerjakan implementasi tiket yang belum aktif."
+        )
     return f"""\
 Kamu adalah {agent.name}, seorang {ROLE_LABELS.get(agent.role, agent.role)} di tim software \
 yang bekerja di repo pada {workspace_repo_path}.
 
 Kamu bekerja lewat sistem tiket. Aturan yang tidak bisa ditawar:
 - Kerjakan HANYA tiket yang diberikan padamu. Jangan mengambil pekerjaan lain.
-- Kalau kamu butuh orang lain, sebut mereka di `mention`. Jangan mengerjakan bagian mereka.
+- Kalau kamu butuh orang lain, sebut mereka di `mention` (nama saja, tanpa @ — itu field
+  handoff). Kalau kamu menyebut rekan di dalam TEKS komentar/`summary`, TULIS dengan `@`
+  persis seperti nama mereka (misal "@lead-1") — tanpa `@` itu cuma teks biasa, bukan
+  mention, dan tidak akan tampil sebagai mention di UI. Jangan mengerjakan bagian mereka.
 - Kalau kamu terjebak atau kekurangan informasi, gunakan status `blocked` dan jelaskan apa yang
   kamu butuhkan. Jangan menebak lalu melanjutkan.
 - Ringkas. `summary` bukan esai.
 - Kalau kamu selesai, berhenti. Jangan mencari pekerjaan tambahan.
+{sprint_rule}
 
 Format penulisan jawabanmu:
 - Selalu terstruktur: pakai pointer/bullet singkat dan sub-judul, jangan paragraf rata yang
@@ -228,10 +301,16 @@ def _ticket_context_block(
     else:
         summaries_str = "(belum ada run sebelumnya)"
 
+    if ticket.sprint_name:
+        sprint_state = "AKTIF" if ticket.sprint_active else "BELUM AKTIF"
+        sprint_line = f"| Sprint: {ticket.sprint_name} ({sprint_state})"
+    else:
+        sprint_line = "| Sprint: (tidak ada — backlog)"
+
     return f"""\
 Tiket saat ini:
 {ticket.key} — {ticket.title}
-Status: {ticket.status} | Prioritas: {ticket.priority}
+Status: {ticket.status} | Prioritas: {ticket.priority} {sprint_line}
 {ticket.description}
 
 Lampiran: {attachments_str}
@@ -261,20 +340,23 @@ Artifacts di workspace ini (menu Artifacts) — baca/cari di sini sebelum membua
 {lines}"""
 
 
-def _mcp_tools_block() -> str:
+def _mcp_tools_block_for_opencode() -> str:
     return """\
-Kamu punya tool MCP untuk berinteraksi dengan sistem tiket (menu Board) — pakai ini untuk
-melihat/mengubah tiket, artifacts, dan memory, BUKAN mencarinya di repo:
-- list_tickets — daftar semua tiket workspace (key, status, prioritas, assignee, waktu update); sumber kebenaran status tiket.
-- get_ticket(key) — detail tiket (deskripsi, komentar, sub-tiket).
-- post_comment(key, body) — tulis komentar follow-up ke tiket.
-- create_ticket(title, description, priority) — buat tiket backlog baru.
-- update_ticket(key, status, priority) — ubah status/prioritas tiket.
-- list_artifacts / read_artifact(attachment_id) — baca file yang sudah dipublikasikan agent.
-- get_memory / create_memory(note) / update_memory(memory_id, note) — catatan memory lintas tiket milikmu.
+Tool MCP ini adalah satu-satunya cara agent BERINTERAKSI DENGAN SISTEM TIKET.
+Tool ini HANYA untuk opencode runs — agent pakai ini untuk baca/tulis data.
+Untuk operasi change (status, sprint, assignee, dll), gunakan blok ```map
+dengan `updates:` — BUKAN update_ticket() tool.
 
-Kalau tugasmu membutuhkan informasi tiket, SELALU pakai tool ini — jangan menebak status
-atau umur tiket."""
+Tool MCP yang tersedia:
+- list_tickets — daftar semua tiket (key, status, prioritas, assignee, sprint, waktu update)
+- get_ticket(key) — detail tiket (deskripsi, komentar, sub-tiket)
+- post_comment(key, body) — tulis komentar follow-up ke tiket
+- create_ticket(title, description, priority) — buat tiket backlog baru
+- delete_ticket(key) — HAPUS permanen; HANYA PM, hanya untuk duplikat/salah buat
+
+JANGAN pakai update_ticket() — tool itu TIDAK support sprint/assignee.
+Untuk UBAH tiket (status, sprint, assignee, priority, duration), SELALU pakai
+`updates:` di blok ```map closing. Itu satu-satunya cara."""
 
 
 def _anti_loop_block(review_round: int, previous_review_feedback: list[str]) -> str | None:
@@ -323,6 +405,13 @@ def _sprint_reuse_rule(existing_sprints: list[str]) -> str:
     sprint is a pure timebox, never a place to put a feature/scope name — that's what
     `epic` is for.
     """
+    status_rule = (
+        "`status` (opsional): `active` untuk mengaktifkan sprint ini (menonaktifkan "
+        "sprint aktif lain, langsung menjalankan tiket-tiketnya), `completed` untuk "
+        "menutupnya (tiket yang belum selesai dipindah ke sprint aktif berikutnya). "
+        "Kosongkan kalau cuma bikin/update sprint tanpa mengubah statusnya — JANGAN "
+        "asumsikan sprint otomatis aktif hanya karena kamu mendeklarasikannya di sini."
+    )
     if existing_sprints:
         sprints_str = "\n".join(f"    - {s}" for s in existing_sprints)
         return (
@@ -330,12 +419,16 @@ def _sprint_reuse_rule(existing_sprints: list[str]) -> str:
             f"    WAJIB pakai nama yang sudah ada (persis) kalau timebox itu masih "
             f"relevan. Sprint HANYA timebox — JANGAN taruh nama fitur/scope di nama "
             f"sprint (itu urusan `epic`); pola nama disarankan 'Sprint 1', 'Sprint 2', "
-            f"dst. `goal` boleh diisi target singkat sprint itu, bukan nama fitur."
+            f"dst. `goal` boleh diisi target singkat sprint itu, bukan nama fitur. "
+            f"`start_date`/`end_date` WAJIB diisi (format YYYY-MM-DD) — ini range "
+            f"tanggal sprint di Timeline; `duration` (estimasi) saja tidak cukup. "
+            f"{status_rule}"
         )
     return (
         "Belum ada sprint di workspace ini. Sprint HANYA timebox (pola nama disarankan "
         "'Sprint 1', 'Sprint 2', dst) — JANGAN taruh nama fitur/scope di nama sprint, "
-        "itu urusan `epic`."
+        "itu urusan `epic`. `start_date`/`end_date` WAJIB diisi (format YYYY-MM-DD) "
+        f"— ini range tanggal sprint di Timeline. {status_rule}"
     )
 
 
@@ -379,8 +472,11 @@ def _map_contract_block(
 sprints:                    # opsional; deklarasikan/update sprint (timebox, BUKAN nama fitur)
   # ATURAN SPRINT: {sprint_rule}
   - name: <nama sprint, mis. "Sprint 1">
+    start_date: <tanggal mulai, YYYY-MM-DD>
+    end_date: <tanggal selesai, YYYY-MM-DD>
     goal: <target/goal singkat sprint ini — bukan nama fitur>
-    duration: <estimasi durasi sprint dalam {unit_label}>"""
+    duration: <estimasi durasi sprint dalam {unit_label}>
+    status: <opsional, active|completed — lihat ATURAN SPRINT>"""
         epic_rule = _epic_reuse_rule(existing_epics)
         tickets_line = f"""
 tickets:                    # opsional; breakdown atau bug/temuan baru
@@ -429,7 +525,7 @@ dan tiket akan diblokir.
 
 ```map
 status: <salah satu dari: {allowed_statuses}>
-mention: [<nama agent dari daftar tim: {mention_names}>]
+mention: [<nama agent dari daftar tim: {mention_names}>]   # handoff: NAMA SAJA, tanpa @
 summary: |
   <apa yang kamu kerjakan, file apa yang tersentuh, dan bukti bahwa itu jalan>{tickets_line}
 artifacts:                  # opsional; file yang kamu hasilkan di repo ini, akan tampil di menu Artifacts
@@ -442,7 +538,13 @@ memory:                     # opsional; catatan singkat yang mau kamu ingat lint
   # dipakai untuk hal yang jangan diulang lagi (kesalahan/kegagalan), bukan ringkasan kerja
   # biasa — summary di atas sudah menutupi itu. Satu kalimat per catatan.
   - <catatan singkat>{artifact_updates_line}
-```"""
+```
+
+ATURAN MENTION:
+- `mention:` di blok ini = handoff: tulis NAMA agent saja, TANPA tanda `@`.
+- Di dalam TEKS `summary` (komentar yang tampil di tiket), kalau kamu menyebut rekan yang
+  harus menindaklanjuti, tulis `@` persis sebelum namanya (misal "@lead-1") — itu yang
+  tampil sebagai mention di UI. Nama tanpa `@` di teks hanya teks biasa."""
 
 
 def build_routine_prompt(
@@ -472,7 +574,7 @@ def build_routine_prompt(
     existing_epics = existing_epics or []
     existing_sprints = existing_sprints or []
 
-    parts = [_base_block(agent, workspace_repo_path, team_roster)]
+    parts = [_base_block(agent, workspace_repo_path, team_roster, sprint_creator_roles)]
 
     role_block = agent.system_prompt.strip() if agent.system_prompt else None
     if not role_block:
@@ -494,7 +596,7 @@ def build_routine_prompt(
 
     # MCP tools (ADR-011) — routine runs are exactly where the agent needs to
     # read the Board and write follow-up comments via tools, not the repo.
-    parts.append(_mcp_tools_block())
+    parts.append(_mcp_tools_block_for_opencode())
 
     parts.append(
         _routine_contract_block(agent, team_roster, allowed_sprint_roles, existing_epics, existing_sprints)
@@ -522,8 +624,11 @@ def _routine_contract_block(
 sprints:                    # opsional; deklarasikan/update sprint (timebox, BUKAN nama fitur)
   # ATURAN SPRINT: {sprint_rule}
   - name: <nama sprint, mis. "Sprint 1">
+    start_date: <tanggal mulai, YYYY-MM-DD>
+    end_date: <tanggal selesai, YYYY-MM-DD>
     goal: <target/goal singkat sprint ini — bukan nama fitur>
-    duration: <estimasi durasi sprint>"""
+    duration: <estimasi durasi sprint>
+    status: <opsional, active|completed — lihat ATURAN SPRINT>"""
         epic_rule = _epic_reuse_rule(existing_epics)
         tickets_line = f"""
 tickets:                    # opsional; tiket backlog baru (status todo, TIDAK otomatis dijalankan)
@@ -579,6 +684,9 @@ ATURAN PENTING:
 - Kamu TIDAK boleh mendeklarasikan `status` atau `mention` — run ini tidak punya tiket.
 - `tickets[]` yang kamu buat jadi tiket backlog (todo) dan TIDAK otomatis dijalankan.
 - `comments:` hanya untuk tiket yang sudah ada di workspace ini.
+- Untuk men-mention agent di TEKS komentar, tulis `@` persis sebelum nama agent (misal
+  "@lead-1"). `mention_names` di bawah adalah daftar nama yang valid — tanpa `@`, nama itu
+  hanya teks biasa. JANGAN pernah memanggil agent dengan `@` di dalam blok ```map.
 - Nama agent yang bisa di-mention di komentar: {mention_names}"""
 
 
@@ -646,7 +754,7 @@ def build_prompt(
     existing_epics = existing_epics or []
     existing_sprints = existing_sprints or []
 
-    parts = [_base_block(agent, workspace_repo_path, team_roster)]
+    parts = [_base_block(agent, workspace_repo_path, team_roster, sprint_creator_roles)]
 
     role_block = agent.system_prompt.strip() if agent.system_prompt else None
     if not role_block:
@@ -658,7 +766,7 @@ def build_prompt(
 
     # MCP tools (ADR-011) — the agent can read/write tickets, artifacts, memory via
     # tools; tell it explicitly so it doesn't try to find ticket state in the repo.
-    parts.append(_mcp_tools_block())
+    parts.append(_mcp_tools_block_for_opencode())
 
     memory_block = _agent_memory_block(agent_memories)
     if memory_block:
@@ -687,6 +795,209 @@ def build_prompt(
             sprint_creator_roles,
             existing_epics,
             existing_sprints,
+        )
+    )
+
+    return "\n\n".join(parts)
+
+
+def _chat_contract_block(
+    agent: AgentInfo,
+    team_roster: list[AgentInfo],
+    allowed_sprint_roles: set[str],
+    existing_epics: list[str] | None = None,
+    existing_sprints: list[str] | None = None,
+    has_active_sprint: bool = True,
+) -> str:
+    """The ```map contract for chat runs: no ticket, so `status`/`mention` are absent.
+
+    `summary` is the reply back to the owner in the chat; `comments:` is the two-way
+    follow-up — comment on other existing tickets when the conversation requires
+    follow-up there. `tickets[]` (backlog, not auto-scheduled) and the rest mirror
+    the routine contract.
+
+    `has_active_sprint=False`: no sprint in the workspace is currently active
+    (the last one finished, or there was never one). Any `sprints:`/`tickets[]`
+    declared here still gets held as a proposal — nothing is created until the
+    owner approves in this same chat (orchestrator.py `_finish_chat_run`) — so
+    the contract tells the agent to phrase `summary` as an ask, not a report.
+    """
+    existing_epics = existing_epics or []
+    existing_sprints = existing_sprints or []
+    mention_names = ", ".join(m.name for m in team_roster)
+    tickets_line = ""
+    if agent.role in ROLES_ALLOWED_TICKETS:
+        sprints_line = ""
+        if agent.role in allowed_sprint_roles:
+            sprint_rule = _sprint_reuse_rule(existing_sprints)
+            sprints_line = f"""
+sprints:                    # opsional; deklarasikan/update sprint (timebox, BUKAN nama fitur)
+  # ATURAN SPRINT: {sprint_rule}
+  - name: <nama sprint, mis. "Sprint 1">
+    start_date: <tanggal mulai, YYYY-MM-DD>
+    end_date: <tanggal selesai, YYYY-MM-DD>
+    goal: <target/goal singkat sprint ini — bukan nama fitur>
+    duration: <estimasi durasi sprint>
+    status: <opsional, active|completed — lihat ATURAN SPRINT>"""
+        epic_rule = _epic_reuse_rule(existing_epics)
+        tickets_line = f"""
+tickets:                    # opsional; tiket backlog baru (status todo, TIDAK otomatis dijalankan)
+  # ATURAN EPIC: {epic_rule}
+  - title: <judul ringkas, bahasa manusia>
+    description: |
+      <detail>
+    assignee: <opsional, nama agent>
+    priority: <low|medium|high|urgent>
+    epic: <opsional, key epic tujuan dari daftar di atas — kosongkan HANYA untuk epic baru>
+    sprint: <opsional, nama sprint dari daftar `sprints` di atas>
+    duration: <opsional, estimasi durasi tiket ini>{sprints_line}"""
+
+    artifact_updates_line = ""
+    if agent.role == "pm":
+        artifact_updates_line = """
+artifact_updates:           # opsional; HANYA PM — rapikan kelompok di menu Artifacts
+  - op: rename
+    group: <nama kelompok lama>
+    to: <nama kelompok baru>
+  - op: merge
+    from: <kelompok sumber>
+    into: <kelompok tujuan>
+  - op: move
+    group: <kelompok asal>
+    file: <nama file>
+    to: <kelompok tujuan>
+  - op: delete
+    group: <kelompok kosong>"""
+
+    no_active_sprint_note = ""
+    if not has_active_sprint and agent.role in allowed_sprint_roles:
+        no_active_sprint_note = (
+            "\n- TIDAK ADA SPRINT AKTIF saat ini. Kalau kamu mau bikin kerjaan baru lewat "
+            "`sprints:`/`tickets:`, deklarasikan seperti biasa — tapi sistem TIDAK langsung "
+            "membuatnya. Sprint dan tiket itu ditahan sebagai proposal sampai owner membalas "
+            'persetujuan ("oke"/"lanjut") di chat ini. Tulis `summary` sebagai USULAN yang '
+            "minta keputusan owner, bukan laporan \"sudah dibuat\"."
+        )
+
+    return f"""\
+Akhiri jawabanmu dengan TEPAT SATU blok berikut. Tanpa blok ini balasanmu dianggap gagal.
+
+```map
+summary: |
+  <balasanmu ke owner di chat — bahasa owner, langsung menjawab pertanyaannya>
+comments:                   # opsional; TINDAK LANJUT ke tiket (dua arah): komen follow-up ke
+  # tiket yang relevan dengan pembahasan chat ini. Isi HANYA kalau ada tindak lanjut
+  # nyata yang perlu tercatat di tiket — jangan dipaksakan kalau murni diskusi.
+  - ticket: <KEY-123>
+    body: |
+      <isi komentar follow-up untuk tiket tersebut>{tickets_line}
+updates:                    # opsional; ubah tiket LAIN yang sudah ada (bukan bikin baru)
+  - ticket: <KEY-123>
+    status: <opsional>
+    priority: <opsional, low|medium|high|urgent>
+    assignee: <opsional, nama agent>
+    sprint: <opsional, pindahkan tiket ini ke sprint lain>
+    duration: <opsional, perbaiki estimasi durasi tiket ini>
+memory:                     # opsional; catatan singkat yang mau kamu ingat lintas tiket
+  - <catatan singkat>{artifact_updates_line}
+```
+
+ATURAN PENTING:
+- Kamu TIDAK boleh mendeklarasikan `status` atau `mention` — run ini tidak punya tiket.
+- `summary` adalah balasan chat ke owner; `comments:` adalah tindak lanjut ke tiket.
+- `comments:` hanya untuk tiket yang sudah ada di workspace ini.
+- `tickets[]` yang kamu buat jadi tiket backlog (todo) dan TIDAK otomatis dijalankan.
+- Untuk men-mention agent di TEKS komentar, tulis `@` persis sebelum nama agent (misal
+  "@lead-1"). `mention_names` di bawah adalah daftar nama yang valid — tanpa `@`, nama itu
+  hanya teks biasa. JANGAN pernah memanggil agent dengan `@` di dalam blok ```map.
+- Nama agent yang bisa di-mention di komentar: {mention_names}{no_active_sprint_note}"""
+
+
+def build_chat_prompt(
+    agent: AgentInfo,
+    workspace_repo_path: str,
+    team_roster: list[AgentInfo],
+    conversation_title: str,
+    messages: list[ChatMessageInfo],
+    attachments: list[str] | None = None,
+    linked_ticket: str | None = None,
+    workspace_tickets: list[WorkspaceTicketSummary] | None = None,
+    artifact_catalog: list[str] | None = None,
+    agent_memories: list[str] | None = None,
+    sprint_creator_roles: set[str] | None = None,
+    existing_epics: list[str] | None = None,
+    existing_sprints: list[str] | None = None,
+    has_active_sprint: bool = True,
+) -> str:
+    """Assemble a chat-run prompt: BASE + role block + chat context (messages,
+    attachments) + workspace tickets + artifact catalog + agent memory + the chat
+    ```map contract (no status/mention; summary + comments[] + actions).
+
+    Chat runs have no ticket: the conversation transcript IS the context, and the
+    owner's latest message is the task. `attachments` are the owner-uploaded files
+    on this conversation, passed to the agent as context (the agent can reference
+    or copy them into a ticket comment if relevant).
+    """
+    agent_memories = agent_memories or []
+    artifact_catalog = artifact_catalog or []
+    sprint_creator_roles = sprint_creator_roles or {"pm"}
+    existing_epics = existing_epics or []
+    existing_sprints = existing_sprints or []
+    attachments = attachments or []
+    messages = messages or []
+
+    parts = [_base_block(agent, workspace_repo_path, team_roster, sprint_creator_roles)]
+
+    role_block = agent.system_prompt.strip() if agent.system_prompt else None
+    if not role_block:
+        role_block = DEFAULT_ROLE_PROMPTS.get(agent.role, "")
+    parts.append(role_block)
+
+    parts.append(
+        "KAMU SEDANG DI CHAT dengan owner workspace (bukan tiket). Owner mengirim pesan "
+        "langsung kepadamu dan menunggu balasanmu di chat."
+    )
+
+    if linked_ticket:
+        parts.append(f"Tiket konteks yang ditautkan owner ke chat ini: {linked_ticket}")
+
+    if attachments:
+        parts.append(
+            "Lampiran dari owner di chat ini (bisa kamu baca dari repo_path — dan kalau "
+            "relevan, sebutkan di komentar tiket follow-up):\n"
+            + "\n".join(f"- {a}" for a in attachments)
+        )
+
+    if messages:
+        transcript = "\n".join(
+            f"- {m.author} ({m.created_at}): {m.body}"
+            for m in messages[-15:]
+        )
+        parts.append(f"Percakapan chat ini sejauh ini (terbaru di bawah):\n{transcript}")
+    else:
+        parts.append("Percakapan chat ini belum ada pesan sebelumnya.")
+
+    if workspace_tickets:
+        parts.append(_workspace_tickets_block(workspace_tickets))
+
+    memory_block = _agent_memory_block(agent_memories)
+    if memory_block:
+        parts.append(memory_block)
+
+    catalog_block = _artifacts_catalog_block(artifact_catalog)
+    if catalog_block:
+        parts.append(catalog_block)
+
+    parts.append(_mcp_tools_block_for_opencode())
+
+    parts.append(
+        _chat_contract_block(
+            agent,
+            team_roster,
+            sprint_creator_roles,
+            existing_epics,
+            existing_sprints,
+            has_active_sprint,
         )
     )
 

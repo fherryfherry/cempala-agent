@@ -3,10 +3,10 @@
 Version 0.2 · MVP
 Companion: [02-tsd.md](02-tsd.md) §4–§6
 
-> **v0.2 changes.** Agents have no tools from us. Each agent is a single opencode process
-> that receives a prompt and returns a result. What used to be a "tool set per role" is now a
-> **set of permissions per role inside the ```map block** — and those permissions are enforced
-> in our code, not trusted to the model.
+> **v0.2 changes.** Agents have no tools from us. Each agent is a single subprocess (`opencode`
+> or `claude`, per the agent's `tool_kind`) that receives a prompt and returns a result. What
+> used to be a "tool set per role" is now a **set of permissions per role inside the ```map
+> block** — and those permissions are enforced in our code, not trusted to the model.
 
 ## 1. Principles
 
@@ -71,7 +71,9 @@ summary: |
 | Role | Allowed `status` | `tickets[]` | Touches code |
 |---|---|---|---|
 | PM | any status except `release` | **yes** (must be approved by owner in chat first; see §4) | no |
+| Business Analyst | any status except `release` | **yes** (backlog from business need) | no |
 | Lead Engineer | any status except `release` | no | no |
+| System Architect | any status except `release` | no | no |
 | Engineer | any status except `release` | no | yes |
 | Designer | any status except `release` | no | yes |
 | QA | any status except `release` | **yes** (bugs) | test files only |
@@ -146,7 +148,7 @@ number (most recent ~20 entries). The owner can view, manually add, and delete n
 incorrect/stale notes.
 
 **`epic` on `tickets[]`** (ADR-012) — open to **all roles** allowed `tickets[]`
-(pm/qa/pentester), same as `artifacts[]`: an optional field containing the key of the target
+(pm/qa/pentester/business_analyst), same as `artifacts[]`: an optional field containing the key of the target
 epic (top-level ticket). An epic is a large feature area in the project that **is used
 repeatedly** as a parent for future feature/story/bug/enhancement tickets — not a single-use
 container per request. The ```map block includes a catalog of existing epics (same pattern as
@@ -210,6 +212,16 @@ Owner chat (tickets that start from chat):
 - The owner approves the plan by replying with an approval word in chat (e.g. "sounds good,
   go").
 - You may message the owner first any time there is something that needs clarification.
+
+Chat page (ticket-free conversations, ADR-014):
+- The Chat page is a separate channel from tickets: the owner's message is the task, your
+  `summary` is the reply back in the chat.
+- Two-way follow-up: when the conversation requires action on a real ticket, write a
+  follow-up comment via `comments[]` (ticket + body) in the same ```map block — the
+  comment lands on that ticket authored by you. Don't force it for pure discussion.
+- `tickets[]` you create from chat become backlog tickets (todo, not auto-scheduled).
+- Owner-uploaded chat attachments are context files; if relevant, reference or copy them
+  into a ticket comment.
 
 If this ticket is an epic (has no sub-tickets yet) and is approved:
 1. Read the repo enough to understand the context (including the document folder convention
@@ -280,10 +292,36 @@ of existing tickets, PM uses `updates:` (not `tickets[]` — that's for new tick
 `sprint`/`duration` field per ticket to change; same as `tickets[].sprint`, sprint names that
 don't exist yet are auto-created (get-or-create).
 
+### Business Analyst (`business_analyst`) — multiple allowed
+
+```
+You are the Business Analyst. You do NOT write or modify code/tests/technical design. Your
+job is to clarify the NEED, not the solution.
+
+1. Read this ticket: is the requirement and its acceptance criteria clear and checkable? If
+   not, fill it in via `summary`/a comment: the user story (who, wants what, why), concrete
+   measurable acceptance criteria, and edge cases/constraints to watch for.
+2. If there's a business need that has no ticket yet at all (e.g. from a discussion/chat),
+   capture it as a new ticket via `tickets[]` (backlog) — one ticket per standalone need,
+   title and description in plain human language, not technical language.
+3. Requirement is clear and ready for technical breakdown → status: in_progress, mention
+   Lead Engineer.
+4. Requirement is still ambiguous after you've dug in (the business goal itself is unclear)
+   → status: blocked, mention PM, state your question in summary.
+
+Don't decide the technical solution (architecture, library choice, data structures) — that's
+Lead Engineer's/System Architect's job.
+```
+
 ### Lead Engineer (`lead`) — one per workspace
 
 ```
 You are the Lead Engineer. Your job is to review, not to implement. Do not modify files.
+
+If this ticket has NO implementation yet (a fresh requirement from Business Analyst/PM, no
+`git diff` to review): decide a short technical approach, then assign it to whichever of
+Engineer/Designer/System Architect fits best — status: in_progress, mention the agent you
+assigned. If there's already an implementation to review, continue the review flow below.
 
 Read the changes that were made (`git diff`, then read the relevant files).
 Check: does the ticket's acceptance criteria get met? Any real bugs? Anything duplicating
@@ -295,6 +333,28 @@ DOESN'T PASS → status: in_progress, mention the engineer who worked on it, sum
 
 Don't ask for style or personal-preference changes. Only things that are truly wrong,
 incomplete, or dangerous.
+```
+
+### System Architect (`system_architect`) — multiple allowed
+
+```
+You are the System Architect. Your job is to design, not to implement. Do not modify
+code/test files.
+
+1. Read this ticket's requirement/acceptance criteria and whatever architecture patterns
+   already exist in the repo before designing anything. Don't design from scratch if an
+   existing pattern already fits — reuse it.
+2. Write the technical design: the approach/pattern used, components/modules touched, the
+   important trade-offs, and the constraints Engineer/Designer must follow during
+   implementation. Save it as a file (e.g. markdown/diagram) and declare it via `artifacts:`
+   (group e.g. "Architecture Design"), or summarize it in a ticket comment if it's short.
+3. Design is clear enough to start implementation → status: in_progress, mention the
+   Engineer (or Designer, depending on the ticket) who will implement it.
+4. Called back to review the design against an implementation already underway → state
+   concretely what needs fixing and which file/component.
+
+You may not create tickets yourself — if a new technical ticket is needed (spike/tech-debt),
+note it in summary and ask PM/Lead to create it.
 ```
 
 ### Engineer (`engineer`) — multiple allowed
@@ -397,9 +457,20 @@ details display it directly, without having to dig through comments.
 
 - Handoffs are triggered by `mention` in the ```map block. Manual owner comments containing
   `@agent` also trigger a run ([02-tsd.md](02-tsd.md) §3).
+- **A handoff moves the assignee.** When `mention` resolves to at least one valid agent
+  (and the ticket is not in a final status), `ticket.assignee_id` follows the handoff:
+  the first valid target becomes the assignee. A fan-out (several mentions in one report)
+  still schedules every target, but the ticket keeps exactly one assignee — the first one.
+  Informational mentions on a final status (`done`/`release`) and `@agent` in comment text
+  do NOT change the assignee; only an actionable ```map `mention:` handoff does.
 - `mention` must contain an **agent name**, not a role — the name list is already in the
   prompt. If the model still writes a role (`qa`), the orchestrator picks the agent `idle`
   with the fewest runs on that ticket; if all are busy, it gets queued.
+- In **comment text** (`summary` body or `comments[]` body), an agent must write `@name`
+  (e.g. `@lead-1`) to make a mention visible in the UI — a bare name is plain prose. The
+  `@name` is recorded as a `comment_mention` row (informational: the UI badge/link) but
+  never schedules a run: the actionable handoff comes from the ```map `mention:` field
+  only, and double-scheduling from one report would bypass handoff guardrails.
 - Unknown names → recorded in the system comment, no run is triggered. If `status` is not
   final and there is no valid mention, the ticket becomes `blocked` (no dangling tickets).
 - An agent cannot mention itself (dropped during parsing).
@@ -414,7 +485,8 @@ details display it directly, without having to dig through comments.
 ## 7. Anti-loop in the prompt
 
 Beyond the guardrails in the code ([02-tsd.md](02-tsd.md) §6), every reviewer prompt (Lead,
-QA, Pentester) gets an extra note if this is not the first review on the ticket:
+QA, Pentester, System Architect) gets an extra note if this is not the first review on the
+ticket:
 
 ```
 This is review #{n} for this ticket. Previous reviews:
@@ -426,7 +498,60 @@ status: blocked, and explain why the fix didn't work.
 
 The code is the brake that matters; the prompt only reduces how often that brake is used.
 
-## 8. Full autonomous flow — example
+## 8. Feature-branch workflow via git-worktree (MAP-055)
+
+Every agent that touches code works in an **isolated git-worktree** per ticket, following
+a two-level branch hierarchy:
+
+### Branch naming
+
+| Branch type | Name format | Created from |
+|---|---|---|
+| Epic | `epic/<slugified-title>-epic` | `main` (once, on first sub-ticket run) |
+| Feature | `feat/<ticket-key>` | `epic/<title>-epic` (or `main` for non-epic tickets) |
+
+### Run-time behavior
+
+- When a ticket run starts, the orchestrator checks whether the ticket has a `parent_id`
+  (epic). If yes and the epic branch doesn't exist yet, it is created from `main`.
+  The feature branch is then created from the epic branch.
+- If the ticket has no parent, the feature branch is created from `main` directly.
+- The opencode subprocess runs in the worktree directory — fully isolated from other
+  concurrent agents on the same repo.
+- The agent commits all work to the feature branch inside the worktree.
+- When the run ends successfully (`status: done`) **and** the agent declared
+  `merge_branch: true` in their ` ```map ` block, the orchestrator automatically:
+  1. `git checkout <merge_into>` in the main repo (`merge_into` = epic branch or `main`)
+  2. `git merge --no-ff feat/{key}`
+  3. `git worktree remove --force .worktrees/feat-{key}/`
+  4. `git branch -d feat/{key}`
+- If the merge fails, the worktree and branch are left intact; a system comment is
+  posted on the ticket noting the failure — the owner can resolve manually.
+- If the agent does **not** declare `merge_branch: true`, the worktree is left open for
+  manual inspection before merging.
+
+The epic branch itself is **never auto-merged to `main`** by this system — that remains a
+manual owner action in the Git menu (or a future `merge_epic: true` field).
+
+### ` ```map ` contract
+
+The ` ```map ` block gains an optional `merge_branch: true/false` field:
+
+```
+```map
+status: done
+mention: [PM]
+summary: |
+  Completed feature X. Tests pass.
+merge_branch: true
+```
+```
+
+Only agents that touch code (Engineer, Designer, QA for test files) would normally set
+this to `true`. Roles that do not modify code (PM, Lead, System Architect, Pentester)
+are free to omit it or set it to `false`.
+
+## 9. Full autonomous flow — example
 
 ```
 Owner creates MAP-001 "Make a login page", assigns to PM, clicks Run

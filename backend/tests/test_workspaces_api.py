@@ -61,9 +61,12 @@ def test_create_workspace_success(client, tmp_path):
         "run_timeout_sec": 1800,
         "max_cost_per_run": 2.0,
         "max_cost_per_ticket": 20.0,
-        "max_handoff_depth": 12,
+        "max_handoff_depth": 1000,
         "loop_threshold": 3,
         "max_concurrent_runs": 3,
+        "max_auto_retries": 3,
+        "auto_check_interval_minutes": 3,
+        "auto_check_stale_minutes": 3,
     }
     assert body["workflow_prompt"] == DEFAULT_WORKFLOW_PROMPT
     assert body["description"] is None

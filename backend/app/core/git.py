@@ -9,7 +9,7 @@ called by the API layer).
 from __future__ import annotations
 
 import os
-import shutil
+import re
 import subprocess
 from dataclasses import dataclass
 from typing import Literal
@@ -17,6 +17,7 @@ from typing import Literal
 GIT_TIMEOUT = 15.0
 DIFF_CAP = 2_000_000
 _READONLY = {"log", "show", "branch", "for-each-ref", "rev-parse", "diff", "diff-tree", "rev-list"}
+_MUTATION = {"checkout", "checkout -b", "branch", "merge", "commit", "worktree"}
 
 
 class GitError(Exception):
@@ -42,6 +43,39 @@ def _run(repo_path: str, *args: str) -> subprocess.CompletedProcess:
     except subprocess.TimeoutExpired:
         raise GitError(f"git command timed out after {GIT_TIMEOUT}s")
     return proc
+
+
+def _run_mutation(repo_path: str, *args: str) -> subprocess.CompletedProcess:
+    """Run a git mutation command (checkout, checkout -b, branch, merge, commit).
+
+    Uses the same allowlist approach as _run() but for mutation commands.
+    """
+    if not args:
+        raise GitError("no git command given")
+    cmd_str = args[0]
+    if cmd_str not in _MUTATION:
+        raise GitError(f"disallowed mutation subcommand: {cmd_str}")
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=GIT_TIMEOUT,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+    except FileNotFoundError:
+        raise GitError("git binary not found on the backend host")
+    except subprocess.TimeoutExpired:
+        raise GitError(f"git command timed out after {GIT_TIMEOUT}s")
+    return proc
+
+
+def run_mutation(repo_path: str, *args: str) -> str:
+    result = _run_mutation(repo_path, *args)
+    if result.returncode != 0:
+        raise GitError("git_mutation_failed", result.stderr.strip() or "git mutation failed")
+    return result.stdout
 
 
 def run_git(repo_path: str, *args: str) -> str:
@@ -443,3 +477,104 @@ def get_commit(repo_path: str, sha: str) -> CommitDetail:
         patch=patch,
         patch_truncated=truncated,
     )
+
+
+# ---------------------------------------------------------------------------
+# Worktree management (feature-branch workflow, MAP-055)
+# ---------------------------------------------------------------------------
+
+def _sanitize_worktree_name(ticket_key: str) -> str:
+    """Turn a ticket key like 'MAP-123' into a safe directory name component."""
+    return ticket_key.lower().replace("-", "_")
+
+
+def _slugify(s: str) -> str:
+    """Turn any string into a valid git branch name component."""
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", s.strip()).lower().strip("-")
+    return slug or "untitled"
+
+
+def _epic_branch_name(epic_title: str) -> str:
+    """Branch name for an epic: epic/<slugified-title>-epic."""
+    return f"epic/{_slugify(epic_title)}-epic"
+
+
+def prepare_worktree(
+    repo_path: str,
+    ticket_key: str,
+    epic_branch: str | None = None,
+    base_branch: str = "main",
+) -> str:
+    """Create a new git-worktree for a ticket's feature branch.
+
+    Returns the absolute path to the worktree directory.
+    The worktree is branched from `epic_branch` if set (epic branch must already exist),
+    otherwise from `base_branch`. If `epic_branch` is set but the branch doesn't exist,
+    it is created first from `base_branch`.
+
+    Worktree path: `.worktrees/feat-{sanitized_key}/` inside `repo_path`.
+    Branch name: `feat/{ticket_key}`.
+
+    Raises GitError if the worktree already exists or branch creation fails.
+    """
+    worktrees_root = os.path.join(repo_path, ".worktrees")
+    safe_name = _sanitize_worktree_name(ticket_key)
+    worktree_path = os.path.join(worktrees_root, f"feat-{safe_name}")
+    branch_name = f"feat/{ticket_key}"
+
+    parent_branch = base_branch
+    if epic_branch:
+        if not _branch_exists(repo_path, epic_branch):
+            _create_branch_from(repo_path, epic_branch, base_branch)
+        parent_branch = epic_branch
+
+    os.makedirs(worktrees_root, exist_ok=True)
+    run_mutation(
+        repo_path, "worktree", "add", "--branch", branch_name, worktree_path, parent_branch
+    )
+    return worktree_path
+
+
+def merge_and_cleanup_worktree(
+    repo_path: str,
+    worktree_path: str,
+    ticket_key: str,
+    merge_into: str = "main",
+) -> None:
+    """Merge the ticket's feature branch and remove the worktree.
+
+    - Switches to `merge_into` in the main repo.
+    - Merges `feat/{ticket_key}` with --no-ff.
+    - Removes the worktree (--force since the agent committed to the feature branch).
+    - Deletes the feature branch.
+    """
+    branch_name = f"feat/{ticket_key}"
+
+    run_mutation(repo_path, "checkout", merge_into)
+    run_mutation(repo_path, "merge", "--no-ff", branch_name)
+    run_mutation(repo_path, "worktree", "remove", "--force", worktree_path)
+    run_mutation(repo_path, "branch", "-d", branch_name)
+
+
+def cleanup_abandoned_worktree(repo_path: str, ticket_key: str) -> None:
+    """Remove a worktree without merging (agent failed or was cancelled).
+
+    Safe to call even if the worktree doesn't exist. The branch is NOT deleted.
+    """
+    try:
+        safe_name = _sanitize_worktree_name(ticket_key)
+        worktree_path = os.path.join(repo_path, ".worktrees", f"feat-{safe_name}")
+        run_mutation(repo_path, "worktree", "remove", "--force", worktree_path)
+    except GitError:
+        pass
+
+
+def _branch_exists(repo_path: str, branch_name: str) -> bool:
+    """Check if a local branch exists."""
+    result = _run(repo_path, "rev-parse", "--verify", f"--quiet", branch_name)
+    return result.returncode == 0
+
+
+def _create_branch_from(repo_path: str, new_branch: str, from_branch: str) -> None:
+    """Create a new branch from an existing branch (without checking it out)."""
+    run_mutation(repo_path, "branch", new_branch, from_branch)

@@ -4,15 +4,23 @@ from typing import Literal
 
 from pydantic import BaseModel, field_validator
 
+from app.schemas.agent import Role
+
 KEY_RE = re.compile(r"^[A-Z]{2,5}$")
 
 DEFAULT_GUARDRAILS = {
     "run_timeout_sec": 1800,
     "max_cost_per_run": 2.0,
     "max_cost_per_ticket": 20.0,
-    "max_handoff_depth": 12,
+    "max_handoff_depth": 1000,
     "loop_threshold": 3,
     "max_concurrent_runs": 3,
+    "max_auto_retries": 3,
+    # Auto-check (MAP-050): how often the built-in scheduler scans for stale
+    # tickets, and how stale (minutes) a ticket must be before the assigned
+    # agent gets nudged to follow up. 0 disables the auto-check entirely.
+    "auto_check_interval_minutes": 3,
+    "auto_check_stale_minutes": 3,
 }
 
 # Default workflow prompt for new workspaces — adapted to this system's actual
@@ -126,7 +134,8 @@ class WorkspaceUpdate(BaseModel):
     workflow_prompt: str | None = None
     time_unit: Literal["hour", "day"] | None = None
     timezone: str | None = None
-    sprint_creator_roles: list[Literal["pm", "lead", "engineer", "designer", "qa", "pentester"]] | None = None
+    sprint_creator_roles: list[Role] | None = None
+    main_branch: str | None = None
 
 
 class WorkspaceOut(BaseModel):
@@ -142,6 +151,7 @@ class WorkspaceOut(BaseModel):
     time_unit: Literal["hour", "day"] = "day"
     timezone: str = "Asia/Jakarta"
     sprint_creator_roles: list[str] = ["pm"]
+    main_branch: str = "main"
     created_at: datetime
 
     model_config = {"from_attributes": True}

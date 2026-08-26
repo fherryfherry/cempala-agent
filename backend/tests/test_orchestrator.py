@@ -20,6 +20,7 @@ from app.db import session as db_session
 from app.db.models import Base
 from app.db.session import get_session
 from app.main import app
+from app.schemas.workspace import DEFAULT_GUARDRAILS
 
 
 @pytest.fixture
@@ -77,12 +78,17 @@ def _write_python_binary(path, code):
     return str(path)
 
 
-def _make_workspace(client, tmp_path, key="MAP"):
+def _make_workspace(client, tmp_path, key="MAP", **overrides):
+    guardrails = overrides.pop("guardrails", None)
     resp = client.post(
-        "/api/workspaces", json={"name": "Map", "key": key, "repo_path": str(tmp_path)}
+        "/api/workspaces", json={"name": "Map", "key": key, "repo_path": str(tmp_path), **overrides}
     )
     assert resp.status_code == 201, resp.text
-    return resp.json()["id"]
+    ws_id = resp.json()["id"]
+    if guardrails is not None:
+        patch = client.patch(f"/api/workspaces/{ws_id}", json={"guardrails": guardrails})
+        assert patch.status_code == 200, patch.text
+    return ws_id
 
 
 def _make_agent(client, ws_id, role, name):
@@ -221,7 +227,9 @@ print(json.dumps({"type": "assistant_text", "text": "I did some stuff but forgot
 
 
 def test_missing_map_block_blocks_ticket_with_tail_output(client, tmp_path, monkeypatch):
-    ws_id = _make_workspace(client, tmp_path)
+    ws_id = _make_workspace(
+        client, tmp_path, guardrails={**DEFAULT_GUARDRAILS, "max_auto_retries": 0}
+    )
     eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
     ticket = _make_ticket(client, ws_id)
     _set_status(client, ticket["key"], "todo")
@@ -247,7 +255,9 @@ def test_missing_map_block_blocks_ticket_with_tail_output(client, tmp_path, monk
 
 
 def test_nonzero_exit_blocks_ticket_and_fails_run(client, tmp_path, monkeypatch):
-    ws_id = _make_workspace(client, tmp_path)
+    ws_id = _make_workspace(
+        client, tmp_path, guardrails={**DEFAULT_GUARDRAILS, "max_auto_retries": 0}
+    )
     eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
     ticket = _make_ticket(client, ws_id)
     _set_status(client, ticket["key"], "todo")
@@ -950,7 +960,9 @@ def test_successful_report_publishes_comment_and_status_change_events(
 
 
 def test_blocked_run_publishes_comment_event(client, tmp_path, monkeypatch):
-    ws_id = _make_workspace(client, tmp_path)
+    ws_id = _make_workspace(
+        client, tmp_path, guardrails={**DEFAULT_GUARDRAILS, "max_auto_retries": 0}
+    )
     eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
     ticket = _make_ticket(client, ws_id)
     _set_status(client, ticket["key"], "todo")
@@ -1066,6 +1078,90 @@ def test_pm_tickets_with_sprint_creates_and_links_sprint(client, tmp_path, monke
     assert child["duration_estimate"] == 0.5
 
 
+_PM_ACTIVATE_SPRINT_SCRIPT = '''
+import json
+text = """moving to the next sprint
+
+```map
+status: in_progress
+mention: []
+summary: |
+  Sprint 2 dibuat dan diaktifkan.
+sprints:
+  - name: "Sprint 2"
+    status: active
+```
+"""
+print(json.dumps({"type": "assistant_text", "text": text, "session_id": "sess-activate"}))
+'''
+
+
+def test_pm_sprint_status_active_activates_and_demotes_current(client, tmp_path, monkeypatch):
+    """PM declares `status: active` on a NEW sprint while another is already
+    active — previously this had no effect at all (sprint status was an
+    owner-only manual PATCH action); the PM must actually be able to move the
+    team to the next sprint through its own ```map report."""
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    epic = _make_ticket(client, ws_id, "Epic")  # bootstraps "Sprint 0" active
+    _set_status(client, epic["key"], "todo")
+    _set_status(client, epic["key"], "in_progress")
+
+    script = _write_python_binary(tmp_path / "opencode", _PM_ACTIVATE_SPRINT_SCRIPT)
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    run = client.post(f"/api/tickets/{epic['key']}/run", json={"agent_id": pm_id}).json()
+    _wait_for_run(client, run["id"])
+
+    sprints = {s["name"]: s for s in client.get(f"/api/workspaces/{ws_id}/sprints").json()}
+    assert sprints["Sprint 2"]["status"] == "active"
+    assert sprints["Sprint 0"]["status"] == "planned"
+
+
+_PM_COMPLETE_SPRINT_SCRIPT = '''
+import json
+text = """closing the sprint
+
+```map
+status: in_progress
+mention: []
+summary: |
+  Sprint 0 sudah ditutup.
+sprints:
+  - name: "Sprint 0"
+    status: completed
+```
+"""
+print(json.dumps({"type": "assistant_text", "text": text, "session_id": "sess-complete"}))
+'''
+
+
+def test_pm_sprint_status_completed_closes_and_carries_over_tickets(
+    client, tmp_path, monkeypatch
+):
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    epic = _make_ticket(client, ws_id, "Epic")  # bootstraps "Sprint 0" active
+    unfinished = _make_ticket(client, ws_id, "Still open")
+    _set_status(client, epic["key"], "todo")
+    _set_status(client, epic["key"], "in_progress")
+
+    script = _write_python_binary(tmp_path / "opencode", _PM_COMPLETE_SPRINT_SCRIPT)
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    run = client.post(f"/api/tickets/{epic['key']}/run", json={"agent_id": pm_id}).json()
+    _wait_for_run(client, run["id"])
+
+    sprints = {s["name"]: s for s in client.get(f"/api/workspaces/{ws_id}/sprints").json()}
+    assert sprints["Sprint 0"]["status"] == "completed"
+
+    # Unfinished ticket left in "Sprint 0" carried over (no other sprint to carry
+    # into here -> backlog, sprint_id cleared) rather than staying stuck in a
+    # closed sprint.
+    still_open = client.get(f"/api/tickets/{unfinished['key']}").json()
+    assert still_open["sprint_id"] is None
+
+
 def _tickets_with_epic_script(epic_key: str) -> str:
     return f'''
 import json
@@ -1152,6 +1248,58 @@ def test_tickets_epic_field_unknown_key_skipped_with_note(client, tmp_path, monk
     detail = client.get(f"/api/tickets/{working_ticket['key']}").json()
     bodies = [c["body"] for c in detail["comments"]]
     assert any("epic tujuan diabaikan" in b and "NOPE-999" in b for b in bodies)
+
+
+_TICKETS_FROM_ENGINEER_SCRIPT = '''
+import json
+text = """filing a bug I found
+
+```map
+status: in_progress
+mention: []
+summary: |
+  Sudah kubuatkan tiket baru untuk temuan ini.
+tickets:
+  - title: "Should never be created"
+    priority: high
+```
+"""
+print(json.dumps({"type": "assistant_text", "text": text, "session_id": "sess-eng"}))
+'''
+
+
+def test_tickets_from_unauthorized_role_dropped_reason_surfaced_to_ticket_and_epic(
+    client, tmp_path, monkeypatch
+):
+    """`engineer` is not in ROLES_ALLOWED_TICKETS (report.py) — report.py already
+    drops `tickets:` and computes why, but nothing used to read that reason: the
+    agent's own `summary` ("sudah kubuatkan tiket baru") was the only account
+    posted, silently misrepresenting what happened. Must now get a system comment
+    on the child AND mirrored to the epic (owner's PM chat)."""
+    ws_id = _make_workspace(client, tmp_path)
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+    epic = _make_ticket(client, ws_id, "Epic")
+    child = _make_ticket(client, ws_id, "Child", parent_id=epic["id"])
+    _set_status(client, child["key"], "todo")
+    _set_status(client, child["key"], "in_progress")
+
+    script = _write_python_binary(tmp_path / "opencode", _TICKETS_FROM_ENGINEER_SCRIPT)
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    run = client.post(f"/api/tickets/{child['key']}/run", json={"agent_id": eng_id}).json()
+    _wait_for_run(client, run["id"])
+
+    # Nothing was actually created, despite the agent's summary claiming otherwise.
+    tickets = client.get(f"/api/workspaces/{ws_id}/tickets").json()
+    assert {t["title"] for t in tickets} == {"Epic", "Child"}
+
+    child_detail = client.get(f"/api/tickets/{child['key']}").json()
+    child_system = [c["body"] for c in child_detail["comments"] if c["is_system"]]
+    assert any("tickets" in b and "engineer" in b for b in child_system)
+
+    epic_detail = client.get(f"/api/tickets/{epic['key']}").json()
+    epic_system = [c["body"] for c in epic_detail["comments"] if c["is_system"]]
+    assert any("tickets" in b and "engineer" in b for b in epic_system)
 
 
 def test_tickets_without_epic_from_child_ticket_attaches_to_same_epic(
@@ -1687,9 +1835,11 @@ def test_pm_tickets_from_child_mirrors_system_message_to_epic_chat(
 def test_blocked_child_mirrors_system_notice_with_reason_to_epic_chat(
     client, tmp_path, monkeypatch
 ):
-    """A blocked/failed child must reach the owner's epic chat with the block reason,
+    """    A blocked/failed child must reach the owner's epic chat with the block reason,
     so the owner is told what happened instead of discovering it by opening the child."""
-    ws_id = _make_workspace(client, tmp_path)
+    ws_id = _make_workspace(
+        client, tmp_path, guardrails={**DEFAULT_GUARDRAILS, "max_auto_retries": 0}
+    )
     eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
     epic = _make_ticket(client, ws_id, "Epic")
     child = _make_ticket(client, ws_id, "Child", parent_id=epic["id"])
@@ -1718,7 +1868,9 @@ def test_blocked_child_mirrors_system_notice_with_reason_to_epic_chat(
 def test_failed_child_mirrors_system_notice_to_epic_chat(client, tmp_path, monkeypatch):
     """Nonzero-exit (opencode error) on a child -> failed -> blocked: the epic chat
     must get the System notice with the stderr excerpt."""
-    ws_id = _make_workspace(client, tmp_path)
+    ws_id = _make_workspace(
+        client, tmp_path, guardrails={**DEFAULT_GUARDRAILS, "max_auto_retries": 0}
+    )
     eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
     epic = _make_ticket(client, ws_id, "Epic")
     child = _make_ticket(client, ws_id, "Child", parent_id=epic["id"])
@@ -1747,7 +1899,9 @@ exit 1""",
 def test_top_level_blocked_no_duplicate_epic_notice(client, tmp_path, monkeypatch):
     """Blocking a top-level ticket must NOT mirror an extra comment onto itself —
     its own system comment IS the chat message (no duplication)."""
-    ws_id = _make_workspace(client, tmp_path)
+    ws_id = _make_workspace(
+        client, tmp_path, guardrails={**DEFAULT_GUARDRAILS, "max_auto_retries": 0}
+    )
     eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
     ticket = _make_ticket(client, ws_id)
     _set_status(client, ticket["key"], "todo")

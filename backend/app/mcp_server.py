@@ -9,6 +9,13 @@ just a thin proxy. It binds nothing: stdio transport only, no TCP socket.
 Env:
   MAP_API_BASE       base URL of the backend API (default http://127.0.0.1:8000/api)
   MAP_WORKSPACE_ID   workspace whose tickets these tools operate on
+  MAP_AGENT_ID       agent on whose behalf tools write (comments/memory/ticket edits)
+
+The workspace/agent ids are ALSO accepted as CLI flags (`--workspace-id`,
+`--agent-id`) as a fallback: opencode's MCP launcher may not forward the `env`
+block of a local config to the subprocess, and without the agent id every MCP
+comment would be attributed to the owner (and, being "human-authored", would
+trigger mention runs — a real incident, see MAP-048).
 
 No auth (ADR-005): the backend binds 127.0.0.1 and this server is only ever
 spawned by the backend itself for a run it already authorizes.
@@ -16,6 +23,7 @@ spawned by the backend itself for a run it already authorizes.
 
 from __future__ import annotations
 
+import argparse
 import os
 from typing import Any
 
@@ -23,8 +31,26 @@ import httpx
 from mcp.server.mcpserver import MCPServer
 
 API_BASE = os.environ.get("MAP_API_BASE", "http://127.0.0.1:8000/api")
-WORKSPACE_ID = os.environ.get("MAP_WORKSPACE_ID", "")
-AGENT_ID = os.environ.get("MAP_AGENT_ID", "")
+
+
+def _ids_from_env_or_args() -> tuple[str, str]:
+    """(workspace_id, agent_id) from env, falling back to CLI flags.
+
+    The env block in the per-run opencode.json MCP config is the primary channel;
+    CLI flags cover the case where opencode drops the env block when spawning the
+    subprocess (observed: MCP comments landing as owner-authored, MAP-048).
+    """
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--workspace-id", dest="workspace_id")
+    parser.add_argument("--agent-id", dest="agent_id")
+    args, _ = parser.parse_known_args()
+    return (
+        args.workspace_id or os.environ.get("MAP_WORKSPACE_ID", ""),
+        args.agent_id or os.environ.get("MAP_AGENT_ID", ""),
+    )
+
+
+WORKSPACE_ID, AGENT_ID = _ids_from_env_or_args()
 
 # Module-level async client so tests can swap in an httpx transport (e.g.
 # ASGITransport over the real FastAPI app).
@@ -137,9 +163,12 @@ def create_server() -> MCPServer:
 
     @server.tool(description="Kirim komentar follow-up ke sebuah tiket. Tulis komentar yang jelas: apa yang perlu dicek, siapa yang harus lanjut (sebut nama agent), dan kenapa.")
     async def post_comment(key: str, body: str) -> str:
-        payload: dict = {"body": body}
-        if AGENT_ID:
-            payload["author_agent_id"] = AGENT_ID
+        if not AGENT_ID:
+            # Fail loud, never fall back to "owner" authorship: an agent-authored
+            # comment without an author would be treated as human-written, trigger
+            # mention runs, and duplicate every report (MAP-048).
+            return "Error: tidak ada MAP_AGENT_ID — komentar tidak dikirim (server MCP kehilangan identitas agent)."
+        payload: dict = {"body": body, "author_agent_id": AGENT_ID}
         res = await _api(f"/tickets/{key}/comments", method="POST", body=payload)
         if _is_error(res):
             return _error(res, "mengirim komentar")
@@ -195,6 +224,15 @@ def create_server() -> MCPServer:
         if _is_error(res):
             return _error(res, "update tiket")
         return f"Tiket {key} diperbarui: status={res.get('status')}, priority={res.get('priority')}"
+
+    @server.tool(description="HAPUS tiket secara permanen (beserta komentar/attachments/runs-nya). HANYA untuk PM, dan HANYA untuk tiket yang benar-benar tidak diperlukan (duplikat, salah buat, eksperimen). Jangan hapus tiket yang sedang dikerjakan, punya sub-tiket aktif, atau menjadi acuan deliverable yang sudah dipublikasikan — lebih baik tiket macet dibiarkan atau di-block dengan penjelasan. Backend hanya mengizinkan PM.")
+    async def delete_ticket(key: str) -> str:
+        if not AGENT_ID:
+            return "Error: tidak ada MAP_AGENT_ID — penghapusan ditolak (server MCP kehilangan identitas agent)."
+        res = await _api(f"/tickets/{key}?actor_agent_id={AGENT_ID}", method="DELETE")
+        if _is_error(res):
+            return _error(res, "menghapus tiket")
+        return f"Tiket {key} dihapus."
 
     @server.tool(description="Lihat catatan memory agent ini (lintas tiket). Setiap entri: id, isi, asal.")
     async def get_memory() -> str:

@@ -268,6 +268,62 @@ def test_routine_run_actions_end_to_end(client, tmp_path, monkeypatch):
     assert routine["last_run_at"] is not None
 
 
+def test_routine_comments_record_at_mentions_from_body(client, tmp_path, monkeypatch):
+    """An `@name` written in a routine's `comments[]` body is recorded as a
+    comment_mention on the target comment — the UI shows it as a mention badge/link.
+    No run is scheduled (routine reports have no handoff anyway)."""
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    _make_agent(client, ws_id, "lead", "lead-1")
+    _make_ticket(client, ws_id)  # MAP-001
+    target = _make_ticket(client, ws_id, "Target macet")  # MAP-002 (komen jatuh ke sini)
+
+    resp = client.post(
+        f"/api/workspaces/{ws_id}/routines",
+        json={
+            "name": "Cek tiket macet",
+            "prompt": "Cek semua tiket yang tidak bergerak dan komen.",
+            "interval_minutes": 5,
+            "mode": "idle_only",
+            "agent_id": pm_id,
+        },
+    )
+    rid = resp.json()["id"]
+
+    script = _write_python_binary(
+        tmp_path / "opencode",
+        '''
+import json
+text = """routine done
+
+```map
+summary: |
+  Cek tiket macet selesai.
+comments:
+  - ticket: MAP-002
+    body: |
+      Tiket ini tidak bergerak. @lead-1 tolong cek, lead-1 juga koordinatornya.
+```
+"""
+print(json.dumps({"type": "assistant_text", "text": text}))
+''',
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.post(f"/api/routines/{rid}/run")
+    assert resp.status_code == 200, resp.text
+    runs = client.get(f"/api/workspaces/{ws_id}/runs").json()
+    routine_run = next(r for r in runs if r["trigger"] == "routine")
+    final = _wait_for_run(client, routine_run["id"])
+    assert final["status"] == "done", final
+
+    # @lead-1 in the comment body → mention recorded; bare "lead-1" ignored.
+    target_detail = client.get(f"/api/tickets/{target['key']}").json()
+    agent_comments = [c for c in target_detail["comments"] if not c["is_system"]]
+    assert len(agent_comments) == 1
+    assert agent_comments[0]["mentions"] == ["lead-1"]
+
+
 def test_routine_run_rejects_status_declaration(client, tmp_path, monkeypatch):
     ws_id = _make_workspace(client, tmp_path)
     pm_id = _make_agent(client, ws_id, "pm", "pm-1")
@@ -296,6 +352,107 @@ def test_routine_run_rejects_status_declaration(client, tmp_path, monkeypatch):
 
     routine = client.get(f"/api/workspaces/{ws_id}/routines").json()[0]
     assert routine["status"] == "idle"
+
+
+_ROUTINE_ACTIVATE_SPRINT_ONLY_SCRIPT = '''
+import json
+text = """routine done
+
+```map
+summary: |
+  Sprint 2 dibuat dan diaktifkan.
+sprints:
+  - name: "Sprint 2"
+    status: active
+```
+"""
+print(json.dumps({"type": "assistant_text", "text": text}))
+'''
+
+
+def test_routine_sprints_only_report_still_creates_and_activates_sprint(
+    client, tmp_path, monkeypatch
+):
+    """Regression: sprint creation/activation used to be nested inside
+    `if parsed.tickets:`, so a routine report that ONLY declares `sprints:` (no
+    new tickets) silently did nothing at all."""
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "Sprint 1"})
+
+    resp = client.post(
+        f"/api/workspaces/{ws_id}/routines",
+        json={
+            "name": "R",
+            "prompt": "p",
+            "interval_minutes": 5,
+            "mode": "idle_only",
+            "agent_id": pm_id,
+        },
+    )
+    rid = resp.json()["id"]
+
+    script = _write_python_binary(tmp_path / "opencode", _ROUTINE_ACTIVATE_SPRINT_ONLY_SCRIPT)
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    client.post(f"/api/routines/{rid}/run")
+    runs = client.get(f"/api/workspaces/{ws_id}/runs").json()
+    routine_run = next(r for r in runs if r["trigger"] == "routine")
+    final = _wait_for_run(client, routine_run["id"])
+    assert final["status"] == "done", final
+
+    sprints = {s["name"]: s for s in client.get(f"/api/workspaces/{ws_id}/sprints").json()}
+    assert sprints["Sprint 2"]["status"] == "active"
+    assert sprints["Sprint 1"]["status"] == "planned"
+
+
+_ROUTINE_MALFORMED_SPRINTS_SCRIPT = '''
+import json
+text = """routine done
+
+```map
+summary: |
+  Sprint 6 sudah dibuat lewat rutinitas.
+sprints: |
+  - name: Sprint 6
+    goal: Test
+```
+"""
+print(json.dumps({"type": "assistant_text", "text": text}))
+'''
+
+
+def test_routine_malformed_sprints_yaml_reported_via_run_error(client, tmp_path, monkeypatch):
+    """Same `field: |` mistake as the chat/ticket paths, but a routine run has no
+    ticket/conversation to comment on — the drop reason must still land somewhere
+    (run.error / Activity), not vanish while `summary` claims success."""
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+
+    resp = client.post(
+        f"/api/workspaces/{ws_id}/routines",
+        json={
+            "name": "R",
+            "prompt": "p",
+            "interval_minutes": 5,
+            "mode": "idle_only",
+            "agent_id": pm_id,
+        },
+    )
+    rid = resp.json()["id"]
+
+    script = _write_python_binary(tmp_path / "opencode", _ROUTINE_MALFORMED_SPRINTS_SCRIPT)
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    client.post(f"/api/routines/{rid}/run")
+    runs = client.get(f"/api/workspaces/{ws_id}/runs").json()
+    routine_run = next(r for r in runs if r["trigger"] == "routine")
+    final = _wait_for_run(client, routine_run["id"])
+    assert final["status"] == "done", final  # run itself succeeded; only sprints[] was dropped
+    assert "sprints" in final["error"]
+    assert "sprints: |" in final["error"]
+
+    assert client.get(f"/api/workspaces/{ws_id}/sprints").json() == []
 
 
 # ---------------------------------------------------------------------------

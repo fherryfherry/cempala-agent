@@ -1,7 +1,7 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { useParams } from "next/navigation";
+import { Suspense, useMemo, useState } from "react";
+import { useParams, usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -54,12 +54,27 @@ const RUN_STATUS_VARIANT: Record<string, "default" | "secondary" | "destructive"
   interrupted: "destructive",
 };
 
+function runStatusLabel(status: string): string {
+  return status === "cancelled" ? "stopped" : status;
+}
+
 const EVENT_PAGE_LIMIT = 500;
 
 export default function ActivityPage() {
+  return (
+    <Suspense fallback={<p className="px-6 py-10 text-sm text-zinc-500">Loading…</p>}>
+      <ActivityPageInner />
+    </Suspense>
+  );
+}
+
+function ActivityPageInner() {
   const params = useParams<{ key: string }>();
   const workspaceKey = params.key;
   const queryClient = useQueryClient();
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
 
   const workspaces = useQuery({ queryKey: ["workspaces"], queryFn: listWorkspaces });
   const workspace = workspaces.data?.find((ws) => ws.key === workspaceKey);
@@ -84,7 +99,9 @@ export default function ActivityPage() {
 
   const { status: sseStatus, events } = useWorkspaceEvents();
   const [typeFilter, setTypeFilter] = useState<EventType | "all">("all");
-  const [agentFilter, setAgentFilter] = useState<string>("all");
+  // Agent filter lives in the URL (?agent=<id>) so navbar avatars can deep-link
+  // here; the Select below writes back to the URL via router.replace.
+  const agentFilter = searchParams.get("agent") ?? "all";
   // null -> auto-select the latest run (so the page opens on the newest activity).
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   // Infinite-scroll pagination: 20 visible at a time, more revealed on scroll.
@@ -119,13 +136,23 @@ export default function ActivityPage() {
   const ticketKey = (id: string | null) =>
     id ? tickets.data?.find((t) => t.id === id)?.key ?? id : "rutinitas";
 
+  const stopFromList = useMutation({
+    mutationFn: (runId: string) => stopRun(runId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["runs"] });
+    },
+    onError: (err: unknown) => {
+      toast.error(err instanceof ApiError ? err.message : "Unexpected error");
+    },
+  });
+
   const retryFromList = useMutation({
     mutationFn: (oldRunId: string) => retryRun(oldRunId),
     onSuccess: (newRun) => {
       queryClient.invalidateQueries({ queryKey: ["runs"] });
       queryClient.invalidateQueries({ queryKey: ["tickets", workspace?.id] });
       setSelectedRunId(newRun.id);
-      toast.success("Retrying — new run started");
+      toast.success("Run re-triggered");
     },
     onError: (err: unknown) => {
       toast.error(err instanceof ApiError ? err.message : "Unexpected error");
@@ -174,9 +201,21 @@ export default function ActivityPage() {
           <Card>
             <CardHeader className="flex flex-row items-center justify-between gap-2">
               <CardTitle className="text-sm">Runs</CardTitle>
-              <Select value={agentFilter} onValueChange={(v) => setAgentFilter(v ?? "all")}>
+              <Select
+                value={agentFilter}
+                onValueChange={(v) => {
+                  const next = v && v !== "all" ? `?agent=${v}` : "";
+                  router.replace(`${pathname}${next}`, { scroll: false });
+                }}
+              >
                 <SelectTrigger size="sm">
-                  <SelectValue placeholder="All agents" />
+                  <SelectValue placeholder="All agents">
+                    {(value) => {
+                      if (!value || value === "all") return "All agents";
+                      const a = agents.data?.find((x) => x.id === value);
+                      return a ? formatAgentName(a.name, a.role) : value;
+                    }}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All agents</SelectItem>
@@ -197,7 +236,10 @@ export default function ActivityPage() {
                 <p className="px-3 py-2 text-xs text-zinc-500">No runs yet.</p>
               )}
               {agentFilteredRuns.slice(0, runLimit).map((r) => {
+                const canStop = r.status === "running" || r.status === "queued";
                 const retryable = r.status === "failed" || r.status === "interrupted";
+                const resumable = r.status === "cancelled";
+                const stopping = stopFromList.isPending && stopFromList.variables === r.id;
                 const retrying = retryFromList.isPending && retryFromList.variables === r.id;
                 return (
                   <div
@@ -215,7 +257,23 @@ export default function ActivityPage() {
                     <div className="flex items-center justify-between gap-2">
                       <span className="font-mono text-zinc-500">{ticketKey(r.ticket_id)}</span>
                       <div className="flex items-center gap-1">
-                        <Badge variant={RUN_STATUS_VARIANT[r.status] ?? "outline"}>{r.status}</Badge>
+                        <Badge variant={RUN_STATUS_VARIANT[r.status] ?? "outline"}>
+                          {runStatusLabel(r.status)}
+                        </Badge>
+                        {canStop && (
+                          <Button
+                            variant="ghost"
+                            size="xs"
+                            className="h-5 px-1.5 text-[10px] text-red-600"
+                            disabled={stopping}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              stopFromList.mutate(r.id);
+                            }}
+                          >
+                            {stopping ? "Stopping…" : "Stop"}
+                          </Button>
+                        )}
                         {retryable && (
                           <Button
                             variant="ghost"
@@ -228,6 +286,20 @@ export default function ActivityPage() {
                             }}
                           >
                             {retrying ? "Retrying…" : "Retry"}
+                          </Button>
+                        )}
+                        {resumable && (
+                          <Button
+                            variant="ghost"
+                            size="xs"
+                            className="h-5 px-1.5 text-[10px]"
+                            disabled={retrying}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              retryFromList.mutate(r.id);
+                            }}
+                          >
+                            {retrying ? "Resuming…" : "Resume"}
                           </Button>
                         )}
                       </div>
@@ -397,7 +469,7 @@ function RunDetailPanel({
     onSuccess: (newRun) => {
       queryClient.invalidateQueries({ queryKey: ["run", runId] });
       queryClient.invalidateQueries({ queryKey: ["runs"] });
-      toast.success("Retrying — new run started");
+      toast.success("Run re-triggered");
       onRetried?.(newRun.id);
     },
     onError: (err: unknown) => {
@@ -444,6 +516,7 @@ function RunDetailPanel({
   const canLoadMore = events.length > 0 && (events.length === EVENT_PAGE_LIMIT || lastPageFull);
   const canStop = run.status === "running" || run.status === "queued";
   const canRetry = run.status === "failed" || run.status === "interrupted";
+  const canResume = run.status === "cancelled";
 
   return (
     <Card className="flex h-full flex-col gap-4">
@@ -451,7 +524,9 @@ function RunDetailPanel({
         <div>
           <CardTitle className="flex items-center gap-2">
             <span className="font-mono text-sm">{ticketKey(run.ticket_id)}</span>
-            <Badge variant={RUN_STATUS_VARIANT[run.status] ?? "outline"}>{run.status}</Badge>
+            <Badge variant={RUN_STATUS_VARIANT[run.status] ?? "outline"}>
+              {runStatusLabel(run.status)}
+            </Badge>
           </CardTitle>
           <p className="mt-1 flex items-center gap-1.5 text-xs text-zinc-500">
             {agentOf(run.agent_id) && (
@@ -483,6 +558,16 @@ function RunDetailPanel({
             onClick={() => retryMutation.mutate()}
           >
             {retryMutation.isPending ? "Retrying…" : "Retry"}
+          </Button>
+        )}
+        {canResume && (
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={retryMutation.isPending}
+            onClick={() => retryMutation.mutate()}
+          >
+            {retryMutation.isPending ? "Resuming…" : "Resume"}
           </Button>
         )}
       </CardHeader>

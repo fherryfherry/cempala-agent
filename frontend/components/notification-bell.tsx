@@ -90,8 +90,12 @@ export function NotificationBell({
                   unread ? "bg-blue-50 dark:bg-blue-950/20" : ""
                 }`}
               >
-                <span className="text-zinc-700 dark:text-zinc-300">{item.message}</span>
-                <span className="text-[10px] text-zinc-400">{formatShortTime(item.createdAt, timezone)}</span>
+                <span className="truncate text-zinc-700 dark:text-zinc-300">{item.message}</span>
+                <span className="truncate text-[10px] text-zinc-400">
+                  {item.detail
+                    ? `${item.detail} · ${formatShortTime(item.createdAt, timezone)}`
+                    : formatShortTime(item.createdAt, timezone)}
+                </span>
               </div>
             );
             return item.ticketKey ? (

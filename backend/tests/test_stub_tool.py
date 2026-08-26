@@ -3,6 +3,7 @@
 import pytest
 
 from app.agents.base import TOOLS, RunContext
+from app.agents.claude_tool import ClaudeTool
 from app.agents.opencode_tool import OpenCodeTool
 from app.agents.stub_tool import StubTool
 
@@ -16,6 +17,8 @@ def _ctx(tmp_path) -> RunContext:
         ticket_id="ticket-1",
         repo_path=str(tmp_path),
         prompt="do the thing",
+        agent_name="stub-agent",
+        ticket_key="",
     )
 
 
@@ -37,7 +40,7 @@ async def test_terminal_event_is_failed_with_readable_error(tmp_path):
 def test_registry_maps_all_tool_kinds():
     assert TOOLS == {
         "opencode": OpenCodeTool,
-        "claude": StubTool,
+        "claude": ClaudeTool,
         "agy": StubTool,
         "codex": StubTool,
     }

@@ -464,8 +464,10 @@ def test_backlog_ticket_blocks_scheduling_for_non_exempt_role(client, tmp_path):
     bodies = _system_comment_bodies(client, ticket["key"])
     assert any("backlog" in b and "active sprint" in b for b in bodies)
 
+    # The sprint gate refuses the run WITHOUT touching the ticket's status — a
+    # ticket outside the active sprint is not a failure, it's just not due yet.
     detail = client.get(f"/api/tickets/{ticket['key']}").json()
-    assert detail["status"] == "blocked"
+    assert detail["status"] == "backlog"
 
 
 def test_ticket_in_planned_sprint_blocks_scheduling_for_non_exempt_role(client, tmp_path):

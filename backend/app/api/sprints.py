@@ -4,7 +4,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.errors import AppError
 from app.api.workspaces import _get_workspace_or_404
-from app.db.models import Comment, Sprint, Ticket
+from app.core import orchestrator
+from app.core.guardrails import GuardrailBlocked
+from app.db import session as db_session
+from app.db.models import Agent, Comment, Sprint, Ticket
 from app.db.session import get_session
 from app.schemas.sprint import SprintCreate, SprintOut, SprintUpdate
 
@@ -12,6 +15,18 @@ workspace_sprints_router = APIRouter(prefix="/workspaces/{workspace_id}/sprints"
 sprints_router = APIRouter(prefix="/sprints", tags=["sprints"])
 
 _TERMINAL_TICKET_STATUSES = {"done", "release"}
+
+# Statuses that still need work — a ticket in any of these gets a run triggered
+# when its sprint is activated.
+_ACTIONABLE_TICKET_STATUSES = {
+    "backlog",
+    "todo",
+    "in_progress",
+    "review",
+    "qa",
+    "security",
+    "blocked",
+}
 
 
 async def _get_sprint_or_404(session: AsyncSession, sprint_id: str) -> Sprint:
@@ -105,6 +120,102 @@ async def _carry_over_unfinished_tickets(session: AsyncSession, sprint: Sprint) 
         )
 
 
+async def _kick_off_sprint_tickets(session: AsyncSession, sprint: Sprint) -> int:
+    """Trigger a run for every ticket in the sprint that still needs work and has
+    an assignee (owner request: activating a sprint starts the team on its tickets).
+
+    Tickets already `done`/`release` are skipped — if every ticket is done, nothing
+    is triggered. Tickets without an assignee can't run (no agent to execute them),
+    so they're skipped too. Guardrail trips (e.g. `max_concurrent_runs`) are
+    swallowed: `schedule()` already wrote its own system comment naming the
+    guardrail, and the sprint activation itself must still succeed. Returns the
+    number of runs scheduled.
+    """
+    tickets = (
+        await session.scalars(
+            select(Ticket).where(
+                Ticket.sprint_id == sprint.id,
+                Ticket.status.in_(_ACTIONABLE_TICKET_STATUSES),
+                Ticket.assignee_id.is_not(None),
+            )
+        )
+    ).all()
+    if not tickets:
+        return 0
+
+    agents = (
+        await session.scalars(
+            select(Agent).where(Agent.workspace_id == sprint.workspace_id)
+        )
+    ).all()
+    by_id = {a.id: a for a in agents}
+
+    scheduled = 0
+    for ticket in tickets:
+        agent = by_id.get(ticket.assignee_id)
+        if agent is None or not agent.enabled or agent.status == "disabled":
+            continue
+        try:
+            await orchestrator.schedule(
+                session,
+                db_session.async_session,
+                ticket=ticket,
+                agent=agent,
+                trigger="manual",
+            )
+            scheduled += 1
+        except (GuardrailBlocked, RuntimeError):
+            # schedule() already recorded the reason (blocked ticket / paused
+            # workspace / guardrail) as a system comment; keep going with the rest.
+            continue
+    return scheduled
+
+
+async def _demote_other_active_sprints(session: AsyncSession, sprint: Sprint) -> None:
+    others = await session.scalars(
+        select(Sprint).where(
+            Sprint.workspace_id == sprint.workspace_id,
+            Sprint.id != sprint.id,
+            Sprint.status == "active",
+        )
+    )
+    for other in others:
+        other.status = "planned"
+
+
+async def activate_sprint(session: AsyncSession, sprint: Sprint) -> int:
+    """Activate `sprint`: demote any other active sprint in the workspace,
+    flip this one to active, and kick off its actionable tickets.
+
+    Shared by the owner's PATCH endpoint below and by the chat sprint-proposal
+    approval flow (`orchestrator.py`) — "activating a sprint starts the team
+    on its tickets" applies the same way regardless of who triggered it.
+    Returns the number of runs scheduled by kickoff.
+    """
+    await _demote_other_active_sprints(session, sprint)
+    sprint.status = "active"
+    await session.commit()
+    await session.refresh(sprint)
+    scheduled = await _kick_off_sprint_tickets(session, sprint)
+    await session.commit()
+    return scheduled
+
+
+async def complete_sprint(session: AsyncSession, sprint: Sprint) -> None:
+    """Complete `sprint`: carry its unfinished tickets over to the next eligible
+    sprint (or the backlog), then flip it to completed.
+
+    Shared by the owner's PATCH endpoint below and the ```map `sprints:` `status:
+    completed` path (`orchestrator.py`) — same "the PM gets the same levers the
+    owner has" reasoning as `activate_sprint`.
+    """
+    if sprint.status != "completed":
+        await _carry_over_unfinished_tickets(session, sprint)
+    sprint.status = "completed"
+    await session.commit()
+    await session.refresh(sprint)
+
+
 @sprints_router.patch("/{sprint_id}", response_model=SprintOut)
 async def update_sprint(
     sprint_id: str, body: SprintUpdate, session: AsyncSession = Depends(get_session)
@@ -117,17 +228,12 @@ async def update_sprint(
         raise AppError(422, "invalid_dates", "end_date must be on or after start_date")
 
     if body.status == "active":
-        others = await session.scalars(
-            select(Sprint).where(
-                Sprint.workspace_id == sprint.workspace_id,
-                Sprint.id != sprint.id,
-                Sprint.status == "active",
-            )
-        )
-        for other in others:
-            other.status = "planned"
+        await _demote_other_active_sprints(session, sprint)
 
     should_carry_over = body.status == "completed" and sprint.status != "completed"
+    # Kick off the sprint's tickets only on the transition INTO active (not when
+    # re-saving an already-active sprint with other fields).
+    should_kick_off = body.status == "active" and sprint.status != "active"
 
     for field in ("name", "goal", "duration_estimate", "status", "start_date", "end_date"):
         value = getattr(body, field)
@@ -139,4 +245,9 @@ async def update_sprint(
 
     await session.commit()
     await session.refresh(sprint)
+
+    if should_kick_off:
+        await _kick_off_sprint_tickets(session, sprint)
+        await session.commit()
+
     return sprint

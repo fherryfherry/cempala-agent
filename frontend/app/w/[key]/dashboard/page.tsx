@@ -14,9 +14,15 @@ import {
 } from "@/lib/api";
 import { useWorkspaceEvents } from "@/components/events-context";
 import { formatTimestamp } from "@/lib/datetime";
-import { runStats, ticketCounts } from "@/lib/dashboard-stats";
+import { runStats, sumCost, ticketCounts } from "@/lib/dashboard-stats";
 import { AgentAvatar } from "@/components/agent-avatar";
 import { AgentStatusDot } from "@/components/agent-status";
+import {
+  CostByAgentChart,
+  CostOverTimeChart,
+  RunActivityChart,
+  TicketStatusChart,
+} from "@/components/dashboard-charts";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { buttonVariants } from "@/components/ui/button";
@@ -63,6 +69,7 @@ export default function DashboardPage() {
 
   const counts = useMemo(() => ticketCounts(tickets.data), [tickets.data]);
   const liveRuns = useMemo(() => runStats(runs.data), [runs.data]);
+  const totalCost = useMemo(() => sumCost(tickets.data), [tickets.data]);
   const activeSprint = sprints.data?.find((s) => s.status === "active");
 
   const recentRuns = useMemo(() => {
@@ -99,35 +106,6 @@ export default function DashboardPage() {
   const donePct =
     allTickets.length === 0 ? 0 : Math.round((doneCount / allTickets.length) * 100);
 
-  // Alerts: blocked tickets, failed runs (recent), unstarted epics. Capped at 6 below.
-  const alerts: { kind: "error" | "info"; text: string; href: string }[] = [];
-  for (const t of blockedTickets) {
-    alerts.push({
-      kind: "error",
-      text: `${t.key} blocked: ${t.blocked_reason ?? "no reason"}`,
-      href: `/w/${workspaceKey}/ticket/${t.key}`,
-    });
-  }
-  for (const r of recentRuns) {
-    if (r.status === "failed") {
-      const t = r.ticket_id ? ticketById.get(r.ticket_id) : undefined;
-      alerts.push({
-        kind: "error",
-        text: `${t?.key ?? r.ticket_id ?? "rutinitas"} failed${r.error ? `: ${r.error}` : ""}`,
-        href: t ? `/w/${workspaceKey}/ticket/${t.key}` : `/w/${workspaceKey}/activity`,
-      });
-    }
-  }
-  for (const t of allTickets) {
-    if (t.status === "backlog" && t.parent_id === null) {
-      alerts.push({
-        kind: "info",
-        text: `${t.key} unstarted epic: ${t.title}`,
-        href: `/w/${workspaceKey}/ticket/${t.key}`,
-      });
-    }
-  }
-
   return (
     <div className="flex w-full flex-1 flex-col gap-6 px-6 py-10">
       <div className="flex items-start justify-between gap-4">
@@ -149,7 +127,7 @@ export default function DashboardPage() {
         </Link>
       </div>
 
-      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-5">
         <StatCard label="Total tickets" value={String(allTickets.length)} />
         <StatCard
           label="Done"
@@ -168,6 +146,45 @@ export default function DashboardPage() {
           value={String(blockedTickets.length)}
           tone={blockedTickets.length > 0 ? "red" : undefined}
         />
+        <StatCard label="Total cost" value={`$${totalCost.toFixed(2)}`} />
+      </div>
+
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Tickets by status</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <TicketStatusChart tickets={allTickets} />
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Cost by agent</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <CostByAgentChart runs={runs.data ?? []} agents={agents.data ?? []} />
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Run activity (last 14 days)</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <RunActivityChart runs={runs.data ?? []} />
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Cost over time (last 14 days)</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <CostOverTimeChart runs={runs.data ?? []} />
+          </CardContent>
+        </Card>
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -275,31 +292,6 @@ export default function DashboardPage() {
           </CardContent>
         </Card>
       </div>
-
-      {alerts.length > 0 && (
-        <div className="flex flex-col gap-1.5">
-          {alerts.slice(0, 6).map((a, i) => (
-            <Link
-              key={i}
-              href={a.href}
-              className={cn(
-                "flex items-center gap-2 rounded-lg px-3 py-2 text-sm",
-                a.kind === "error"
-                  ? "bg-red-50 text-red-800 dark:bg-red-950/40 dark:text-red-200"
-                  : "bg-blue-50 text-blue-800 dark:bg-blue-950/40 dark:text-blue-200",
-              )}
-            >
-              <span
-                className={cn(
-                  "size-2 shrink-0 rounded-full",
-                  a.kind === "error" ? "bg-red-500" : "bg-blue-500",
-                )}
-              />
-              <span className="truncate">{a.text}</span>
-            </Link>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

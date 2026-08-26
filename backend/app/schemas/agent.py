@@ -3,7 +3,9 @@ from typing import Literal
 
 from pydantic import BaseModel, field_validator
 
-Role = Literal["pm", "lead", "engineer", "designer", "qa", "pentester"]
+Role = Literal[
+    "pm", "lead", "engineer", "designer", "qa", "pentester", "business_analyst", "system_architect"
+]
 ToolKind = Literal["opencode", "claude", "agy", "codex"]
 AvatarTemplate = Literal[
     "person-1", "person-2", "person-3", "person-4", "person-5", "person-6",

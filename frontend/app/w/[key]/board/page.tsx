@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { Check, ChevronDown, LayoutGrid, List as ListIcon } from "lucide-react";
 import {
   ApiError,
   createTicket,
@@ -14,11 +15,17 @@ import {
   listTickets,
   listWorkspaces,
   updateTicket,
+  type Ticket,
   type TicketCategory,
   type TicketPriority,
   type TicketStatus,
 } from "@/lib/api";
-import { CATEGORY_LABELS, CATEGORY_VARIANT, PRIORITY_VARIANT } from "@/lib/ticket-style";
+import {
+  CATEGORY_LABELS,
+  CATEGORY_VARIANT,
+  PRIORITY_VARIANT,
+  STATUS_BLOCK_COLOR,
+} from "@/lib/ticket-style";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -57,6 +64,9 @@ const COLUMNS: { status: TicketStatus; label: string }[] = [
 ];
 
 const ALL_SPRINTS = "__all__";
+const UNASSIGNED = "__unassigned__";
+const DEFAULT_PAGE_SIZE = 20;
+const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 
 export default function BoardPage() {
   const params = useParams<{ key: string }>();
@@ -90,6 +100,26 @@ export default function BoardPage() {
   const [sprintOverride, setSprintOverride] = useState<string | null>(null);
   const activeSprintId = sprints.data?.find((s) => s.status === "active")?.id;
   const selectedSprintId = sprintOverride ?? activeSprintId ?? ALL_SPRINTS;
+  const [viewMode, setViewMode] = useState<"kanban" | "list">("kanban");
+  // Empty = no filter ("All agents"); otherwise a set of agent ids and/or UNASSIGNED.
+  const [agentFilters, setAgentFilters] = useState<string[]>([]);
+  const toggleAgentFilter = (id: string) =>
+    setAgentFilters((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  const [search, setSearch] = useState("");
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  // Reset to page 1 whenever a filter (or the view) changes, without an effect —
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const pageFilterKey = `${agentFilters.join(",")}|${selectedSprintId}|${viewMode}|${search}|${pageSize}`;
+  const [pageState, setPageState] = useState({ key: pageFilterKey, page: 0 });
+  if (pageState.key !== pageFilterKey) {
+    setPageState({ key: pageFilterKey, page: 0 });
+  }
+  const page = pageState.key === pageFilterKey ? pageState.page : 0;
+  const setPage = (updater: number | ((p: number) => number)) =>
+    setPageState((s) => ({
+      key: pageFilterKey,
+      page: typeof updater === "function" ? updater(s.page) : updater,
+    }));
 
   const moveMutation = useMutation({
     mutationFn: (vars: { key: string; status: TicketStatus }) =>
@@ -126,9 +156,17 @@ export default function BoardPage() {
     id ? agents.data?.find((a) => a.id === id)?.status : undefined;
   const agentOf = (id: string | null) => agents.data?.find((x) => x.id === id);
   const sprintName = (id: string | null) => sprints.data?.find((s) => s.id === id)?.name ?? null;
+  const statusLabel = (status: TicketStatus) => COLUMNS.find((c) => c.status === status)?.label;
 
+  // Epics are feature-area containers, not work items — keep them off the board.
+  // They stay reachable via the Epic card on any child ticket and as groups on the
+  // timeline page.
   const visibleTickets = (tickets.data ?? []).filter(
-    (t) => selectedSprintId === ALL_SPRINTS || t.sprint_id === selectedSprintId,
+    (t) =>
+      t.parent_id !== null &&
+      (selectedSprintId === ALL_SPRINTS || t.sprint_id === selectedSprintId) &&
+      (agentFilters.length === 0 ||
+        agentFilters.some((f) => (f === UNASSIGNED ? t.assignee_id === null : t.assignee_id === f))),
   );
 
   const orderedSprints = [...(sprints.data ?? [])].sort((a, b) =>
@@ -138,10 +176,75 @@ export default function BoardPage() {
   const visibleSprints = orderedSprints.slice(0, SPRINT_LIMIT);
   const overflowSprints = orderedSprints.slice(SPRINT_LIMIT);
 
+  // Search only narrows the list view — Kanban keeps using `visibleTickets` directly.
+  const searchQuery = search.trim().toLowerCase();
+  const searchedTickets = searchQuery
+    ? visibleTickets.filter(
+        (t) =>
+          t.title.toLowerCase().includes(searchQuery) || t.key.toLowerCase().includes(searchQuery),
+      )
+    : visibleTickets;
+
+  // Flattened in the same status order as the Kanban columns, so page boundaries
+  // stay predictable even though a page can span two status groups.
+  const statusOrderedTickets = COLUMNS.flatMap((col) =>
+    searchedTickets.filter((t) => t.status === col.status),
+  );
+  const totalPages = Math.max(1, Math.ceil(statusOrderedTickets.length / pageSize));
+  const pagedTickets = statusOrderedTickets.slice(page * pageSize, page * pageSize + pageSize);
+
+  const renderTicketMeta = (t: Ticket) => (
+    <>
+      <span className="flex items-center gap-1">
+        {t.category && (
+          <Badge variant={CATEGORY_VARIANT[t.category]}>{CATEGORY_LABELS[t.category]}</Badge>
+        )}
+        <Badge variant={PRIORITY_VARIANT[t.priority]}>{t.priority}</Badge>
+      </span>
+      {sprintName(t.sprint_id) && (
+        <Badge variant="outline" className="w-fit px-1.5 py-0 text-[10px]">
+          {sprintName(t.sprint_id)}
+        </Badge>
+      )}
+      {agentDisplay(t.assignee_id) && (
+        <span className="flex items-center gap-1.5 text-xs text-zinc-500">
+          {agentOf(t.assignee_id) && (
+            <AgentAvatar
+              name={agentOf(t.assignee_id)!.name}
+              template={agentOf(t.assignee_id)!.avatar_template}
+              color={agentOf(t.assignee_id)!.avatar_color}
+              size={16}
+            />
+          )}
+          {agentStatus(t.assignee_id) && <AgentStatusDot status={agentStatus(t.assignee_id)!} />}
+          {agentDisplay(t.assignee_id)}
+        </span>
+      )}
+    </>
+  );
+
   return (
     <div className="flex w-full flex-1 flex-col gap-6 px-6 py-10">
       <div className="flex items-center justify-between gap-6">
         <h1 className="shrink-0 text-2xl font-semibold tracking-tight">Board</h1>
+        <div className="flex shrink-0 items-center gap-1">
+          <Button
+            size="sm"
+            variant={viewMode === "kanban" ? "default" : "outline"}
+            onClick={() => setViewMode("kanban")}
+            aria-label="Kanban view"
+          >
+            <LayoutGrid className="size-4" />
+          </Button>
+          <Button
+            size="sm"
+            variant={viewMode === "list" ? "default" : "outline"}
+            onClick={() => setViewMode("list")}
+            aria-label="List view"
+          >
+            <ListIcon className="size-4" />
+          </Button>
+        </div>
         <div className="flex min-w-0 flex-1 items-center gap-4">
           <div className="-mb-3 flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto pb-3">
             <Button
@@ -186,10 +289,57 @@ export default function BoardPage() {
               </Popover>
             )}
           </div>
+          <Popover>
+            <PopoverTrigger
+              render={
+                <Button variant="outline" className="w-44 shrink-0 justify-between">
+                  <span className="truncate">
+                    {agentFilters.length === 0
+                      ? "All agents"
+                      : agentFilters.length === 1
+                        ? (agentFilters[0] === UNASSIGNED
+                            ? "Unassigned"
+                            : agentDisplay(agentFilters[0]))
+                        : `${agentFilters.length} agents`}
+                  </span>
+                  <ChevronDown className="size-4 text-muted-foreground" />
+                </Button>
+              }
+            />
+            <PopoverContent className="w-56 p-1">
+              <button
+                className="flex w-full cursor-pointer items-center justify-between rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted"
+                onClick={() => setAgentFilters([])}
+              >
+                All agents
+                {agentFilters.length === 0 && <Check className="size-4" />}
+              </button>
+              <button
+                className="flex w-full cursor-pointer items-center justify-between rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted"
+                onClick={() => toggleAgentFilter(UNASSIGNED)}
+              >
+                Unassigned
+                {agentFilters.includes(UNASSIGNED) && <Check className="size-4" />}
+              </button>
+              {(agents.data ?? []).map((a) => (
+                <button
+                  key={a.id}
+                  className="flex w-full cursor-pointer items-center justify-between rounded-md px-2 py-1.5 text-left text-sm hover:bg-muted"
+                  onClick={() => toggleAgentFilter(a.id)}
+                >
+                  <span className="truncate">
+                    {a.name} ({a.role})
+                  </span>
+                  {agentFilters.includes(a.id) && <Check className="size-4 shrink-0" />}
+                </button>
+              ))}
+            </PopoverContent>
+          </Popover>
           <CreateTicketDialog workspaceId={workspace.id} />
         </div>
       </div>
 
+      {viewMode === "kanban" ? (
       <div className="flex flex-1 gap-4 overflow-x-auto pb-4">
         {COLUMNS.map((col) => {
           const colTickets = visibleTickets.filter((t) => t.status === col.status);
@@ -272,6 +422,90 @@ export default function BoardPage() {
           );
         })}
       </div>
+      ) : (
+      <div className="flex flex-1 flex-col gap-4 overflow-y-auto pb-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <Input
+            placeholder="Search tickets…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="max-w-xs"
+          />
+          <div className="flex items-center gap-2 text-xs text-zinc-500">
+            <span>Rows per page</span>
+            <Select
+              value={String(pageSize)}
+              onValueChange={(v) => setPageSize(Number(v) || DEFAULT_PAGE_SIZE)}
+            >
+              <SelectTrigger className="w-20">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {PAGE_SIZE_OPTIONS.map((n) => (
+                  <SelectItem key={n} value={String(n)}>
+                    {n}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-1">
+          {pagedTickets.map((t) => (
+            <div
+              key={t.id}
+              className="flex items-center gap-3 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-800 dark:bg-zinc-900"
+            >
+              <span className={`h-2 w-2 shrink-0 rounded-full ${STATUS_BLOCK_COLOR[t.status]}`} />
+              <span className="w-24 shrink-0 truncate text-xs text-zinc-500">
+                {statusLabel(t.status)}
+              </span>
+              <Link
+                href={`/w/${workspaceKey}/ticket/${t.key}`}
+                className="shrink-0 font-mono text-xs text-zinc-400 hover:text-foreground hover:underline"
+              >
+                {t.key}
+              </Link>
+              <Link
+                href={`/w/${workspaceKey}/ticket/${t.key}`}
+                className="min-w-0 flex-1 truncate hover:text-foreground hover:underline"
+              >
+                {t.title}
+              </Link>
+              <span className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                {renderTicketMeta(t)}
+              </span>
+            </div>
+          ))}
+          {pagedTickets.length === 0 && (
+            <p className="px-1 py-6 text-center text-sm text-zinc-400">No tickets found.</p>
+          )}
+        </div>
+
+        <div className="flex items-center justify-center gap-3 pt-2">
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={page === 0}
+            onClick={() => setPage((p) => Math.max(0, p - 1))}
+          >
+            Previous
+          </Button>
+          <span className="text-xs text-zinc-500">
+            Page {page + 1} of {totalPages}
+          </span>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={page >= totalPages - 1}
+            onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+          >
+            Next
+          </Button>
+        </div>
+      </div>
+      )}
     </div>
   );
 }

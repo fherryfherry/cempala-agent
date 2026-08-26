@@ -27,8 +27,10 @@ class RunContext:
     agent_id: str
     agent_model: str  # "provider/model", passed to `opencode run -m`
     ticket_id: str
-    repo_path: str
+    repo_path: str  # the worktree path for this run (isolated per-agent per-ticket)
     prompt: str
+    agent_name: str = ""  # used for GIT_AUTHOR_NAME on agent commits
+    ticket_key: str = ""  # e.g. "MAP-123", used for worktree naming
     attachments: list[str] = field(default_factory=list)  # file paths, passed via `-f`
     prev_session_id: str | None = None  # passed via `-s` when set
     guardrails: dict = field(default_factory=dict)
@@ -54,10 +56,11 @@ class AgentTool(Protocol):
 
 def _tools() -> dict[str, type]:
     """Deferred import to dodge a circular import (opencode_tool/stub_tool import base)."""
+    from app.agents.claude_tool import ClaudeTool
     from app.agents.opencode_tool import OpenCodeTool
     from app.agents.stub_tool import StubTool
 
-    return {"opencode": OpenCodeTool, "claude": StubTool, "agy": StubTool, "codex": StubTool}
+    return {"opencode": OpenCodeTool, "claude": ClaudeTool, "agy": StubTool, "codex": StubTool}
 
 
 TOOLS: dict[str, type] = _tools()

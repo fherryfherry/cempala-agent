@@ -241,6 +241,55 @@ def test_valid_mention_schedules_followup_run(client, tmp_path, monkeypatch):
 
     ticket_detail = client.get(f"/api/tickets/{ticket['key']}").json()
     assert ticket_detail["handoff_depth"] == 1
+    # The handoff moved the ticket to the mentioned agent: the board/detail/timeline
+    # surfaces all render assignee from ticket.assignee_id, so it must follow.
+    lead = next(
+        a for a in client.get(f"/api/workspaces/{ws_id}/agents").json() if a["name"] == "lead-1"
+    )
+    assert ticket_detail["assignee_id"] == lead["id"]
+
+
+def test_fanout_mention_reassigns_to_first_target_and_schedules_all(
+    client, tmp_path, monkeypatch
+):
+    """A report mentioning several agents at once: every target gets a follow-up run,
+    but the ticket's assignee moves to the FIRST valid target only (the ticket can
+    have one assignee; the others still work the ticket as scheduled runs)."""
+    ws_id = _make_workspace(client, tmp_path)
+    eng = _make_agent(client, ws_id, "engineer", "eng-1", model="opencode/eng")
+    _make_agent(client, ws_id, "lead", "lead-1", model="opencode/lead")
+    _make_agent(client, ws_id, "qa", "qa-1", model="opencode/qa")
+    ticket = _make_ticket(client, ws_id)
+    _set_status(client, ticket["key"], "todo")
+    _set_status(client, ticket["key"], "in_progress")
+
+    # eng mentions lead-1 AND qa-1; both follow-ups report a legal terminal status
+    # for their roles (lead: qa, qa: security) with an empty mention so the chain stops.
+    script = _write_python_binary(
+        tmp_path / "opencode",
+        _script_by_model(
+            {
+                "opencode/eng": ("review", "lead-1, qa-1"),
+                "opencode/lead": ("qa", ""),
+                "opencode/qa": ("security", ""),
+            }
+        ),
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": eng["id"]})
+    assert resp.status_code == 201, resp.text
+
+    runs = _wait_for_run_count(client, ws_id, ticket["id"], 3)
+    followups = [r for r in runs if r["trigger"] == "handoff"]
+    assert len(followups) == 2, followups
+    agents = {a["id"]: a["name"] for a in client.get(f"/api/workspaces/{ws_id}/agents").json()}
+    assert {agents[r["agent_id"]] for r in followups} == {"lead-1", "qa-1"}
+    assert all(r["status"] == "done" for r in followups)
+
+    lead = next(a for a in agents.items() if a[1] == "lead-1")[0]
+    detail = client.get(f"/api/tickets/{ticket['key']}").json()
+    assert detail["assignee_id"] == lead
 
 
 # ---------------------------------------------------------------------------
@@ -579,6 +628,10 @@ def test_mention_on_completed_ticket_does_not_schedule_followup_run(client, tmp_
     eng = _make_agent(client, ws_id, "engineer", "eng-1")
     _make_agent(client, ws_id, "lead", "lead-1")
     ticket = _make_ticket(client, ws_id)
+    # Ticket is assigned to eng (the agent who closes it) — the informational mention
+    # must not move the assignee to lead-1.
+    resp = client.patch(f"/api/tickets/{ticket['key']}", json={"assignee_id": eng["id"]})
+    assert resp.status_code == 200, resp.text
     _set_status(client, ticket["key"], "todo")
     _set_status(client, ticket["key"], "in_progress")
     _set_status(client, ticket["key"], "review")
@@ -607,6 +660,9 @@ def test_mention_on_completed_ticket_does_not_schedule_followup_run(client, tmp_
     detail = client.get(f"/api/tickets/{ticket['key']}").json()
     assert detail["status"] == "done"
     assert detail["handoff_depth"] == 0
+    # Informational mention on a final status is NOT a handoff — the assignee stays
+    # with the agent who actually closed the ticket.
+    assert detail["assignee_id"] == eng["id"]
     bodies = _system_comment_bodies(client, ticket["key"])
     assert any("lead-1" in b and "info" in b for b in bodies), bodies
 
@@ -640,3 +696,54 @@ def test_blocked_report_with_mention_still_schedules_handoff(client, tmp_path, m
 
     detail = client.get(f"/api/tickets/{ticket['key']}").json()
     assert detail["handoff_depth"] == 1
+
+
+def test_summary_comment_records_at_mentions_from_body(client, tmp_path, monkeypatch):
+    """An `@name` written in the report's summary text (the comment body) is recorded
+    as a comment_mention (shown as a badge/link in the UI) — without scheduling a
+    second run, which would bypass handoff guardrails. A bare name without `@` stays
+    plain prose."""
+    ws_id = _make_workspace(client, tmp_path)
+    eng = _make_agent(client, ws_id, "engineer", "eng-1")
+    _make_agent(client, ws_id, "lead", "lead-1")
+    ticket = _make_ticket(client, ws_id)
+    _set_status(client, ticket["key"], "todo")
+    _set_status(client, ticket["key"], "in_progress")
+
+    script = _write_python_binary(
+        tmp_path / "opencode",
+        f'''
+import json
+text = """ok
+
+```map
+status: review
+mention: []
+summary: |
+  Selesai. Tolong direview oleh @lead-1; koordinator umumnya lead-1.
+```
+"""
+print(json.dumps({{"type": "assistant_text", "text": text}}))
+''',
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": eng["id"]})
+    assert resp.status_code == 201, resp.text
+    run = _wait_for_run(client, resp.json()["id"])
+    assert run["status"] == "done", run
+
+    # @lead-1 in the body → mention recorded; bare "lead-1" ignored.
+    detail = client.get(f"/api/tickets/{ticket['key']}").json()
+    agent_comments = [c for c in detail["comments"] if not c["is_system"]]
+    assert len(agent_comments) == 1
+    assert agent_comments[0]["mentions"] == ["lead-1"]
+
+    # Informational only: no follow-up run (mention: [] in the report).
+    time.sleep(0.3)
+    runs = [
+        r
+        for r in client.get(f"/api/workspaces/{ws_id}/runs").json()
+        if r["ticket_id"] == ticket["id"]
+    ]
+    assert len(runs) == 1, runs

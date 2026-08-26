@@ -55,15 +55,20 @@ export function isPdf(a: Previewable): boolean {
 export function AttachmentPreviewDialog({
   attachment,
   onClose,
+  url,
 }: {
   attachment: Previewable;
   onClose: () => void;
+  /** Override the download/preview URL (conversation attachments live under a
+   * different route than ticket attachments). */
+  url?: string;
 }) {
+  const src = url ?? attachmentUrl(attachment.id);
   const isTextFile = isText(attachment);
   const textQuery = useQuery({
     queryKey: ["artifact-content", attachment.id],
     queryFn: async () => {
-      const res = await fetch(attachmentUrl(attachment.id));
+      const res = await fetch(src);
       if (!res.ok) throw new Error(res.statusText);
       return res.text();
     },
@@ -100,14 +105,14 @@ export function AttachmentPreviewDialog({
           {isImage(attachment) && (
             // eslint-disable-next-line @next/next/no-img-element
             <img
-              src={attachmentUrl(attachment.id, { inline: true })}
+              src={src + (src.includes("?") ? "&inline=1" : "?inline=1")}
               alt={attachment.filename}
               className="mx-auto max-h-[55vh] max-w-full object-contain"
             />
           )}
           {isPdf(attachment) && (
             <iframe
-              src={attachmentUrl(attachment.id, { inline: true })}
+              src={src + (src.includes("?") ? "&inline=1" : "?inline=1")}
               title={attachment.filename}
               className="h-[60vh] w-full rounded-md border border-zinc-200 dark:border-zinc-800"
             />
@@ -118,7 +123,7 @@ export function AttachmentPreviewDialog({
               <Button
                 variant="outline"
                 nativeButton={false}
-                render={<a href={attachmentUrl(attachment.id)} download />}
+                render={<a href={src} download />}
               >
                 <DownloadIcon className="mr-1.5 size-3.5" /> Download
               </Button>

@@ -45,11 +45,16 @@ const GUARDRAIL_FIELDS: { key: string; label: string; step: string }[] = [
   { key: "max_handoff_depth", label: "Max handoff depth", step: "1" },
   { key: "loop_threshold", label: "Loop threshold", step: "1" },
   { key: "max_concurrent_runs", label: "Max concurrent runs", step: "1" },
+  { key: "max_auto_retries", label: "Max auto retries per agent", step: "1" },
+  { key: "auto_check_interval_minutes", label: "Auto-check interval (min)", step: "1" },
+  { key: "auto_check_stale_minutes", label: "Auto-check stale after (min)", step: "1" },
 ];
 
 const ROLE_OPTIONS: { value: AgentRole; label: string }[] = [
   { value: "pm", label: "PM" },
+  { value: "business_analyst", label: "Business Analyst" },
   { value: "lead", label: "Lead" },
+  { value: "system_architect", label: "System Architect" },
   { value: "engineer", label: "Engineer" },
   { value: "designer", label: "Designer" },
   { value: "qa", label: "QA" },

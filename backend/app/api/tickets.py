@@ -236,7 +236,24 @@ async def update_ticket(key: str, body: TicketUpdate, session: AsyncSession = De
 
 
 @tickets_router.delete("/{key}", status_code=204)
-async def delete_ticket(key: str, session: AsyncSession = Depends(get_session)):
+async def delete_ticket(
+    key: str,
+    actor_agent_id: str | None = None,
+    session: AsyncSession = Depends(get_session),
+):
+    """Permanently delete a ticket (cascades to comments/attachments/runs).
+
+    `actor_agent_id` optional (owner path): when set, only a PM agent may delete —
+    ticket deletion is a project-level decision, not something any role can do.
+    """
     ticket = await _get_ticket_or_404(session, key)
+
+    if actor_agent_id is not None:
+        actor = await session.get(Agent, actor_agent_id)
+        if actor is None:
+            raise AppError(422, "invalid_reference", "actor_agent_id does not exist")
+        if actor.role != "pm":
+            raise AppError(403, "pm_only", "hanya PM yang boleh menghapus tiket")
+
     await session.delete(ticket)
     await session.commit()

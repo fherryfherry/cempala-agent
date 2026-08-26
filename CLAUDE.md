@@ -43,7 +43,8 @@ Single test once pytest exists: `cd backend && pytest tests/test_report.py::test
 
 ## Architecture
 
-A Jira-like portal where AI agents (PM, Lead, Engineer, Designer, QA, Pentester) work tickets
+A Jira-like portal where AI agents (PM, Business Analyst, Lead, System Architect, Engineer,
+Designer, QA, Pentester) work tickets
 autonomously inside a real local repo. Next.js frontend → FastAPI backend → SQLite, with agent
 runs as `asyncio.Task`s in the backend process.
 

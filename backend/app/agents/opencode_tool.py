@@ -37,6 +37,8 @@ from app.agents.base import AdapterEvent, RunContext
 from app.agents.mcp_config import mcp_config_path
 from app.config import settings
 
+_GIT_ENV_PREFIX = "GIT_"
+
 _KNOWN_EVENT_TYPES = {"assistant_text", "reasoning", "tool_call", "tool_result", "error"}
 _TERMINATE_GRACE_SECONDS = 5
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
@@ -85,9 +87,25 @@ class OpenCodeTool:
         # Per-run MCP config (ADR-011): expose ticket/artifact/memory tools to the
         # agent via a temp opencode.json. Cleaned up when the run finishes.
         mcp_config = mcp_config_path(ctx.workspace_id, ctx.agent_id)
-        env = None
+
+        # Git identity for agent commits: author/committer name + dummy email.
+        # GIT_AUTHOR_* env vars override repo/global git config for every commit
+        # made by the agent during this run — injected here so all child processes
+        # (git add → git commit → ...) inherit them automatically.
+        git_name = ctx.agent_name or ctx.agent_id
+        slug = re.sub(r"[^a-zA-Z0-9]+", "-", git_name.lower()).strip("-") or ctx.agent_id
+        git_email = f"{slug}@agent.local"
+        git_env = {
+            "GIT_AUTHOR_NAME": git_name,
+            "GIT_AUTHOR_EMAIL": git_email,
+            "GIT_COMMITTER_NAME": git_name,
+            "GIT_COMMITTER_EMAIL": git_email,
+        }
+
+        base_env = {**os.environ, **git_env}
         if mcp_config is not None:
-            env = {**os.environ, "OPENCODE_CONFIG": mcp_config}
+            base_env["OPENCODE_CONFIG"] = mcp_config
+        env = base_env
 
         try:
             proc = await asyncio.create_subprocess_exec(

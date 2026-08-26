@@ -24,7 +24,7 @@ from app.core.state_machine import ALL_ROLES, STATUSES
 AGENT_DECLARABLE_STATUSES = STATUSES - {"release"}
 
 # Roles allowed to include tickets[] in their block. docs/03-agent-design.md §3.
-ROLES_ALLOWED_TICKETS = frozenset({"pm", "qa", "pentester"})
+ROLES_ALLOWED_TICKETS = frozenset({"pm", "qa", "pentester", "business_analyst"})
 
 # Categories a ticket may carry (docs/02-tsd.md §2, kanban category badge).
 VALID_CATEGORIES = frozenset({"feature", "improvement", "fix", "security", "performance"})
@@ -51,11 +51,28 @@ class TicketDraft:
     epic: str | None = None
 
 
+# Statuses a `sprints:` entry may request via `status:` — moving an EXISTING sprint
+# to active/completed, on top of the plain create/update `_get_or_create_sprint`
+# already did. "planned" isn't here: that's the default/fallback, never something
+# an agent needs to explicitly ask for.
+VALID_SPRINT_STATUSES = frozenset({"active", "completed"})
+
+
 @dataclass
 class SprintDraft:
     name: str
     goal: str | None = None
     duration: float | None = None
+    # Calendar dates (YYYY-MM-DD) — the sprint's timebox range, declared by the PM
+    # alongside the sprint (docs/03-agent-design.md §4). Optional: a sprint without
+    # dates falls back to the timeline's unscheduled rendering.
+    start_date: str | None = None
+    end_date: str | None = None
+    # Optional: activate or complete this sprint (VALID_SPRINT_STATUSES). Lets the
+    # PM actually move sprints forward through a ```map block — previously the
+    # only way to activate/complete a sprint was the owner's manual PATCH in the
+    # UI, so the PM had no path to do it itself.
+    status: str | None = None
 
 
 @dataclass
@@ -121,10 +138,44 @@ class ParseResult:
     memories: list[str] = field(default_factory=list)
     memories_dropped: bool = False
     memories_dropped_reason: str | None = None
+    merge_branch: str | None = None
+
+    def dropped_notes(self) -> list[str]:
+        """Every non-empty `*_dropped_reason` — callers must surface these (a system
+        comment/message) or the agent's own `summary` is the only account of the run,
+        which silently misrepresents what actually happened."""
+        return [
+            reason
+            for reason in (
+                self.tickets_dropped_reason,
+                self.sprints_dropped_reason,
+                self.updates_dropped_reason,
+                self.artifacts_dropped_reason,
+                self.artifact_updates_dropped_reason,
+                self.comments_dropped_reason,
+                self.memories_dropped_reason,
+            )
+            if reason
+        ]
 
 
 def _invalid(reason: str) -> ParseResult:
     return ParseResult(ok=False, reason=reason)
+
+
+def _not_a_list_reason(field_name: str, raw: object) -> str:
+    # A `str` here is the fingerprint of the most common agent mistake: writing
+    # `field: |` (YAML literal block scalar) instead of `field:` followed by a
+    # plain list. `|` swallows the indented list items into one string instead
+    # of parsing them, so this happens a lot — name it so the agent's next
+    # attempt (or whoever's debugging) doesn't have to guess.
+    hint = (
+        f" — kemungkinan kamu menulis '{field_name}: |' (literal block), padahal harus "
+        f"'{field_name}:' langsung diikuti item list ('- ...') TANPA tanda '|'"
+        if isinstance(raw, str)
+        else ""
+    )
+    return f"'{field_name}' must be a list; dropped{hint}"
 
 
 def parse_report(
@@ -135,7 +186,7 @@ def parse_report(
     *,
     ticket_approved: bool = True,
     sprint_creator_roles: set[str] | None = None,
-    routine_mode: bool = False,
+    no_ticket_mode: bool = False,
 ) -> ParseResult:
     matches = _MAP_BLOCK_RE.findall(text or "")
     if not matches:
@@ -151,18 +202,19 @@ def parse_report(
     if not isinstance(data, dict):
         return _invalid("```map block did not parse to a YAML mapping")
 
-    if routine_mode:
-        # Routine runs have no ticket: status/mention are meaningless and must not be
-        # applied anywhere. Rejecting the whole report (run failed, not blocked) keeps
-        # the contract strict — a routine that declares status is a prompt bug.
+    if no_ticket_mode:
+        # No-ticket runs (routine runs, chat runs) have no ticket to transition:
+        # status/mention are meaningless and must not be applied anywhere. Rejecting
+        # the whole report (run failed, not blocked) keeps the contract strict — a
+        # routine/chat that declares status is a prompt bug.
         if data.get("status") is not None:
             return _invalid(
-                "routine run tidak boleh mendeklarasikan 'status' — rutinitas hanya boleh "
+                "run tanpa tiket tidak boleh mendeklarasikan 'status' — hanya boleh "
                 "berisi aksi (comments/tickets/updates/memory/artifacts)"
             )
         if data.get("mention") is not None:
             return _invalid(
-                "routine run tidak boleh mendeklarasikan 'mention' — rutinitas hanya boleh "
+                "run tanpa tiket tidak boleh mendeklarasikan 'mention' — hanya boleh "
                 "berisi aksi (comments/tickets/updates/memory/artifacts)"
             )
     else:
@@ -225,7 +277,7 @@ def parse_report(
             )
         elif not isinstance(tickets_raw, list):
             tickets_dropped = True
-            tickets_dropped_reason = "'tickets' must be a list; dropped"
+            tickets_dropped_reason = _not_a_list_reason("tickets", tickets_raw)
         else:
             for item in tickets_raw:
                 if not isinstance(item, dict) or not item.get("title"):
@@ -269,17 +321,30 @@ def parse_report(
             )
         elif not isinstance(sprints_raw, list):
             sprints_dropped = True
-            sprints_dropped_reason = "'sprints' must be a list; dropped"
+            sprints_dropped_reason = _not_a_list_reason("sprints", sprints_raw)
         else:
+            malformed_entries: list[str] = []
             for item in sprints_raw:
                 if not isinstance(item, dict) or not item.get("name"):
-                    continue  # skip malformed entries, don't fail whole parse
+                    malformed_entries.append(str(item))
+                    continue
+                raw_status = item.get("status")
                 sprints.append(
                     SprintDraft(
                         name=str(item["name"]),
                         goal=str(item["goal"]) if item.get("goal") else None,
                         duration=float(item["duration"]) if item.get("duration") else None,
+                        start_date=str(item["start_date"]) if item.get("start_date") else None,
+                        end_date=str(item["end_date"]) if item.get("end_date") else None,
+                        status=raw_status if raw_status in VALID_SPRINT_STATUSES else None,
                     )
+                )
+            if malformed_entries:
+                sprints_dropped = True
+                sprints_dropped_reason = (
+                    f"beberapa entri sprints[] malformed/dropped: {malformed_entries}; "
+                    "setiap entri sprints[] WAJIB berupa objek dengan field 'name' (string), "
+                    "contoh: sprints: - name: \"Sprint 1\""
                 )
 
     updates: list[TicketUpdateDraft] = []
@@ -295,7 +360,7 @@ def parse_report(
             )
         elif not isinstance(updates_raw, list):
             updates_dropped = True
-            updates_dropped_reason = "'updates' must be a list; dropped"
+            updates_dropped_reason = _not_a_list_reason("updates", updates_raw)
         else:
             for item in updates_raw:
                 if not isinstance(item, dict) or not item.get("ticket"):
@@ -324,7 +389,7 @@ def parse_report(
     if artifacts_raw:
         if not isinstance(artifacts_raw, list):
             artifacts_dropped = True
-            artifacts_dropped_reason = "'artifacts' must be a list; dropped"
+            artifacts_dropped_reason = _not_a_list_reason("artifacts", artifacts_raw)
         else:
             for item in artifacts_raw:
                 if not isinstance(item, dict) or not item.get("path") or not item.get("group"):
@@ -354,7 +419,9 @@ def parse_report(
             )
         elif not isinstance(artifact_updates_raw, list):
             artifact_updates_dropped = True
-            artifact_updates_dropped_reason = "'artifact_updates' must be a list; dropped"
+            artifact_updates_dropped_reason = _not_a_list_reason(
+                "artifact_updates", artifact_updates_raw
+            )
         else:
             for item in artifact_updates_raw:
                 if not isinstance(item, dict) or not item.get("op"):
@@ -373,22 +440,23 @@ def parse_report(
                     )
                 )
 
-    # `comments:` — routine-run-only: comment on OTHER tickets (docs/03-agent-design.md
-    # §Routine). Rejected in normal ticket runs (a ticket run already has its own
-    # summary comment). Malformed entries are skipped, same tolerance as tickets:.
+    # `comments:` — no-ticket-mode-only (routine runs and chat runs): comment on OTHER
+    # tickets (docs/03-agent-design.md §Routine, §4 chat two-way). Rejected in normal
+    # ticket runs (a ticket run already has its own summary comment). Malformed entries
+    # are skipped, same tolerance as tickets:.
     comments: list[CommentDraft] = []
     comments_dropped = False
     comments_dropped_reason = None
     comments_raw = data.get("comments")
     if comments_raw:
-        if not routine_mode:
+        if not no_ticket_mode:
             comments_dropped = True
             comments_dropped_reason = (
-                "'comments' hanya valid di run rutinitas (tanpa tiket); dropped"
+                "'comments' hanya valid di run tanpa tiket (rutinitas/chat); dropped"
             )
         elif not isinstance(comments_raw, list):
             comments_dropped = True
-            comments_dropped_reason = "'comments' must be a list; dropped"
+            comments_dropped_reason = _not_a_list_reason("comments", comments_raw)
         else:
             for item in comments_raw:
                 if not isinstance(item, dict) or not item.get("ticket") or not item.get("body"):
@@ -423,7 +491,7 @@ def parse_report(
 
     return ParseResult(
         ok=True,
-        status=status if not routine_mode else None,
+        status=status if not no_ticket_mode else None,
         mention=mention,
         valid_mentions=valid_mentions,
         unknown_mentions=unknown_mentions,
@@ -449,4 +517,5 @@ def parse_report(
         memories=memories,
         memories_dropped=memories_dropped,
         memories_dropped_reason=memories_dropped_reason,
+        merge_branch=data.get("merge_branch") if isinstance(data.get("merge_branch"), str) else None,
     )

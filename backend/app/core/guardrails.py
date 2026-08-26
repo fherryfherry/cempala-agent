@@ -139,9 +139,11 @@ async def check_guardrails_routine(
     workspace_id: str,
     guardrails: dict,
 ) -> None:
-    """Schedule-time checks for routine runs (no ticket): only `max_concurrent_runs`
-    applies — cost-per-ticket and handoff-depth are ticket-scoped and meaningless here.
-    Raises `GuardrailBlocked` on the first failing check.
+    """Schedule-time checks for no-ticket runs (routine + chat): only
+    `max_concurrent_runs` applies — cost-per-ticket and handoff-depth are ticket-scoped
+    and meaningless here. Counts running ticket runs AND running no-ticket runs
+    (routine/chat) for the workspace, so a chat run can't sneak past the concurrency
+    cap by not being on a ticket. Raises `GuardrailBlocked` on the first failing check.
     """
     max_concurrent = _limit(guardrails, "max_concurrent_runs")
     query = (
@@ -151,6 +153,16 @@ async def check_guardrails_routine(
         .where(Ticket.workspace_id == workspace_id, Run.status == "running")
     )
     running = await session.scalar(query)
+    # No-ticket runs (routine/chat) share the same concurrency budget.
+    from app.db.models import Conversation
+
+    no_ticket_running = await session.scalar(
+        select(func.count())
+        .select_from(Run)
+        .join(Conversation, Run.conversation_id == Conversation.id)
+        .where(Conversation.workspace_id == workspace_id, Run.status == "running")
+    )
+    running += no_ticket_running or 0
     if running >= max_concurrent:
         raise GuardrailBlocked(
             "max_concurrent_runs",

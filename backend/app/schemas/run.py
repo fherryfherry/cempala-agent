@@ -10,6 +10,7 @@ class RunCreate(BaseModel):
 class RunOut(BaseModel):
     id: str
     ticket_id: str | None
+    conversation_id: str | None = None
     agent_id: str
     status: str
     trigger: str

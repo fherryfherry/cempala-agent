@@ -54,3 +54,17 @@ export const STATUS_BLOCK_COLOR: Record<TicketStatus, string> = {
   release: "bg-teal-600",
   blocked: "bg-red-600",
 };
+
+/** Literal hex twin of STATUS_BLOCK_COLOR for contexts needing a real color
+ * value (e.g. recharts fill/stroke props, which can't take Tailwind classes). */
+export const STATUS_HEX: Record<TicketStatus, string> = {
+  backlog: "#a1a1aa", // zinc-400
+  todo: "#64748b", // slate-500
+  in_progress: "#2563eb", // blue-600
+  review: "#7c3aed", // violet-600
+  qa: "#f59e0b", // amber-500
+  security: "#e11d48", // rose-600
+  done: "#059669", // emerald-600
+  release: "#0d9488", // teal-600
+  blocked: "#dc2626", // red-600
+};

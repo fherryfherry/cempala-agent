@@ -80,7 +80,7 @@ workspace
 agent
   id, workspace_id → workspace.id (cascade),
   name (unique per workspace, slug for @mention),
-  role (enum: pm|lead|engineer|designer|qa|pentester),
+  role (enum: pm|lead|engineer|designer|qa|pentester|business_analyst|system_architect),
   model (str, format "provider/model" — from `opencode models`),
   tool_kind (enum: opencode|claude|agy|codex),
   system_prompt (nullable → default per role),
@@ -132,10 +132,25 @@ comment
 comment_mention
   id, comment_id (cascade), agent_id (cascade)
 
+conversation            -- chat with the PM, separate from ticket comments (ADR-014)
+  id, workspace_id (cascade), title,
+  linked_ticket_key (nullable, display-only context link),
+  created_at, updated_at, last_message_at (nullable)
+
+conversation_message
+  id, conversation_id (cascade), run_id (nullable, SET NULL),
+  author_agent_id (nullable = owner), is_system (bool), body, created_at
+
+conversation_attachment
+  id, conversation_id (cascade), message_id (nullable, SET NULL),
+  filename, content_type, size_bytes, path (relative to storage/), created_at
+
 run
-  id, ticket_id (cascade), agent_id (cascade),
+  id, ticket_id (cascade, nullable — NULL for routine/chat runs),
+  conversation_id (nullable, SET NULL — set only for chat runs),
+  agent_id (cascade),
   status (enum: queued|running|done|failed|cancelled|interrupted),
-  trigger (enum: manual|mention|handoff|auto),
+  trigger (enum: manual|mention|handoff|auto|routine|chat),
   parent_run_id → run.id (nullable),
   tool_kind, model,
   session_id (nullable),                  -- opencode session, for continuation
@@ -148,7 +163,7 @@ event
   id, run_id (cascade), workspace_id (denormalized, SSE filter),
   seq (int, per run),
   type (enum: run_started|assistant_text|reasoning|tool_call|tool_result|
-        status_change|comment|handoff|error|run_ended),
+        status_change|comment|conversation_message|handoff|error|run_ended),
   payload (JSON), created_at
 ```
 
@@ -247,7 +262,31 @@ GET    /tickets/{key}/comments
 POST   /tickets/{key}/comments   {body, author_agent_id?}
 ```
 The server parses `@agent-name`, fills `comment_mention`, and triggers a run for each mentioned
-agent (except the author), `trigger=mention`.
+agent (except the author), `trigger=mention`. This is a nudge, not a reassignment: unlike a
+```map `mention:` handoff (§4.3), a comment `@mention` never changes `ticket.assignee_id` —
+it may be a plain discussion in the comment thread.
+
+### Conversations (chat with the PM, ADR-014)
+```
+GET    /workspaces/{id}/conversations
+POST   /workspaces/{id}/conversations   {title, linked_ticket_key?}
+GET    /conversations/{id}
+GET    /conversations/{id}/messages
+POST   /conversations/{id}/messages     {body}   → owner message, triggers a PM chat run
+GET    /conversations/{id}/attachments
+POST   /conversations/{id}/attachments   (multipart file)
+GET    /conversations/attachments/{id}/download
+DELETE /conversations/attachments/{id}
+```
+Chat is a separate channel from ticket comments: messages live in
+`conversation_message`, and each owner message schedules a PM run with
+`Run.ticket_id = NULL`, `trigger = "chat"`, `Run.conversation_id` set. The PM's reply
+is the ```map `summary` written back into the conversation; `comments[]` in the chat
+```map contract is the two-way follow-up onto real tickets (same field as routine
+runs). Only `max_concurrent_runs` applies (counted across ticket + no-ticket runs);
+failures land as System messages in the conversation. One chat run per conversation
+at a time — a second message while a run is queued/running is persisted and answered
+by the in-flight run (its prompt includes the full transcript).
 
 ### Run
 ```
@@ -258,12 +297,15 @@ GET    /runs/{id}                → metadata + events (paginated)
 GET    /workspaces/{id}/runs     ?status=
 ```
 `retry` (MAP-036) re-schedules the same agent+ticket (`trigger=manual`) — mechanically identical
-to clicking Run again. The `session_id` lookup in `execute()` is already status-agnostic (§4.5),
-so it automatically resumes the old opencode session if the retried run managed to get a
-`session_id` before failing. If the ticket is `blocked` at retry time, this endpoint clears the
-block first (`blocked_reason=None`, `loop_reset_at`, `handoff_depth=0`) — the same pattern as
-`PATCH /tickets/{key}` when moving a ticket out of `blocked` — so pre-failure history does not
-immediately re-trip the same guardrail. 409 `not_retryable` if the run is not `failed`/`interrupted`.
+to clicking Run again. It covers status `failed`/`interrupted` (Retry) and `cancelled` with
+`error=None` (Resume — a run the owner stopped); `cancelled` runs with `error` set were killed
+by a runtime guardrail and are rejected. The `session_id` lookup in `execute()` is already
+status-agnostic (§4.5), so it automatically resumes the old opencode session if the retried
+run managed to get a `session_id` before stopping/failing. If the ticket is `blocked` at retry
+time, this endpoint clears the block first (`blocked_reason=None`, `loop_reset_at`,
+`handoff_depth=0`) — the same pattern as `PATCH /tickets/{key}` when moving a ticket out of
+`blocked` — so pre-failure history does not immediately re-trip the same guardrail. 409
+`not_retryable` for any other status.
 
 ### Events (SSE)
 ```
@@ -360,11 +402,12 @@ instruction to close the answer with a fenced block:
 ````
 ```map
 status: review              # target status for this ticket
-mention: [lead-1]           # agent that should take over (name, not role)
+mention: [lead-1]           # agent that should take over (name, not role, no @)
 summary: |                  # becomes a comment on the ticket
   Added email validation to the login form.
   Files: src/auth/login.tsx, src/auth/validate.ts
   Evidence: npm test → 12 passed
+  @lead-1 — please review the auth flows.
 tickets:                    # optional; PM for breakdown, QA/Pentester for bugs
   - title: Add validation to POST /auth/login
     description: |
@@ -387,8 +430,16 @@ Parser rules (`core/report.py`):
 - `status` is validated by the state machine (§5). Illegal → ticket `blocked` + a system comment
   naming the requested transition.
 - `mention` is matched against agent names in the workspace. Unknown name → noted in a system
-  comment, no run is triggered.
+  comment, no run is triggered. A successful handoff (`mention` resolving to ≥1 valid agent on
+  a non-final ticket) also moves `ticket.assignee_id` to the first valid target — the board,
+  ticket detail, and timeline all render assignee from that column. Fan-out schedules every
+  target but keeps exactly one assignee (the first). Mentions on a final status or in comment
+  text never change the assignee ([03-agent-design.md](03-agent-design.md) §6).
 - `summary` is **required** → becomes a ticket comment with that agent's `author_agent_id`.
+  An `@name` in the comment text (summary or `comments[]` body) is recorded as a
+  `comment_mention` row for the UI badge/link — informational only, never schedules a run.
+  The actionable handoff is exclusively the `mention:` field (a second schedule from the
+  same report would bypass handoff guardrails).
 - `tickets[]` optional. Assigned, status `todo`. Only PM, QA, and Pentester may fill this in
   (enforced per role, not trusted to the model). The parent (`parent_id`) is resolved by the
   orchestrator, **not** always "child of the current ticket" (see `epic:` below, ADR-012).
@@ -524,7 +575,8 @@ Per workspace, in `workspace.guardrails` (JSON), editable on the settings page.
   "max_cost_per_ticket": 20.0,
   "max_handoff_depth": 12,
   "loop_threshold": 3,
-  "max_concurrent_runs": 3
+  "max_concurrent_runs": 3,
+  "max_auto_retries": 3
 }
 ```
 
@@ -539,6 +591,20 @@ Per workspace, in `workspace.guardrails` (JSON), editable on the settings page.
   comment recording the cycle.
 - **max_concurrent_runs** — per-workspace semaphore. Default is low (3) because each run is a
   full opencode process, not just an HTTP call.
+- **max_auto_retries** — how many times a *retryable* failed run is retried automatically per
+  (ticket, agent) before the ticket gets `blocked`. A run is retryable when the failure is one
+  the agent can adapt to: a missing/malformed ```map block or an opencode subprocess failure
+  (nonzero exit / stderr / missing binary / no `run_ended` event). Each retry is a new `Run`
+  row chained via `parent_run_id` (`trigger="auto"`); the ticket is NOT blocked between retries.
+  The retry prompt carries a "PERINGATAN: RUN SEBELUMNYA GAGAL" notice (parent's error + tail
+  of the agent's last output) and starts a **fresh** opencode session (`-s` is not passed).
+  Non-retryable failures — state-machine rejections, runtime guardrail trips (`cancelled`),
+  user stops — and routine runs never auto-retry. `max_auto_retries=0` disables the feature
+  (pre-MAP behavior: fail → block). The chain (and budget) resets at any owner intervention:
+  a manual `POST /runs/{id}/retry` or `trigger="mention"` schedules with no `parent_run_id`,
+  breaking the chain — mirroring `loop_reset_at`/`handoff_depth` reset on unblock. Retry
+  children are still subject to every other guardrail, and `max_cost_per_ticket` accumulates
+  the failed attempts' cost, so runaway retries are bounded by the cost brake too.
 - **Kill switch** — `POST /workspaces/{id}/pause`: set `paused=true`, set all `cancel_event`s,
   terminate all subprocesses, mark runs `cancelled`, agents `idle`, reject new schedules.
 - **ticket_not_in_active_sprint** — not part of the dict above (always on, no toggle on the
