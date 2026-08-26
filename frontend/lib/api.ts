@@ -32,6 +32,10 @@ export async function apiFetch<T>(
     throw new ApiError(message, res.status);
   }
 
+  if (res.status === 204) {
+    return undefined as T;
+  }
+
   return res.json() as Promise<T>;
 }
 
@@ -126,6 +130,12 @@ export function resumeWorkspace(workspaceId: string): Promise<Workspace> {
  * already be paused with nothing running/queued. */
 export function resetWorkspace(workspaceId: string): Promise<Workspace> {
   return apiFetch<Workspace>(`/workspaces/${workspaceId}/reset`, { method: "POST" });
+}
+
+/** Permanently deletes the workspace and all its data (pauses, waits for runs
+ * to stop, then deletes). The repo folder on disk is left intact. */
+export function terminateWorkspace(workspaceId: string): Promise<void> {
+  return apiFetch<void>(`/workspaces/${workspaceId}/terminate`, { method: "POST" });
 }
 
 export function getWorkflowPromptDefault(): Promise<{ workflow_prompt: string }> {
