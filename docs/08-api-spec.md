@@ -64,6 +64,17 @@ DELETE /workspaces/{id}
 Cascade: agents, tickets, runs, events. Does NOT delete the repo folder.
 Response: 204
 
+### Terminate workspace
+```
+POST /workspaces/{id}/terminate
+```
+Pauses the workspace (kill switch), waits for all running/queued runs to stop
+(timeout 60s), then deletes every ticket/sprint/artifact group and the workspace
+itself (cascades to agents, runs, events, conversations, routines, memories).
+Does NOT delete the repo folder. Returns 409 `runs_in_progress` if runs don't
+stop within the timeout (workspace stays paused).
+Response: 204
+
 ### Pause workspace (kill switch)
 ```
 POST /workspaces/{id}/pause
