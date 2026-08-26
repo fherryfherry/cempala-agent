@@ -23,7 +23,7 @@ def _validate_avatar_color(v: str | None) -> str | None:
 class AgentCreate(BaseModel):
     name: str
     role: Role
-    model: str
+    model: str | None = None
     tool_kind: ToolKind
     system_prompt: str | None = None
     avatar_template: AvatarTemplate | None = None
@@ -50,7 +50,7 @@ class AgentOut(BaseModel):
     workspace_id: str
     name: str
     role: str
-    model: str
+    model: str | None
     tool_kind: str
     system_prompt: str | None
     avatar_template: str | None
