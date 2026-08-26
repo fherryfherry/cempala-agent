@@ -392,3 +392,56 @@ def test_terminate_waits_for_running_run_then_succeeds(client, tmp_path, monkeyp
     resp = client.post(f"/api/workspaces/{ws_id}/terminate")
     assert resp.status_code == 204
     assert client.get(f"/api/workspaces/{ws_id}").status_code == 404
+
+
+def test_terminate_timeout_409_keeps_workspace(client, tmp_path, monkeypatch):
+    import asyncio
+
+    from app.core import orchestrator
+
+    create = client.post(
+        "/api/workspaces", json={"name": "Acme", "key": "ACM", "repo_path": str(tmp_path)}
+    )
+    ws_id = create.json()["id"]
+
+    async def _seed_running_run():
+        async with db_session.async_session() as s:
+            agent = Agent(
+                workspace_id=ws_id, name="eng", role="engineer",
+                model="opencode/big-pickle", tool_kind="opencode", status="working",
+            )
+            s.add(agent)
+            await s.flush()
+            ticket = Ticket(
+                workspace_id=ws_id, key="ACM-1", title="t", status="in_progress",
+            )
+            s.add(ticket)
+            await s.flush()
+            run = Run(
+                ticket_id=ticket.id, agent_id=agent.id, status="running",
+                trigger="manual", tool_kind="opencode", model="opencode/big-pickle",
+            )
+            s.add(run)
+            await s.commit()
+
+    asyncio.run(_seed_running_run())
+
+    # The run never actually stops — terminate must time out and leave the
+    # workspace paused and intact. Shrink the timeout so the test is fast.
+    import app.api.workspaces as ws_api
+
+    monkeypatch.setattr(ws_api, "_TERMINATE_TIMEOUT_SEC", 0.5)
+
+    async def _never_stop(run_id):
+        return True
+
+    monkeypatch.setattr(orchestrator, "stop", _never_stop)
+
+    resp = client.post(f"/api/workspaces/{ws_id}/terminate")
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["error"]["code"] == "runs_in_progress"
+
+    ws = client.get(f"/api/workspaces/{ws_id}").json()
+    assert ws["paused"] is True
+    assert client.get(f"/api/workspaces/{ws_id}/tickets").json() != []
