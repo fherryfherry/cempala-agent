@@ -143,6 +143,27 @@ def _wait_for_run(client, run_id, timeout=10.0):
     raise TimeoutError(f"run {run_id} did not reach a terminal state within {timeout}s")
 
 
+def _wait_for_epic_notice(client, epic_key, child_key, timeout=10.0):
+    """Wait until the System notice mirroring a blocked/failed child onto its
+    epic chat is persisted. `_wait_for_run` alone is NOT enough: the run's
+    terminal status is committed by the first event_bus.publish inside
+    `_block_ticket`, while the epic notice lands in a later commit — a polling
+    GET between the two sees status=failed but an empty epic chat (flaky on
+    fast runners). Poll the condition being asserted instead."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        detail = client.get(f"/api/tickets/{epic_key}").json()
+        system_bodies = [c["body"] for c in detail["comments"] if c["is_system"]]
+        notice = next((b for b in system_bodies if "menandai" in b and child_key in b), None)
+        if notice is not None:
+            return notice
+        time.sleep(0.03)
+    raise TimeoutError(
+        f"epic {epic_key} never got the blocked-child notice for {child_key} "
+        f"within {timeout}s (system comments: {system_bodies})"
+    )
+
+
 # ---------------------------------------------------------------------------
 # (a) valid ```map block -> ticket transitions, summary comment, mentions recorded
 # ---------------------------------------------------------------------------
@@ -1857,12 +1878,7 @@ exit 1""",
     run = client.post(f"/api/tickets/{child['key']}/run", json={"agent_id": eng_id}).json()
     _wait_for_run(client, run["id"])
 
-    epic_detail = client.get(f"/api/tickets/{epic['key']}").json()
-    system_bodies = [c["body"] for c in epic_detail["comments"] if c["is_system"]]
-    notice = next(
-        (b for b in system_bodies if "menandai" in b and child["key"] in b), None
-    )
-    assert notice is not None, system_bodies
+    notice = _wait_for_epic_notice(client, epic["key"], child["key"])
     assert "segfault" in notice
 
 
