@@ -15,8 +15,8 @@ inside a local repo folder, and you watch everything happen in real time through
 and streaming output.
 
 The portal does not build its own coding agent — it assembles a prompt, hands it to an external
-coding tool (`opencode`), and receives the result via a ` ```map ` block at the end of the agent's
-reply.
+coding CLI (`opencode`, `claude`, `codex`, or `agy` — configurable per agent), and receives the
+result via a ` ```map ` block at the end of the agent's reply.
 
 The name comes from the *cempala*, the small wooden mallet a Javanese wayang *dalang* uses to tap
 the puppet sticks and puppet box — setting the rhythm, cueing the music, and commanding the stage
@@ -28,10 +28,12 @@ See [`docs/00-overview.md`](docs/00-overview.md) for the full pitch and
 
 ## ⚠️ Security warning — read before running
 
-- `opencode` is run with the **`--auto`** flag, meaning the agent **approves all permissions
-  itself** — no human confirms any permission dialog.
-- `--dir <repo_path>` only sets the **working directory**, it is **NOT a sandbox**. Nothing stops
-  the agent from touching files outside that folder.
+- Every supported CLI (`opencode --auto`, `claude --permission-mode ...`,
+  `codex --dangerously-bypass-approvals-and-sandbox`, `agy --dangerously-skip-permissions`) is run
+  in its full-auto mode, meaning the agent **approves all permissions itself** — no human confirms
+  any permission dialog, regardless of which tool an agent is configured with.
+- The working-directory flag each CLI is given only sets **where** it runs, it is **NOT a
+  sandbox**. Nothing stops the agent from touching files outside that folder.
 - Consequence: the agent can run **any command** with the privileges of the user running the
   backend.
 - Therefore:
@@ -79,7 +81,8 @@ manages its own auth.
 
 ## Setup from scratch
 
-1. Install & authenticate `opencode`: `opencode auth login` (see [Prerequisites](#prerequisites)).
+1. Install & authenticate at least one agent CLI (see [Prerequisites](#prerequisites)) — `opencode`
+   is the simplest to start with: `opencode auth login`.
 2. Set up the backend: `cd backend && uv venv --python 3.12 .venv && uv pip install -e ".[dev]"`
    (without `uv`: `python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"`).
 3. Set up the frontend: `cd frontend && npm install`.
