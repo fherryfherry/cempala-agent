@@ -473,6 +473,16 @@ def test_no_existing_sprints_tells_agent_pure_timebox_naming():
     assert "Sprints that ALREADY EXIST" not in prompt
 
 
+def test_artifacts_contract_mentions_screenshots():
+    prompt = build_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, TICKET)
+    assert "SCREENSHOTS of any visible UI change" in prompt
+    assert "take a screenshot of the result" in prompt
+
+
+def test_qa_prompt_mentions_screenshot_evidence():
+    assert "include/attach a screenshot as evidence" in DEFAULT_ROLE_PROMPTS["qa"]
+
+
 def test_artifact_updates_contract_present_for_pm_only():
     pm_prompt = build_prompt(_agent("pm-1", "pm"), "/repo", ROSTER, TICKET)
     assert "artifact_updates:" in pm_prompt

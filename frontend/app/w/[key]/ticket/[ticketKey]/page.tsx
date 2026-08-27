@@ -23,6 +23,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Markdown } from "@/components/markdown";
+import { ScreenshotGallery } from "@/components/screenshot-gallery";
 import { AgentAvatar } from "@/components/agent-avatar";
 import { MentionAutocomplete, type MentionOption } from "@/components/mention-autocomplete";
 import { linkifyMentions } from "@/lib/mention-link";
@@ -250,6 +251,8 @@ export default function TicketDetailPage() {
           </CardContent>
         </Card>
       )}
+
+      <ScreenshotGallery attachments={t.attachments} />
 
       <Card>
         <CardHeader>
