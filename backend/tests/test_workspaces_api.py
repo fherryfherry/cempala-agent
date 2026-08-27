@@ -146,6 +146,72 @@ def test_create_repo_path_that_is_a_file_422(client, tmp_path):
     assert resp.json()["error"]["code"] == "invalid_repo_path"
 
 
+def test_create_empty_repo_path_422(client):
+    resp = client.post(
+        "/api/workspaces", json={"name": "Acme", "key": "ACM", "repo_path": "   "}
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "invalid_repo_path"
+
+
+def test_create_repo_path_dot_422(client):
+    resp = client.post(
+        "/api/workspaces", json={"name": "Acme", "key": "ACM", "repo_path": ".."}
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "invalid_repo_path"
+
+
+def test_create_relative_repo_path_collides_with_file_422(client, tmp_path):
+    import shutil
+    from pathlib import Path
+
+    name = "collide-workspace"
+    target = Path("workspaces") / name
+    shutil.rmtree(target, ignore_errors=True)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("i am a file")
+    try:
+        resp = client.post(
+            "/api/workspaces", json={"name": "Acme", "key": "ACM", "repo_path": name}
+        )
+        assert resp.status_code == 422
+        assert resp.json()["error"]["code"] == "invalid_repo_path"
+    finally:
+        target.unlink(missing_ok=True)
+
+
+def test_workflow_prompt_default(client):
+    resp = client.get("/api/workspaces/workflow-prompt-default")
+    assert resp.status_code == 200
+    assert resp.json()["workflow_prompt"] == DEFAULT_WORKFLOW_PROMPT
+
+
+def test_update_workspace_repo_path_and_time_unit(client, tmp_path):
+    create = client.post(
+        "/api/workspaces", json={"name": "Acme", "key": "ACM", "repo_path": str(tmp_path)}
+    )
+    ws_id = create.json()["id"]
+
+    new_dir = tmp_path / "new-repo"
+    resp = client.patch(f"/api/workspaces/{ws_id}", json={"repo_path": str(new_dir)})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["repo_path"] == str(new_dir)
+    assert new_dir.is_dir()
+
+    resp = client.patch(f"/api/workspaces/{ws_id}", json={"time_unit": "hour"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["time_unit"] == "hour"
+
+    resp = client.patch(
+        f"/api/workspaces/{ws_id}",
+        json={"workflow_prompt": "custom prompt", "sprint_creator_roles": ["pm", "lead"]},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["workflow_prompt"] == "custom prompt"
+    assert resp.json()["sprint_creator_roles"] == ["pm", "lead"]
+
+
 def test_create_relative_repo_path_created_under_workspaces_dir(client):
     import shutil
     from pathlib import Path
@@ -341,6 +407,175 @@ def test_terminate_does_not_touch_disk(client):
 def test_terminate_missing_workspace_404(client):
     resp = client.post("/api/workspaces/nope/terminate")
     assert resp.status_code == 404
+
+
+def test_pause_with_running_run_cancels_and_resume(client, tmp_path, monkeypatch):
+    import asyncio
+
+    from app.core import orchestrator
+
+    create = client.post(
+        "/api/workspaces", json={"name": "Acme", "key": "ACM", "repo_path": str(tmp_path)}
+    )
+    ws_id = create.json()["id"]
+
+    async def _seed_running_run():
+        async with db_session.async_session() as s:
+            agent = Agent(
+                workspace_id=ws_id, name="eng", role="engineer",
+                model="opencode/big-pickle", tool_kind="opencode", status="working",
+            )
+            s.add(agent)
+            await s.flush()
+            ticket = Ticket(
+                workspace_id=ws_id, key="ACM-1", title="t", status="in_progress",
+            )
+            s.add(ticket)
+            await s.flush()
+            run = Run(
+                ticket_id=ticket.id, agent_id=agent.id, status="running",
+                trigger="manual", tool_kind="opencode", model="opencode/big-pickle",
+            )
+            s.add(run)
+            await s.commit()
+            return run.id
+
+    run_id = asyncio.run(_seed_running_run())
+    stopped = []
+    async def _fake_stop(run_id):
+        stopped.append(run_id)
+        return True
+    monkeypatch.setattr(orchestrator, "stop", _fake_stop)
+
+    resp = client.post(f"/api/workspaces/{ws_id}/pause")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["paused"] is True
+    assert stopped == [run_id]
+
+    resp = client.post(f"/api/workspaces/{ws_id}/resume")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["paused"] is False
+
+
+def test_reset_with_running_run_409(client, tmp_path, monkeypatch):
+    import asyncio
+
+    create = client.post(
+        "/api/workspaces", json={"name": "Acme", "key": "ACM", "repo_path": str(tmp_path)}
+    )
+    ws_id = create.json()["id"]
+
+    async def _seed_running_run():
+        async with db_session.async_session() as s:
+            agent = Agent(
+                workspace_id=ws_id, name="eng", role="engineer",
+                model="opencode/big-pickle", tool_kind="opencode", status="working",
+            )
+            s.add(agent)
+            await s.flush()
+            ticket = Ticket(
+                workspace_id=ws_id, key="ACM-1", title="t", status="in_progress",
+            )
+            s.add(ticket)
+            await s.flush()
+            run = Run(
+                ticket_id=ticket.id, agent_id=agent.id, status="running",
+                trigger="manual", tool_kind="opencode", model="opencode/big-pickle",
+            )
+            s.add(run)
+            await s.commit()
+
+    asyncio.run(_seed_running_run())
+    client.post(f"/api/workspaces/{ws_id}/pause")
+
+    resp = client.post(f"/api/workspaces/{ws_id}/reset")
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "runs_in_progress"
+
+
+def test_pause_with_queued_run_cancels(client, tmp_path, monkeypatch):
+    import asyncio
+
+    from app.core import orchestrator
+
+    create = client.post(
+        "/api/workspaces", json={"name": "Acme", "key": "ACM", "repo_path": str(tmp_path)}
+    )
+    ws_id = create.json()["id"]
+
+    async def _seed_queued_run():
+        async with db_session.async_session() as s:
+            agent = Agent(
+                workspace_id=ws_id, name="eng", role="engineer",
+                model="opencode/big-pickle", tool_kind="opencode", status="idle",
+            )
+            s.add(agent)
+            await s.flush()
+            ticket = Ticket(
+                workspace_id=ws_id, key="ACM-1", title="t", status="in_progress",
+            )
+            s.add(ticket)
+            await s.flush()
+            run = Run(
+                ticket_id=ticket.id, agent_id=agent.id, status="queued",
+                trigger="manual", tool_kind="opencode", model="opencode/big-pickle",
+            )
+            s.add(run)
+            await s.commit()
+            return run.id
+
+    run_id = asyncio.run(_seed_queued_run())
+    cancelled = []
+    async def _fake_cancel(agent_id, run_id):
+        cancelled.append(run_id)
+        return True
+    monkeypatch.setattr(orchestrator, "cancel_queued", _fake_cancel)
+
+    resp = client.post(f"/api/workspaces/{ws_id}/pause")
+    assert resp.status_code == 200, resp.text
+    assert cancelled == [run_id]
+
+
+def test_terminate_with_queued_run_cancels(client, tmp_path, monkeypatch):
+    import asyncio
+
+    from app.core import orchestrator
+
+    create = client.post(
+        "/api/workspaces", json={"name": "Acme", "key": "ACM", "repo_path": str(tmp_path)}
+    )
+    ws_id = create.json()["id"]
+
+    async def _seed_queued_run():
+        async with db_session.async_session() as s:
+            agent = Agent(
+                workspace_id=ws_id, name="eng", role="engineer",
+                model="opencode/big-pickle", tool_kind="opencode", status="idle",
+            )
+            s.add(agent)
+            await s.flush()
+            ticket = Ticket(
+                workspace_id=ws_id, key="ACM-1", title="t", status="in_progress",
+            )
+            s.add(ticket)
+            await s.flush()
+            run = Run(
+                ticket_id=ticket.id, agent_id=agent.id, status="queued",
+                trigger="manual", tool_kind="opencode", model="opencode/big-pickle",
+            )
+            s.add(run)
+            await s.commit()
+
+    asyncio.run(_seed_queued_run())
+    cancelled = []
+    async def _fake_cancel(agent_id, run_id):
+        cancelled.append(run_id)
+        return True
+    monkeypatch.setattr(orchestrator, "cancel_queued", _fake_cancel)
+
+    resp = client.post(f"/api/workspaces/{ws_id}/terminate")
+    assert resp.status_code == 204, resp.text
+    assert len(cancelled) == 1
 
 
 def test_terminate_waits_for_running_run_then_succeeds(client, tmp_path, monkeypatch):

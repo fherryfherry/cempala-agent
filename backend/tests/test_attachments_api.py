@@ -218,3 +218,22 @@ def test_attachment_on_nonexistent_ticket_404(client):
 def test_get_delete_nonexistent_attachment_404(client):
     assert client.get("/api/attachments/does-not-exist").status_code == 404
     assert client.delete("/api/attachments/does-not-exist").status_code == 404
+
+
+def test_download_missing_file_on_disk_404(client, tmp_path):
+    import os
+
+    from app.api.attachments import _storage_dir
+
+    ws_id = _make_workspace(client, tmp_path)
+    ticket = _make_ticket(client, ws_id)
+
+    resp = client.post(
+        f"/api/tickets/{ticket['key']}/attachments",
+        files={"file": ("gone.txt", b"x", "text/plain")},
+    )
+    attachment_id = resp.json()["id"]
+    os.unlink(_storage_dir() / resp.json()["path"])
+
+    resp = client.get(f"/api/attachments/{attachment_id}")
+    assert resp.status_code == 404

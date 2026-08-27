@@ -103,3 +103,25 @@ def test_mcp_server_stdio_initialize_and_tools(tmp_path):
     proc.wait(timeout=5)
     assert proc.returncode == 0, proc.stderr.read()
     os.unlink(config_path)
+
+
+def test_claude_mcp_config_path_shape(tmp_path, monkeypatch):
+    from app.agents.mcp_config import claude_mcp_config_path
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "MAP_MCP_ENABLED", True)
+    path = claude_mcp_config_path("ws-claude", "agent-claude")
+    assert path is not None
+    try:
+        with open(path) as f:
+            config = json.load(f)
+        assert "mcpServers" in config
+        server = config["mcpServers"]["map-tickets"]
+        assert isinstance(server["command"], str)
+        assert "--workspace-id" in server["args"]
+        assert server["env"]["MAP_WORKSPACE_ID"] == "ws-claude"
+    finally:
+        os.unlink(path)
+
+    monkeypatch.setattr(settings, "MAP_MCP_ENABLED", False)
+    assert claude_mcp_config_path("ws", "agent") is None

@@ -884,3 +884,91 @@ def test_dropped_notes_empty_when_nothing_dropped():
     text = _wrap("status: in_progress\nsummary: |\n  clean run\n")
     result = _parse(text, "engineer", VALID_AGENTS)
     assert result.dropped_notes() == []
+
+
+def test_no_ticket_mode_rejects_status():
+    text = _wrap("status: in_progress\nsummary: |\n  x\n")
+    result = _parse(text, "engineer", VALID_AGENTS, no_ticket_mode=True)
+    assert result.ok is False
+    assert "status" in result.reason
+
+
+def test_no_ticket_mode_rejects_mention():
+    text = _wrap("summary: |\n  x\nmention: [eng-1]\n")
+    result = _parse(text, "engineer", VALID_AGENTS, no_ticket_mode=True)
+    assert result.ok is False
+    assert "mention" in result.reason
+
+
+def test_missing_status_rejected():
+    text = _wrap("summary: |\n  x\n")
+    result = _parse(text, "engineer", VALID_AGENTS)
+    assert result.ok is False
+    assert "status" in result.reason
+
+
+def test_unknown_role_rejected():
+    text = _wrap("status: in_progress\nsummary: |\n  x\n")
+    result = _parse(text, "engineer", VALID_AGENTS, valid_roles={"pm", "lead"})
+    assert result.ok is False
+    assert "role" in result.reason
+
+
+def test_mention_as_string_normalized_to_list():
+    text = _wrap("status: in_progress\nsummary: |\n  x\nmention: eng-1\n")
+    result = _parse(text, "engineer", VALID_AGENTS)
+    assert result.ok is True
+    assert result.valid_mentions == ["eng-1"]
+
+
+def test_mention_non_list_rejected():
+    text = _wrap("status: in_progress\nsummary: |\n  x\nmention: {a: 1}\n")
+    result = _parse(text, "engineer", VALID_AGENTS)
+    assert result.ok is False
+    assert "mention" in result.reason
+
+
+def test_sprints_malformed_entries_dropped():
+    text = _wrap(
+        "status: in_progress\n"
+        "summary: |\n  x\n"
+        "sprints:\n"
+        "  - name: Sprint 1\n"
+        "  - not-a-mapping\n"
+    )
+    result = _parse(text, "pm", VALID_AGENTS, may_declare_tickets=True)
+    assert result.ok is True
+    assert len(result.sprints) == 1
+    assert result.sprints_dropped is True
+    assert "malformed" in result.sprints_dropped_reason
+
+
+def test_updates_non_list_dropped():
+    text = _wrap(
+        "status: in_progress\nsummary: |\n  x\nupdates: |\n  - ticket: MAP-1\n"
+    )
+    result = _parse(text, "pm", VALID_AGENTS, may_declare_tickets=True)
+    assert result.ok is True
+    assert result.updates == []
+    assert result.updates_dropped is True
+    assert "list" in result.updates_dropped_reason
+
+
+def test_artifact_updates_non_list_dropped():
+    text = _wrap(
+        "status: in_progress\nsummary: |\n  x\nartifact_updates: |\n  - op: rename\n"
+    )
+    result = _parse(text, "pm", VALID_AGENTS, may_manage_artifacts=True)
+    assert result.ok is True
+    assert result.artifact_updates == []
+    assert result.artifact_updates_dropped is True
+    assert "list" in result.artifact_updates_dropped_reason
+
+
+def test_comments_non_list_dropped():
+    text = _wrap("summary: |\n  x\ncomments: |\n  - ticket: MAP-1\n")
+    result = _parse(text, "engineer", VALID_AGENTS, no_ticket_mode=True)
+    assert result.ok is True
+    assert result.comments == []
+    assert result.comments_dropped is True
+    assert "list" in result.comments_dropped_reason

@@ -247,3 +247,22 @@ def test_list_agents_memory_count_reflects_notes(client, tmp_path):
     by_id = {a["id"]: a for a in list_resp.json()}
     assert by_id[agent_a]["memory_count"] == 3
     assert by_id[agent_b]["memory_count"] == 1
+
+
+def test_patch_agent_unknown_role_422(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    agent_id = client.post(f"/api/workspaces/{ws_id}/agents", json=_agent_payload()).json()["id"]
+
+    resp = client.patch(f"/api/agents/{agent_id}", json={"role": "astronaut"})
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "unknown_role"
+
+
+def test_patch_agent_duplicate_name_409(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    client.post(f"/api/workspaces/{ws_id}/agents", json=_agent_payload("Alice"))
+    agent_b = client.post(f"/api/workspaces/{ws_id}/agents", json=_agent_payload("Bob")).json()["id"]
+
+    resp = client.patch(f"/api/agents/{agent_b}", json={"name": "Alice"})
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "duplicate_name"

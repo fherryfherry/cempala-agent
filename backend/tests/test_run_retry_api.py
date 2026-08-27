@@ -175,6 +175,120 @@ def test_retry_nonexistent_run_404(client):
     assert resp.status_code == 404
 
 
+def test_retry_routine_run_not_retryable_409(client, tmp_path):
+    """A routine/chat run (ticket_id is None) can never be retried."""
+    ws_id = _make_workspace(client, tmp_path)
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+
+    run_id = _run_sync(
+        _insert_run(
+            db_session.async_session,
+            ticket_id=None,
+            agent_id=eng_id,
+            status="failed",
+        )
+    )
+
+    resp = client.post(f"/api/runs/{run_id}/retry")
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "not_retryable"
+
+
+def test_retry_paused_workspace_409(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+    ticket = _make_ticket(client, ws_id)
+
+    run_id = _run_sync(
+        _insert_run(
+            db_session.async_session,
+            ticket_id=ticket["id"],
+            agent_id=eng_id,
+            status="failed",
+        )
+    )
+    client.post(f"/api/workspaces/{ws_id}/pause")
+
+    resp = client.post(f"/api/runs/{run_id}/retry")
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "workspace_paused"
+
+
+def test_stop_queued_run_cancels(client, tmp_path, monkeypatch):
+    from app.core import orchestrator
+
+    ws_id = _make_workspace(client, tmp_path)
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+    ticket = _make_ticket(client, ws_id)
+
+    run_id = _run_sync(
+        _insert_run(
+            db_session.async_session,
+            ticket_id=ticket["id"],
+            agent_id=eng_id,
+            status="queued",
+        )
+    )
+    cancelled = []
+    async def _fake_cancel(agent_id, run_id):
+        cancelled.append(run_id)
+        return True
+    monkeypatch.setattr(orchestrator, "cancel_queued", _fake_cancel)
+
+    resp = client.post(f"/api/runs/{run_id}/stop")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "cancelled"
+    assert cancelled == [run_id]
+
+
+def test_stop_nonexistent_run_404(client):
+    resp = client.post("/api/runs/does-not-exist/stop")
+    assert resp.status_code == 404
+
+
+def test_start_run_no_agent_422(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    ticket = _make_ticket(client, ws_id)
+    resp = client.post(f"/api/tickets/{ticket['key']}/run", json={})
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "no_agent"
+
+
+def test_start_run_paused_workspace_409(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+    ticket = _make_ticket(client, ws_id)
+    client.post(f"/api/workspaces/{ws_id}/pause")
+
+    resp = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": eng_id})
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "workspace_paused"
+
+
+def test_list_runs_status_filter(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+    ticket = _make_ticket(client, ws_id)
+    _set_status(client, ticket["key"], "todo")
+    _set_status(client, ticket["key"], "in_progress")
+
+    run_id = _run_sync(
+        _insert_run(
+            db_session.async_session,
+            ticket_id=ticket["id"],
+            agent_id=eng_id,
+            status="failed",
+        )
+    )
+
+    resp = client.get(f"/api/workspaces/{ws_id}/runs", params={"status": "failed"})
+    assert resp.status_code == 200
+    assert [r["id"] for r in resp.json()] == [run_id]
+
+    resp = client.get(f"/api/workspaces/{ws_id}/runs", params={"status": "done"})
+    assert resp.json() == []
+
+
 def test_retry_running_run_not_retryable_409(client, tmp_path, monkeypatch):
     ws_id = _make_workspace(client, tmp_path)
     eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
@@ -407,3 +521,32 @@ def _run_sync(coro):
     import asyncio
 
     return asyncio.run(coro)
+
+
+def test_retry_guardrail_blocked_409(client, tmp_path, monkeypatch):
+    """A retry that trips a schedule-time guardrail (e.g. max_cost_per_ticket)
+    returns 409 guardrail_blocked."""
+    from app.core import orchestrator
+    from app.core.guardrails import GuardrailBlocked
+
+    ws_id = _make_workspace(client, tmp_path)
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+    ticket = _make_ticket(client, ws_id)
+
+    run_id = _run_sync(
+        _insert_run(
+            db_session.async_session,
+            ticket_id=ticket["id"],
+            agent_id=eng_id,
+            status="failed",
+        )
+    )
+
+    async def _blocked(*args, **kwargs):
+        raise GuardrailBlocked("max_cost_per_ticket", "cost exceeded")
+
+    monkeypatch.setattr(orchestrator, "schedule", _blocked)
+
+    resp = client.post(f"/api/runs/{run_id}/retry")
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "guardrail_blocked"

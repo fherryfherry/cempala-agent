@@ -247,6 +247,40 @@ def test_manual_upload_excluded_from_artifacts_listing(client, tmp_path):
     assert groups == []
 
 
+def test_ungrouped_agent_attachment_bucketed(client, tmp_path):
+    import asyncio
+
+    from app.db.models import Attachment
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    ws_id = _make_workspace(client, repo_dir)
+    ticket = _make_ticket(client, ws_id)
+
+    async def _seed_ungrouped():
+        async with db_session.async_session() as s:
+            s.add(
+                Attachment(
+                    ticket_id=ticket["id"],
+                    filename="orphan.txt",
+                    content_type="text/plain",
+                    size_bytes=3,
+                    path="attachments/orphan.txt",
+                    origin="agent",
+                    group_id=None,
+                )
+            )
+            await s.commit()
+
+    asyncio.run(_seed_ungrouped())
+
+    groups = client.get(f"/api/workspaces/{ws_id}/artifacts").json()
+    ungrouped = next((g for g in groups if g["name"] == "Ungrouped"), None)
+    assert ungrouped is not None
+    assert len(ungrouped["attachments"]) == 1
+    assert ungrouped["attachments"][0]["filename"] == "orphan.txt"
+
+
 def test_reset_workspace_clears_artifact_groups(client, tmp_path, monkeypatch):
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()

@@ -397,6 +397,92 @@ def test_create_ticket_with_assignee_defaults_to_backlog_no_run(client, tmp_path
     assert runs == []
 
 
+def test_create_ticket_with_invalid_parent_422(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    resp = client.post(
+        f"/api/workspaces/{ws_id}/tickets",
+        json={"title": "child", "parent_id": "does-not-exist"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "invalid_parent"
+
+
+def test_create_ticket_with_parent_from_other_workspace_422(client, tmp_path):
+    ws_a = _make_workspace(client, tmp_path, key="AAA")
+    ws_b = _make_workspace(client, tmp_path, key="BBB")
+    parent = client.post(
+        f"/api/workspaces/{ws_a}/tickets", json=_ticket_payload("parent")
+    ).json()
+    resp = client.post(
+        f"/api/workspaces/{ws_b}/tickets",
+        json={"title": "child", "parent_id": parent["id"]},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "invalid_parent"
+
+
+def test_list_filters_assignee_and_offset(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+    a = client.post(f"/api/workspaces/{ws_id}/tickets", json=_ticket_payload("a")).json()
+    b = client.post(f"/api/workspaces/{ws_id}/tickets", json=_ticket_payload("b")).json()
+    client.patch(f"/api/tickets/{a['key']}", json={"assignee_id": eng_id})
+    client.patch(f"/api/tickets/{b['key']}", json={"assignee_id": eng_id})
+
+    resp = client.get(f"/api/workspaces/{ws_id}/tickets", params={"assignee_id": eng_id})
+    assert resp.status_code == 200
+    assert {t["key"] for t in resp.json()} == {a["key"], b["key"]}
+
+    resp = client.get(f"/api/workspaces/{ws_id}/tickets", params={"offset": 1})
+    assert len(resp.json()) == 1
+
+    resp = client.get(f"/api/workspaces/{ws_id}/tickets", params={"limit": 1})
+    assert len(resp.json()) == 1
+
+
+def test_create_ticket_with_invalid_assignee_422(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    resp = client.post(
+        f"/api/workspaces/{ws_id}/tickets",
+        json=_ticket_payload(assignee_id="does-not-exist"),
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "invalid_reference"
+
+
+def test_patch_with_invalid_assignee_422(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    ticket = client.post(f"/api/workspaces/{ws_id}/tickets", json=_ticket_payload()).json()
+    resp = client.patch(f"/api/tickets/{ticket['key']}", json={"assignee_id": "does-not-exist"})
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "invalid_reference"
+
+
+def test_delete_ticket_with_unknown_actor_422(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    ticket = client.post(f"/api/workspaces/{ws_id}/tickets", json=_ticket_payload()).json()
+    resp = client.delete(f"/api/tickets/{ticket['key']}", params={"actor_agent_id": "nope"})
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "invalid_reference"
+
+
+def test_delete_ticket_non_pm_actor_403(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    ticket = client.post(f"/api/workspaces/{ws_id}/tickets", json=_ticket_payload()).json()
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+    resp = client.delete(f"/api/tickets/{ticket['key']}", params={"actor_agent_id": eng_id})
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "pm_only"
+
+
+def test_delete_ticket_pm_actor_succeeds(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    ticket = client.post(f"/api/workspaces/{ws_id}/tickets", json=_ticket_payload()).json()
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    resp = client.delete(f"/api/tickets/{ticket['key']}", params={"actor_agent_id": pm_id})
+    assert resp.status_code == 204
+
+
 @pytest.mark.parametrize("n", [20, 100])
 async def test_concurrent_creates_get_unique_sequential_keys(tmp_path, n):
     """N concurrent POSTs against the same workspace must yield N unique, sequential keys.

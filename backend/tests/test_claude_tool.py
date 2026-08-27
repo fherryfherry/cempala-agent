@@ -142,3 +142,91 @@ printf '{"type": "result", "subtype": "error_max_turns", "is_error": true, "resu
     assert events[-1].type == "run_ended"
     assert events[-1].payload["status"] == "failed"
     assert "too many turns" in events[-1].payload["error"]
+
+
+def test_attachments_appended_as_mentions(tmp_path, monkeypatch):
+    script = _write_script(
+        tmp_path / "claude",
+        r"""
+printf '{"type": "result", "subtype": "success"}\n'
+""",
+    )
+    monkeypatch.setattr(settings, "CLAUDE_BIN", script)
+
+    events = asyncio.run(_collect(_ctx(tmp_path, attachments=["/tmp/a.txt", "/tmp/b.txt"])))
+    assert events[-1].payload["status"] == "done"
+
+
+def test_resume_session_flag(tmp_path, monkeypatch):
+    script = _write_script(
+        tmp_path / "claude",
+        r"""
+printf '{"type": "result", "subtype": "success"}\n'
+""",
+    )
+    monkeypatch.setattr(settings, "CLAUDE_BIN", script)
+
+    events = asyncio.run(_collect(_ctx(tmp_path, prev_session_id="sess-prev")))
+    assert events[-1].payload["status"] == "done"
+
+
+def test_user_tool_result_mapped(tmp_path, monkeypatch):
+    script = _write_script(
+        tmp_path / "claude",
+        r"""
+printf '{"type": "user", "message": {"content": [{"type": "tool_result", "content": "ok"}]}}\n'
+printf '{"type": "result", "subtype": "success"}\n'
+""",
+    )
+    monkeypatch.setattr(settings, "CLAUDE_BIN", script)
+
+    events = asyncio.run(_collect(_ctx(tmp_path)))
+    assert [e.type for e in events] == ["tool_result", "run_ended"]
+
+
+def test_nonzero_exit_fails_with_stderr(tmp_path, monkeypatch):
+    script = _write_script(
+        tmp_path / "claude",
+        r"""
+>&2 printf 'boom\n'
+exit 1
+""",
+    )
+    monkeypatch.setattr(settings, "CLAUDE_BIN", script)
+
+    events = asyncio.run(_collect(_ctx(tmp_path)))
+    assert events[-1].payload["status"] == "failed"
+    assert "boom" in events[-1].payload["error"]
+
+
+def test_nonzero_exit_truncates_huge_stderr(tmp_path, monkeypatch):
+    script = _write_script(
+        tmp_path / "claude",
+        r"""
+python3 -c "print('x' * 5000)" 1>&2
+exit 1
+""",
+    )
+    monkeypatch.setattr(settings, "CLAUDE_BIN", script)
+
+    events = asyncio.run(_collect(_ctx(tmp_path)))
+    assert events[-1].payload["status"] == "failed"
+    assert "truncated" in events[-1].payload["error"]
+
+
+def test_oversized_line_is_skipped_and_run_continues(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "CLAUDE_STREAM_LIMIT_BYTES", 1024)
+    big = "x" * 8192
+    script = _write_script(
+        tmp_path / "claude",
+        f"""printf '{{"type": "assistant", "message": {{"content": [{{"type": "text", "text": "{big}"}}]}}}}\\n'
+printf '{{"type": "result", "subtype": "success"}}\\n'
+""",
+    )
+    monkeypatch.setattr(settings, "CLAUDE_BIN", script)
+
+    events = asyncio.run(_collect(_ctx(tmp_path)))
+    errors = [e for e in events if e.type == "error"]
+    assert len(errors) == 1
+    assert "exceeds stream limit" in errors[0].payload["error"]
+    assert events[-1].payload["status"] == "done"

@@ -176,4 +176,4 @@ By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
-[MIT](LICENSE) © Ferry
+CEMPALA is open-sourced software licensed under the [MIT license](LICENSE).

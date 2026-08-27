@@ -166,3 +166,55 @@ def test_cancel_actually_kills_child_process(tmp_path, monkeypatch):
     for pid in pids:
         result = subprocess.run(["ps", "-p", str(pid)], capture_output=True, text=True)
         assert result.returncode != 0, f"pid {pid} is still alive after cancel"
+
+
+def test_attachments_appended_as_mentions(tmp_path, monkeypatch):
+    script = _write_script(
+        tmp_path / "agy",
+        r"""
+printf '{"event": "result", "result": {"status": "SUCCESS"}}\n'
+""",
+    )
+    monkeypatch.setattr(settings, "AGY_BIN", script)
+
+    events = asyncio.run(_collect(_ctx(tmp_path, attachments=["/tmp/a.txt"])))
+    assert events[-1].payload["status"] == "done"
+
+
+def test_resume_session_flag(tmp_path, monkeypatch):
+    script = _write_script(
+        tmp_path / "agy",
+        r"""
+printf '{"event": "result", "result": {"status": "SUCCESS"}}\n'
+""",
+    )
+    monkeypatch.setattr(settings, "AGY_BIN", script)
+
+    events = asyncio.run(_collect(_ctx(tmp_path, prev_session_id="sess-prev")))
+    assert events[-1].payload["status"] == "done"
+
+
+def test_oversized_line_is_skipped_and_run_continues(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "AGY_STREAM_LIMIT_BYTES", 1024)
+    big = "x" * 8192
+    script = _write_script(
+        tmp_path / "agy",
+        f"""printf '{{"event": "step_update", "step_update": {{"step_type": "agent_response", "text_delta": "{big}"}}}}\\n'
+printf '{{"event": "result", "result": {{"status": "SUCCESS"}}}}\\n'
+""",
+    )
+    monkeypatch.setattr(settings, "AGY_BIN", script)
+
+    events = asyncio.run(_collect(_ctx(tmp_path)))
+    errors = [e for e in events if e.type == "error"]
+    assert len(errors) == 1
+    assert "exceeds stream limit" in errors[0].payload["error"]
+    assert events[-1].payload["status"] == "done"
+
+
+def test_num_handles_bad_values():
+    from app.agents.agy_tool import _num
+
+    assert _num("abc") == 0.0
+    assert _num(None) == 0.0
+    assert _num("3.5") == 3.5

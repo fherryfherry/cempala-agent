@@ -511,3 +511,13 @@ def test_pm_role_exempt_from_active_sprint_gate(client, tmp_path, monkeypatch):
 
     resp = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": pm_id})
     assert resp.status_code == 201, resp.text
+
+
+def test_over_run_timeout_and_cost_per_run():
+    from app.core.guardrails import over_cost_per_run, over_run_timeout
+
+    assert over_run_timeout({"run_timeout_sec": 10}, 5) is None
+    assert "run_timeout_sec" in over_run_timeout({"run_timeout_sec": 10}, 10)
+
+    assert over_cost_per_run({"max_cost_per_run": 1.0}, 0.5) is None
+    assert "max_cost_per_run" in over_cost_per_run({"max_cost_per_run": 1.0}, 1.0)

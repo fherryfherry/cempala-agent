@@ -298,3 +298,54 @@ class TestGitAPI:
         ws_id = _make_workspace(client, nonexistent)
         resp = client.get(f"/api/workspaces/{ws_id}/git/graph")
         assert resp.status_code == 404
+
+    def test_commits_404_for_missing_repo(self, client, tmp_path):
+        nonexistent = tmp_path / "gone"
+        ws_id = _make_workspace(client, nonexistent)
+        resp = client.get(f"/api/workspaces/{ws_id}/git/commits")
+        assert resp.status_code == 404
+
+    def test_commit_detail_404_for_missing_repo(self, client, tmp_path):
+        nonexistent = tmp_path / "gone"
+        ws_id = _make_workspace(client, nonexistent)
+        resp = client.get(f"/api/workspaces/{ws_id}/git/commits/abc123")
+        assert resp.status_code == 404
+
+    def test_branches_404_for_non_repo_dir(self, client, tmp_path):
+        # A directory that exists but is not a git repo -> not_a_repo 404.
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        ws_id = _make_workspace(client, plain)
+        resp = client.get(f"/api/workspaces/{ws_id}/git/branches")
+        assert resp.status_code == 404
+        assert resp.json()["error"]["code"] == "not_a_repo"
+
+    def test_commits_404_for_non_repo_dir(self, client, tmp_path):
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        ws_id = _make_workspace(client, plain)
+        resp = client.get(f"/api/workspaces/{ws_id}/git/commits")
+        assert resp.status_code == 404
+        assert resp.json()["error"]["code"] == "not_a_repo"
+
+    def test_branches_404_when_repo_path_deleted(self, client, tmp_path):
+        import shutil
+
+        repo = _init_repo(tmp_path)
+        ws_id = _make_workspace(client, repo)
+        shutil.rmtree(repo)
+        resp = client.get(f"/api/workspaces/{ws_id}/git/branches")
+        assert resp.status_code == 404
+        assert resp.json()["error"]["code"] == "repo_not_found"
+
+    def test_graph_commits_detail_404_when_repo_path_deleted(self, client, tmp_path):
+        import shutil
+
+        repo = _init_repo(tmp_path)
+        ws_id = _make_workspace(client, repo)
+        shutil.rmtree(repo)
+
+        for path in ("graph", "commits", "commits/abc123"):
+            resp = client.get(f"/api/workspaces/{ws_id}/git/{path}")
+            assert resp.status_code == 404, path
+            assert resp.json()["error"]["code"] == "repo_not_found", path

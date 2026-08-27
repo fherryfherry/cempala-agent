@@ -479,3 +479,49 @@ printf '{"type": "run_ended", "status": "done", "session_id": "sess-1"}\n'
         if e.type == "assistant_text"
     )
     assert "git-author-name:Budi (Engineer)" in output
+
+
+def test_real_schema_sessionID_and_part_tokens(tmp_path, monkeypatch):
+    """Real opencode 1.18.18 uses `sessionID` and nests tokens/cost inside
+    `part.tokens`/`part.cost` on step_finish lines — both shapes must be handled."""
+    script = _write_script(
+        tmp_path / "opencode",
+        r"""
+printf '{"type": "step_finish", "sessionID": "sess-real", "part": {"tokens": {"input": 7, "output": 3}, "cost": 0.02}}\n'
+printf '{"type": "text", "part": {"text": "hello world"}}\n'
+""",
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    events = asyncio.run(_collect(_ctx(tmp_path)))
+
+    final = events[-1]
+    assert final.payload["status"] == "done"
+    assert final.payload["session_id"] == "sess-real"
+    assert final.payload["tokens_in"] == 7
+    assert final.payload["tokens_out"] == 3
+    assert final.payload["cost"] == pytest.approx(0.02)
+    # The `text` type with a part.text maps to assistant_text.
+    assert any(e.type == "assistant_text" and e.payload.get("text") == "hello world" for e in events)
+
+
+def test_non_dict_json_line_skipped(tmp_path, monkeypatch):
+    script = _write_script(
+        tmp_path / "opencode",
+        r"""
+printf '[1, 2, 3]\n'
+printf '{"type": "assistant_text", "text": "hi"}\n'
+""",
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    events = asyncio.run(_collect(_ctx(tmp_path)))
+    assert [e.type for e in events] == ["assistant_text", "run_ended"]
+
+
+def test_num_handles_bad_values(tmp_path, monkeypatch):
+    from app.agents.opencode_tool import _num
+
+    assert _num("abc") == 0.0
+    assert _num(None) == 0.0
+    assert _num("3.5") == 3.5

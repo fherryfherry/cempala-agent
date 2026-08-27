@@ -669,3 +669,146 @@ print(json.dumps({"type": "assistant_text", "text": text}))
 
     messages = client.get(f"/api/conversations/{conv['id']}/messages").json()
     assert len(messages) == 3  # 2 owner + 1 reply
+
+
+def test_message_empty_body_422(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    _make_agent(client, ws_id, "pm", "pm-1")
+    conv = client.post(
+        f"/api/workspaces/{ws_id}/conversations", json={"title": "Empty"}
+    ).json()
+    resp = client.post(f"/api/conversations/{conv['id']}/messages", json={"body": "   "})
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "empty_body"
+
+
+def test_list_messages_pagination(client, tmp_path, monkeypatch):
+    ws_id = _make_workspace(client, tmp_path)
+    _make_agent(client, ws_id, "pm", "pm-1")
+    conv = client.post(
+        f"/api/workspaces/{ws_id}/conversations", json={"title": "Paginate"}
+    ).json()
+
+    script = _write_python_binary(tmp_path / "opencode", _chat_reply_script())
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    for i in range(3):
+        client.post(f"/api/conversations/{conv['id']}/messages", json={"body": f"msg {i}"})
+    runs = client.get(f"/api/workspaces/{ws_id}/runs").json()
+    for r in runs:
+        if r["trigger"] == "chat":
+            _wait_for_run(client, r["id"])
+
+    resp = client.get(f"/api/conversations/{conv['id']}/messages", params={"limit": 2})
+    assert len(resp.json()) == 2
+    resp = client.get(f"/api/conversations/{conv['id']}/messages", params={"offset": 1})
+    assert len(resp.json()) >= 1
+
+
+def test_conversation_attachment_download_missing_file_404(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    _make_agent(client, ws_id, "pm", "pm-1")
+    conv = client.post(
+        f"/api/workspaces/{ws_id}/conversations", json={"title": "Dengan file"}
+    ).json()
+
+    resp = client.post(
+        f"/api/conversations/{conv['id']}/attachments",
+        files={"file": ("context.txt", b"ini konteks", "text/plain")},
+    )
+    assert resp.status_code == 201, resp.text
+    att = resp.json()
+
+    # Delete the file on disk, then download -> 404.
+    import os
+    from app.api.attachments import _storage_dir
+
+    os.unlink(_storage_dir() / att["path"])
+    dl = client.get(f"/api/conversations/attachments/{att['id']}/download")
+    assert dl.status_code == 404
+
+    # Delete a nonexistent attachment -> 404.
+    assert client.delete("/api/conversations/attachments/nope").status_code == 404
+
+
+def test_conversation_attachment_upload_too_large_413(client, tmp_path, monkeypatch):
+    import app.api.conversations as conv_api
+
+    ws_id = _make_workspace(client, tmp_path)
+    _make_agent(client, ws_id, "pm", "pm-1")
+    conv = client.post(
+        f"/api/workspaces/{ws_id}/conversations", json={"title": "Besar"}
+    ).json()
+
+    monkeypatch.setattr(conv_api, "MAX_SIZE", 10)
+    resp = client.post(
+        f"/api/conversations/{conv['id']}/attachments",
+        files={"file": ("big.txt", b"x" * 100, "text/plain")},
+    )
+    assert resp.status_code == 413
+    assert resp.json()["error"]["code"] == "file_too_large"
+
+
+def test_conversation_attachment_download_nonexistent_404(client, tmp_path):
+    resp = client.get("/api/conversations/attachments/nope/download")
+    assert resp.status_code == 404
+
+
+def test_message_guardrail_blocked_still_persists(client, tmp_path, monkeypatch):
+    """When schedule_chat trips a guardrail (e.g. max_concurrent_runs), the owner's
+    message is still persisted and the request returns 201 — the guardrail reason
+    lands as a System message on the conversation."""
+    from app.core import orchestrator
+
+    ws_id = _make_workspace(client, tmp_path)
+    _make_agent(client, ws_id, "pm", "pm-1")
+    conv = client.post(
+        f"/api/workspaces/{ws_id}/conversations", json={"title": "Guardrail"}
+    ).json()
+
+    async def _blocked(*args, **kwargs):
+        from app.core.guardrails import GuardrailBlocked
+
+        raise GuardrailBlocked("max_concurrent_runs", "too many runs")
+
+    monkeypatch.setattr(orchestrator, "schedule_chat", _blocked)
+
+    resp = client.post(f"/api/conversations/{conv['id']}/messages", json={"body": "halo"})
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["body"] == "halo"
+
+    messages = client.get(f"/api/conversations/{conv['id']}/messages").json()
+    assert len(messages) == 1  # owner message persisted
+
+
+def test_proposal_execution_failure_writes_system_message(client, tmp_path, monkeypatch):
+    """If executing an approved proposal raises, the owner sees a System message
+    telling them to ask the PM to re-propose (the proposal is already claimed)."""
+    from app.core import orchestrator
+
+    ws_id = _make_workspace(client, tmp_path)
+    _make_agent(client, ws_id, "pm", "pm-1")
+    conv = client.post(
+        f"/api/workspaces/{ws_id}/conversations", json={"title": "Gagal eksekusi"}
+    ).json()
+
+    script = _write_python_binary(tmp_path / "opencode", _chat_reply_script_with_proposal())
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    client.post(f"/api/conversations/{conv['id']}/messages", json={"body": "Ada kerjaan baru nih"})
+    chat_run = next(
+        r for r in client.get(f"/api/workspaces/{ws_id}/runs").json() if r["trigger"] == "chat"
+    )
+    _wait_for_run(client, chat_run["id"])
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("simulated failure")
+
+    monkeypatch.setattr(orchestrator, "create_tickets_and_sprints", _boom)
+
+    resp = client.post(f"/api/conversations/{conv['id']}/messages", json={"body": "oke"})
+    assert resp.status_code == 201, resp.text
+
+    messages = client.get(f"/api/conversations/{conv['id']}/messages").json()
+    system_messages = [m for m in messages if m["is_system"]]
+    assert any("gagal dieksekusi" in m["body"] for m in system_messages)

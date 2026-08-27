@@ -245,6 +245,23 @@ def test_complete_sprint_moves_unfinished_tickets_to_active_sprint(client, tmp_p
     assert any("ditutup" in c["body"] and sprint_b["name"] in c["body"] for c in system_comments)
 
 
+def test_complete_sprint_moves_unfinished_tickets_to_other_active_sprint(client, tmp_path):
+    """When another sprint is already active, carry-over goes to it (not the
+    lowest-index planned sprint)."""
+    ws_id = _make_workspace(client, tmp_path)
+    sprint_a = client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "Sprint A"}).json()
+    sprint_b = client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "Sprint B"}).json()
+    # Activate sprint B (demotes A), so B is the active sibling of A.
+    client.patch(f"/api/sprints/{sprint_b['id']}", json={"status": "active"})
+
+    ticket = _make_ticket(client, ws_id, sprint_id=sprint_a["id"], status="todo")
+    # Complete sprint A (now planned) — its tickets carry over to the active B.
+    client.patch(f"/api/sprints/{sprint_a['id']}", json={"status": "completed"})
+
+    ticket_after = client.get(f"/api/tickets/{ticket['key']}").json()
+    assert ticket_after["sprint_id"] == sprint_b["id"]
+
+
 def test_complete_sprint_moves_unfinished_tickets_to_next_planned_by_index(client, tmp_path):
     ws_id = _make_workspace(client, tmp_path)
     sprint_a = client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "Sprint A"}).json()
@@ -308,3 +325,35 @@ def test_completing_already_completed_sprint_is_noop_for_carry_over(client, tmp_
     assert len(carry_over_comments) == 1
     ticket_after_second = client.get(f"/api/tickets/{ticket['key']}").json()
     assert ticket_after_second["sprint_id"] == ticket_after_first["sprint_id"]
+
+
+def test_complete_sprint_with_no_eligible_next_sprint_falls_back_to_backlog(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    sprint = client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "Sprint A"}).json()
+    ticket = _make_ticket(client, ws_id, sprint_id=sprint["id"], status="todo")
+
+    client.patch(f"/api/sprints/{sprint['id']}", json={"status": "completed"})
+
+    ticket_after = client.get(f"/api/tickets/{ticket['key']}").json()
+    assert ticket_after["sprint_id"] is None  # backlog
+
+
+def test_activating_sprint_skips_disabled_assignee(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "OPENCODE_BIN", "/nonexistent/opencode-for-tests")
+    ws_id = _make_workspace(client, tmp_path)
+    eng = client.post(
+        f"/api/workspaces/{ws_id}/agents",
+        json={"name": "eng-1", "role": "engineer", "model": "m", "tool_kind": "opencode"},
+    ).json()
+    client.patch(f"/api/agents/{eng['id']}", json={"enabled": False})
+
+    s1 = client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "Sprint 1"}).json()
+    s2 = client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "Sprint 2"}).json()
+    client.post(
+        f"/api/workspaces/{ws_id}/tickets",
+        json={"title": "A", "is_new_epic": True, "assignee_id": eng["id"], "sprint_id": s2["id"]},
+    )
+
+    resp = client.patch(f"/api/sprints/{s2['id']}", json={"status": "active"})
+    assert resp.status_code == 200, resp.text
+    assert client.get(f"/api/workspaces/{ws_id}/runs").json() == []

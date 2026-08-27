@@ -5,6 +5,7 @@
 import stat
 import time
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 from sqlalchemy import event
@@ -150,6 +151,87 @@ def test_routine_requires_valid_agent(client, tmp_path):
         },
     )
     assert resp.status_code == 404
+
+
+def test_routine_patch_each_field_and_404(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    rid = client.post(
+        f"/api/workspaces/{ws_id}/routines",
+        json={
+            "name": "A",
+            "prompt": "p",
+            "interval_minutes": 5,
+            "mode": "idle_only",
+            "agent_id": pm_id,
+        },
+    ).json()["id"]
+
+    resp = client.patch(
+        f"/api/routines/{rid}",
+        json={"name": "B", "prompt": "q", "agent_id": pm_id},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["name"] == "B"
+    assert body["prompt"] == "q"
+    assert body["agent_id"] == pm_id
+
+    assert client.patch("/api/routines/nope", json={"name": "x"}).status_code == 404
+    assert client.delete("/api/routines/nope").status_code == 404
+    assert client.post("/api/routines/nope/run").status_code == 404
+
+
+def test_routine_run_disabled_409(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    rid = client.post(
+        f"/api/workspaces/{ws_id}/routines",
+        json={
+            "name": "A",
+            "prompt": "p",
+            "interval_minutes": 5,
+            "mode": "idle_only",
+            "agent_id": pm_id,
+        },
+    ).json()["id"]
+    client.patch(f"/api/routines/{rid}", json={"status": "disabled"})
+
+    resp = client.post(f"/api/routines/{rid}/run")
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "routine_disabled"
+
+
+def test_routine_run_no_valid_agent_409(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    rid = client.post(
+        f"/api/workspaces/{ws_id}/routines",
+        json={"name": "A", "prompt": "p", "interval_minutes": 5, "mode": "idle_only"},
+    ).json()["id"]
+
+    resp = client.post(f"/api/routines/{rid}/run")
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "no_agent"
+
+
+def test_routine_run_paused_workspace_409(client, tmp_path):
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    rid = client.post(
+        f"/api/workspaces/{ws_id}/routines",
+        json={
+            "name": "A",
+            "prompt": "p",
+            "interval_minutes": 5,
+            "mode": "idle_only",
+            "agent_id": pm_id,
+        },
+    ).json()["id"]
+    client.post(f"/api/workspaces/{ws_id}/pause")
+
+    resp = client.post(f"/api/routines/{rid}/run")
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "workspace_paused"
 
 
 # ---------------------------------------------------------------------------
@@ -602,3 +684,108 @@ def test_scheduler_skips_disabled_and_paused(client, tmp_path, monkeypatch):
     assert client.post(f"/api/workspaces/{ws_id}/pause").status_code == 200
     asyncio.run(_run_tick())
     assert client.get(f"/api/workspaces/{ws_id}/runs").json() == []
+
+
+def test_scheduler_skips_waiting_running_and_not_due(client, tmp_path, monkeypatch):
+    import asyncio
+
+    from app.db.models import Routine as RoutineModel
+
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    rid = client.post(
+        f"/api/workspaces/{ws_id}/routines",
+        json={
+            "name": "R",
+            "prompt": "p",
+            "interval_minutes": 1,
+            "mode": "idle_only",
+            "agent_id": pm_id,
+        },
+    ).json()["id"]
+
+    async def _set_status(status):
+        async with db_session.async_session() as session:
+            r = await session.get(RoutineModel, rid)
+            r.status = status
+            await session.commit()
+
+    async def _run_tick():
+        async with db_session.async_session() as session:
+            await routine_scheduler._tick(session, db_session.async_session)
+
+    # waiting -> skipped (a run is already scheduled).
+    asyncio.run(_set_status("waiting"))
+    asyncio.run(_run_tick())
+    assert client.get(f"/api/workspaces/{ws_id}/runs").json() == []
+
+    # running -> skipped.
+    asyncio.run(_set_status("running"))
+    asyncio.run(_run_tick())
+    assert client.get(f"/api/workspaces/{ws_id}/runs").json() == []
+
+    # idle with a recent last_run_at -> not due yet.
+    asyncio.run(_set_status("idle"))
+    async def _set_recent_last_run():
+        async with db_session.async_session() as session:
+            r = await session.get(RoutineModel, rid)
+            r.last_run_at = datetime.now(timezone.utc)
+            await session.commit()
+    asyncio.run(_set_recent_last_run())
+    asyncio.run(_run_tick())
+    assert client.get(f"/api/workspaces/{ws_id}/runs").json() == []
+
+
+def test_scheduler_advances_last_run_at_for_missing_agent(client, tmp_path, monkeypatch):
+    import asyncio
+
+    ws_id = _make_workspace(client, tmp_path)
+    # Routine with no agent assigned -> no valid agent -> advance last_run_at.
+    rid = client.post(
+        f"/api/workspaces/{ws_id}/routines",
+        json={"name": "R", "prompt": "p", "interval_minutes": 1, "mode": "idle_only"},
+    ).json()["id"]
+
+    async def _run_tick():
+        async with db_session.async_session() as session:
+            await routine_scheduler._tick(session, db_session.async_session)
+
+    asyncio.run(_run_tick())
+    routine = client.get(f"/api/workspaces/{ws_id}/routines").json()[0]
+    assert routine["last_run_at"] is not None
+    assert client.get(f"/api/workspaces/{ws_id}/runs").json() == []
+
+
+def test_scheduler_loop_stops_on_event(client, tmp_path, monkeypatch):
+    import asyncio
+
+    stop_event = asyncio.Event()
+    stop_event.set()
+    asyncio.run(routine_scheduler.run_scheduler(db_session.async_session, stop_event))
+
+
+def test_routine_run_guardrail_blocked_409(client, tmp_path, monkeypatch):
+    from app.core import orchestrator
+    from app.core.guardrails import GuardrailBlocked
+
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    rid = client.post(
+        f"/api/workspaces/{ws_id}/routines",
+        json={
+            "name": "A",
+            "prompt": "p",
+            "interval_minutes": 5,
+            "mode": "idle_only",
+            "agent_id": pm_id,
+        },
+    ).json()["id"]
+
+    async def _blocked(*args, **kwargs):
+        raise GuardrailBlocked("max_concurrent_runs", "too many runs")
+
+    monkeypatch.setattr(orchestrator, "schedule_routine_run", _blocked)
+
+    resp = client.post(f"/api/routines/{rid}/run")
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "guardrail_blocked"

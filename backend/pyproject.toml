@@ -34,6 +34,7 @@ addopts = "--cov=app --cov-report=term-missing --cov-report=xml"
 
 [tool.coverage.run]
 source = ["app"]
+concurrency = ["thread", "greenlet"]
 omit = [
     "app/main.py",
     "app/db/session.py",
