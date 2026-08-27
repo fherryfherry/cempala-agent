@@ -49,7 +49,7 @@ export function WorkspaceSwitcher({
         </div>
         <div className="mt-1 border-t border-black/5 pt-1 dark:border-white/5">
           <Link
-            href="/?new=1"
+            href="/onboarding"
             onClick={() => setOpen(false)}
             className="flex items-center gap-2 rounded-md px-2.5 py-1.5 text-sm text-zinc-500 hover:bg-zinc-100 hover:text-foreground dark:hover:bg-zinc-800"
           >

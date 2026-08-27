@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 GIT_TIMEOUT = 15.0
+CLONE_TIMEOUT = 120.0  # clone goes over the network, unlike the local-only ops below
 DIFF_CAP = 2_000_000
 _READONLY = {"log", "show", "branch", "for-each-ref", "rev-parse", "diff", "diff-tree", "rev-list"}
 _MUTATION = {"checkout", "checkout -b", "branch", "merge", "commit", "worktree"}
@@ -76,6 +77,29 @@ def run_mutation(repo_path: str, *args: str) -> str:
     if result.returncode != 0:
         raise GitError("git_mutation_failed", result.stderr.strip() or "git mutation failed")
     return result.stdout
+
+
+def clone_repo(url: str, target_dir: str) -> None:
+    """`git clone <url> <target_dir>`, run synchronously — caller (an async endpoint)
+    should offload this via asyncio.to_thread since it can take much longer than
+    GIT_TIMEOUT. `target_dir` must not exist or must be an empty directory."""
+    parent = os.path.dirname(target_dir.rstrip("/"))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    try:
+        proc = subprocess.run(
+            ["git", "clone", url, target_dir],
+            capture_output=True,
+            text=True,
+            timeout=CLONE_TIMEOUT,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+    except FileNotFoundError:
+        raise GitError("git binary not found on the backend host")
+    except subprocess.TimeoutExpired:
+        raise GitError(f"git clone timed out after {CLONE_TIMEOUT}s")
+    if proc.returncode != 0:
+        raise GitError("clone_failed", proc.stderr.strip() or "git clone failed")
 
 
 def run_git(repo_path: str, *args: str) -> str:

@@ -52,6 +52,8 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { AttachmentPreviewDialog } from "@/components/attachment-preview";
+import { ChoicePills } from "@/components/choice-pills";
+import { parseChoices } from "@/lib/parse-choices";
 
 /** Quick-send suggestions shown above the composer, like ChatGPT suggestion chips. */
 const SUGGESTIONS: { label: string; message: string; icon: LucideIcon }[] = [
@@ -484,6 +486,14 @@ function ThreadPanel({
 
   const allMessages = messages.data ?? [];
 
+  // Quick-reply pills only for the PM's latest message (see lib/parse-choices.ts) —
+  // once the owner answers, that message stops being "last" and pills disappear with
+  // it. Suppressed while a run is in flight so a stale question can't be answered
+  // out of order.
+  const lastMessage = allMessages.length > 0 ? allMessages[allMessages.length - 1] : null;
+  const lastIsPm = !!lastMessage && !lastMessage.is_system && lastMessage.author_agent_id !== null;
+  const activeChoices = lastIsPm && !pmIsTyping ? parseChoices(lastMessage!.body).group : null;
+
   // Opening/switching a conversation always jumps straight to the latest message.
   useEffect(() => {
     const el = scrollRef.current;
@@ -617,6 +627,15 @@ function ThreadPanel({
               mentionCatalog={mentionCatalog}
             />
           )}
+          {activeChoices && (
+            <div className="mt-3">
+              <ChoicePills
+                group={activeChoices}
+                disabled={sendMutation.isPending}
+                onAnswer={(text) => sendMutation.mutate({ message: text, file: null })}
+              />
+            </div>
+          )}
         </div>
 
         {hasNewMessage && (
@@ -704,6 +723,7 @@ function ThreadPanel({
         />
       )}
 
+      {!activeChoices && (
       <form
         className="flex flex-col gap-2 pt-0.5"
         onSubmit={(e) => {
@@ -810,6 +830,7 @@ function ThreadPanel({
           }}
         />
       </form>
+      )}
     </Card>
   );
 }
@@ -865,6 +886,9 @@ function ChatMessages({
           );
         }
         const isOwner = m.author_agent_id === null;
+        // The ~~~choices fence (if any) is rendered as pills below the thread, not
+        // as raw fenced text inside the bubble.
+        const { cleanedBody } = parseChoices(m.body);
         return (
           <div key={m.id} className={`flex ${isOwner ? "justify-end" : "justify-start"}`}>
             <div
@@ -880,7 +904,7 @@ function ChatMessages({
                 <span className="font-normal">{formatShortTime(m.created_at, timezone)}</span>
               </p>
               <Markdown invert={isOwner}>
-                {linkifyMentions(m.body, workspaceKey, mentionCatalog)}
+                {linkifyMentions(cleanedBody, workspaceKey, mentionCatalog)}
               </Markdown>
             </div>
           </div>

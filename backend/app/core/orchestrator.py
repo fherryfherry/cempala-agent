@@ -54,6 +54,7 @@ from app.core import git as git_module
 from app.core.report import (
     ArtifactDraft,
     ArtifactUpdateDraft,
+    ChoicesDraft,
     SprintDraft,
     TicketDraft,
     parse_report,
@@ -1071,6 +1072,20 @@ async def _write_system_message(
             },
         )
     return message
+
+
+def _format_choices_block(choice_type: str, options: list[str]) -> str:
+    """Render a `~~~choices` block (frontend/lib/parse-choices.ts) from already-
+    parsed data — formatted server-side, never left to the agent to hand-indent
+    inside a YAML block scalar (that reliably breaks; see report.ChoicesDraft)."""
+    lines = [choice_type] + [f"- {o}" for o in options]
+    return "~~~choices\n" + "\n".join(lines) + "\n~~~"
+
+
+def _append_choices(summary: str, choices: ChoicesDraft | None) -> str:
+    if choices is None:
+        return summary
+    return f"{summary}\n\n{_format_choices_block(choices.type, choices.options)}"
 
 
 async def _write_agent_message(
@@ -2638,11 +2653,13 @@ async def _finish_chat_run(
         return
 
     # `summary` is the PM's reply to the owner — written into the conversation.
+    # `choices` (if the agent declared one) is appended as a formatted ~~~choices
+    # block here, not trusted to the agent's own text (see _append_choices).
     await _write_agent_message(
         session,
         conversation,
         agent,
-        parsed.summary,
+        _append_choices(parsed.summary, parsed.choices),
         run_id=run.id,
         workspace_id=workspace_id,
     )
@@ -2845,6 +2862,12 @@ async def _finish_chat_run(
                 f"- Tiket: **{d.title}**" + (f" (assignee: {d.assignee})" if d.assignee else "")
                 for d in parsed.tickets
             ]
+            # This message is entirely system-templated (not the agent's own text),
+            # so its approval pills are just as deterministic — always offered here,
+            # never dependent on the agent remembering to declare `choices:` itself.
+            proposal_choices = _format_choices_block(
+                "single", ["Oke, lanjutkan eksekusi", "Saya mau ubah dulu"]
+            )
             await _write_agent_message(
                 session,
                 conversation,
@@ -2852,7 +2875,8 @@ async def _finish_chat_run(
                 "Tidak ada sprint aktif saat ini. Usulan dari "
                 f"{agent.name}:\n" + "\n".join(proposal_lines) + "\n\n"
                 'Balas "oke"/"lanjut" untuk approve — sprint dan tiket di atas baru '
-                "dibuat dan sprintnya diaktifkan setelah kamu setuju.",
+                "dibuat dan sprintnya diaktifkan setelah kamu setuju.\n\n"
+                + proposal_choices,
                 run_id=run.id,
                 workspace_id=workspace_id,
             )

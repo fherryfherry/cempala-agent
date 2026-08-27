@@ -644,7 +644,7 @@ def test_pm_mention_prompt_includes_other_workspace_tickets(client, tmp_path, mo
     resp = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": pm_id})
     _wait_for_run(client, resp.json()["id"])
     detail = client.get(f"/api/runs/{resp.json()['id']}").json()
-    assert "Tiket lain di workspace ini" not in detail["events"][0]["payload"]["prompt"]
+    assert "Other tickets in this workspace" not in detail["events"][0]["payload"]["prompt"]
 
     # trigger="mention" (owner chat) -> other tickets listed.
     client.post(f"/api/tickets/{ticket['key']}/comments", json={"body": "@pm-1 cek semua tiket"})
@@ -653,14 +653,14 @@ def test_pm_mention_prompt_includes_other_workspace_tickets(client, tmp_path, mo
     _wait_for_run(client, mention_run["id"])
     detail2 = client.get(f"/api/runs/{mention_run['id']}").json()
     prompt2 = detail2["events"][0]["payload"]["prompt"]
-    assert "Tiket lain di workspace ini" in prompt2
+    assert "Other tickets in this workspace" in prompt2
     assert other["key"] in prompt2
     # the chat ticket itself isn't duplicated inside the "other tickets" list —
     # scoped to just that one prompt block (parts are "\n\n"-joined), since the
     # separate epic-reuse catalog appended later in the prompt legitimately lists
     # every top-level ticket including the current one.
     other_tickets_block = next(
-        p for p in prompt2.split("\n\n") if p.strip().startswith("Tiket lain di workspace ini")
+        p for p in prompt2.split("\n\n") if p.strip().startswith("Other tickets in this workspace")
     )
     assert other["key"] in other_tickets_block
     assert ticket["key"] not in other_tickets_block
@@ -1726,7 +1726,7 @@ def test_artifact_catalog_included_in_prompt(client, tmp_path, monkeypatch):
 
     detail = client.get(f"/api/runs/{run2['id']}").json()
     prompt = detail["events"][0]["payload"]["prompt"]
-    assert "Artifacts di workspace ini (menu Artifacts)" in prompt
+    assert "Artifacts in this workspace (Artifacts menu)" in prompt
     assert "[Dokumen Teknis] PRD.md" in prompt
     assert "initial PRD" in prompt
     assert "[Hasil Testing] evidence.md" in prompt

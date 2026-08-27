@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.errors import AppError
+from app.core.git import GitError, clone_repo
 from app.db.models import (
     ArtifactGroup,
     Conversation,
@@ -34,7 +35,7 @@ router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 _WORKSPACES_DIR = Path("workspaces")
 
 
-def _resolve_repo_path(repo_path: str) -> str:
+def _resolve_repo_path(repo_path: str, *, create: bool = True) -> str:
     """Validate/create repo_path, returning the absolute path to use.
 
     - Absolute + exists as a directory: used as-is.
@@ -43,6 +44,9 @@ def _resolve_repo_path(repo_path: str) -> str:
     - Not absolute (bare name / relative): sanitized to a flat directory name (no
       traversal, same flattening approach as attachment filename sanitization) and
       created under _WORKSPACES_DIR, e.g. "myproject" -> "<cwd>/workspaces/myproject".
+
+    `create=False` skips the mkdir and just resolves+validates the path — used by the
+    git-clone flow, where `git clone` itself creates the target directory.
     """
     if not repo_path or not repo_path.strip():
         raise AppError(422, "invalid_repo_path", "repo_path is required")
@@ -52,7 +56,8 @@ def _resolve_repo_path(repo_path: str) -> str:
             if not os.path.isdir(repo_path):
                 raise AppError(422, "invalid_repo_path", f"repo_path is not a directory: {repo_path}")
             return repo_path
-        os.makedirs(repo_path, exist_ok=True)
+        if create:
+            os.makedirs(repo_path, exist_ok=True)
         return repo_path
 
     name = os.path.basename(repo_path.rstrip("/\\"))
@@ -61,7 +66,8 @@ def _resolve_repo_path(repo_path: str) -> str:
     target = (_WORKSPACES_DIR / name).resolve()
     if target.exists() and not target.is_dir():
         raise AppError(422, "invalid_repo_path", f"repo_path is not a directory: {target}")
-    target.mkdir(parents=True, exist_ok=True)
+    if create:
+        target.mkdir(parents=True, exist_ok=True)
     return str(target)
 
 
@@ -80,7 +86,16 @@ async def list_workspaces(session: AsyncSession = Depends(get_session)):
 
 @router.post("", response_model=WorkspaceOut, status_code=201)
 async def create_workspace(body: WorkspaceCreate, session: AsyncSession = Depends(get_session)):
-    repo_path = _resolve_repo_path(body.repo_path)
+    if body.clone_url:
+        repo_path = _resolve_repo_path(body.repo_path, create=False)
+        if os.path.exists(repo_path) and os.listdir(repo_path):
+            raise AppError(422, "invalid_repo_path", f"target directory is not empty: {repo_path}")
+        try:
+            await asyncio.to_thread(clone_repo, body.clone_url, repo_path)
+        except GitError as e:
+            raise AppError(400, "clone_failed", e.stderr or str(e))
+    else:
+        repo_path = _resolve_repo_path(body.repo_path)
 
     ws = Workspace(
         name=body.name,

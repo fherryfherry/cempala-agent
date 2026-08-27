@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.core.git import GitError, clone_repo
 from app.db import session as db_session
 from app.db.models import Base
 from app.db.session import get_session
@@ -349,3 +350,63 @@ class TestGitAPI:
             resp = client.get(f"/api/workspaces/{ws_id}/git/{path}")
             assert resp.status_code == 404, path
             assert resp.json()["error"]["code"] == "repo_not_found", path
+
+
+# ---------------------------------------------------------------------------
+# clone_repo() — real subprocess, no network (local source paths only)
+# ---------------------------------------------------------------------------
+
+class TestCloneRepo:
+    def test_clone_repo_success(self, tmp_path):
+        source = _init_repo(tmp_path)
+        target = tmp_path / "cloned"
+
+        clone_repo(str(source), str(target))
+
+        assert target.is_dir()
+        assert (target / ".git").is_dir()
+        assert (target / "README.md").exists()
+
+    def test_clone_repo_creates_missing_parent_dirs(self, tmp_path):
+        source = _init_repo(tmp_path)
+        target = tmp_path / "does" / "not" / "exist" / "yet" / "cloned"
+
+        clone_repo(str(source), str(target))
+
+        assert (target / ".git").is_dir()
+
+    def test_clone_repo_invalid_source_raises_clone_failed(self, tmp_path):
+        target = tmp_path / "cloned"
+
+        with pytest.raises(GitError) as exc_info:
+            clone_repo(str(tmp_path / "does-not-exist"), str(target))
+
+        assert exc_info.value.args[0] == "clone_failed"
+        assert exc_info.value.stderr
+        assert not target.exists()
+
+    def test_clone_repo_missing_binary_raises_git_error(self, tmp_path, monkeypatch):
+        import subprocess
+
+        def fake_run(*args, **kwargs):
+            raise FileNotFoundError("git not found")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        with pytest.raises(GitError) as exc_info:
+            clone_repo("https://example.com/repo.git", str(tmp_path / "cloned"))
+
+        assert "git binary not found" in exc_info.value.args[0]
+
+    def test_clone_repo_timeout_raises_git_error(self, tmp_path, monkeypatch):
+        import subprocess
+
+        def fake_run(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd="git clone", timeout=120.0)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+        with pytest.raises(GitError) as exc_info:
+            clone_repo("https://example.com/repo.git", str(tmp_path / "cloned"))
+
+        assert "timed out" in exc_info.value.args[0]

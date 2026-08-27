@@ -1,5 +1,6 @@
 """API tests for MAP-006 workspace CRUD."""
 
+import pathlib
 import tempfile
 from datetime import datetime
 
@@ -132,6 +133,76 @@ def test_create_missing_absolute_repo_path_is_auto_created(client, tmp_path):
     assert resp.status_code == 201, resp.text
     assert resp.json()["repo_path"] == str(target)
     assert target.is_dir()
+
+
+def test_create_workspace_with_clone_url(client, tmp_path, monkeypatch):
+    target = tmp_path / "cloned-repo"
+    calls = []
+
+    def fake_clone_repo(url, target_dir):
+        calls.append((url, target_dir))
+        pathlib.Path(target_dir).mkdir(parents=True, exist_ok=True)
+        (pathlib.Path(target_dir) / "README.md").write_text("cloned")
+
+    monkeypatch.setattr("app.api.workspaces.clone_repo", fake_clone_repo)
+
+    resp = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Acme",
+            "key": "ACM",
+            "repo_path": str(target),
+            "clone_url": "https://example.com/acme/repo.git",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["repo_path"] == str(target)
+    assert calls == [("https://example.com/acme/repo.git", str(target))]
+    assert (target / "README.md").exists()
+
+
+def test_create_workspace_clone_failure_400(client, tmp_path, monkeypatch):
+    from app.core.git import GitError
+
+    def fake_clone_repo(url, target_dir):
+        raise GitError("clone_failed", "fatal: repository not found")
+
+    monkeypatch.setattr("app.api.workspaces.clone_repo", fake_clone_repo)
+
+    resp = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Acme",
+            "key": "ACM",
+            "repo_path": str(tmp_path / "cloned-repo"),
+            "clone_url": "https://example.com/nope/repo.git",
+        },
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["error"]["code"] == "clone_failed"
+
+
+def test_create_workspace_clone_into_nonempty_dir_422(client, tmp_path, monkeypatch):
+    target = tmp_path / "cloned-repo"
+    target.mkdir()
+    (target / "existing.txt").write_text("already here")
+
+    def fake_clone_repo(url, target_dir):
+        raise AssertionError("clone_repo should not be called for a non-empty target")
+
+    monkeypatch.setattr("app.api.workspaces.clone_repo", fake_clone_repo)
+
+    resp = client.post(
+        "/api/workspaces",
+        json={
+            "name": "Acme",
+            "key": "ACM",
+            "repo_path": str(target),
+            "clone_url": "https://example.com/acme/repo.git",
+        },
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["error"]["code"] == "invalid_repo_path"
 
 
 def test_create_repo_path_that_is_a_file_422(client, tmp_path):

@@ -97,6 +97,51 @@ def _raise_timeout(*args, **kwargs):
     raise subprocess.TimeoutExpired(cmd="opencode models", timeout=30)
 
 
+def test_default_model_reads_opencode_config(tmp_path, monkeypatch, client):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config_dir = tmp_path / "opencode"
+    config_dir.mkdir()
+    (config_dir / "opencode.json").write_text('{"model": "ollama-cloud/deepseek-v4-flash:0731"}')
+
+    resp = client.get("/api/models/default")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"model": "ollama-cloud/deepseek-v4-flash:0731"}
+
+
+def test_default_model_missing_config_returns_null(tmp_path, monkeypatch, client):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    resp = client.get("/api/models/default")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"model": None}
+
+
+def test_default_model_malformed_json_returns_null(tmp_path, monkeypatch, client):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config_dir = tmp_path / "opencode"
+    config_dir.mkdir()
+    (config_dir / "opencode.json").write_text("{not valid json")
+
+    resp = client.get("/api/models/default")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"model": None}
+
+
+def test_default_model_blank_model_returns_null(tmp_path, monkeypatch, client):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config_dir = tmp_path / "opencode"
+    config_dir.mkdir()
+    (config_dir / "opencode.json").write_text('{"model": "   "}')
+
+    resp = client.get("/api/models/default")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"model": None}
+
+
 def test_cache_avoids_second_invocation(tmp_path, monkeypatch, client):
     counter_file = tmp_path / "count"
     script = _write_script(

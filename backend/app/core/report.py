@@ -97,6 +97,23 @@ class CommentDraft:
     body: str
 
 
+VALID_CHOICE_TYPES = frozenset({"single", "multiple"})
+
+
+@dataclass
+class ChoicesDraft:
+    """A quick-pick question for the chat owner (frontend/lib/parse-choices.ts
+    renders it as pills). Declared as a normal YAML field — NOT as literal
+    ~~~choices text embedded in `summary`, which requires the agent to keep
+    exact-matching indentation inside a YAML block scalar across several lines
+    and reliably breaks in practice (confirmed: a dedented nested block makes
+    the whole ```map block invalid YAML). The orchestrator formats this into
+    the ~~~choices text and appends it to `summary` server-side instead."""
+
+    type: str
+    options: list[str]
+
+
 @dataclass
 class ParseResult:
     ok: bool
@@ -128,6 +145,9 @@ class ParseResult:
     memories_dropped: bool = False
     memories_dropped_reason: str | None = None
     merge_branch: str | None = None
+    choices: ChoicesDraft | None = None
+    choices_dropped: bool = False
+    choices_dropped_reason: str | None = None
 
     def dropped_notes(self) -> list[str]:
         """Every non-empty `*_dropped_reason` — callers must surface these (a system
@@ -143,6 +163,7 @@ class ParseResult:
                 self.artifact_updates_dropped_reason,
                 self.comments_dropped_reason,
                 self.memories_dropped_reason,
+                self.choices_dropped_reason,
             )
             if reason
         ]
@@ -165,6 +186,20 @@ def _not_a_list_reason(field_name: str, raw: object) -> str:
         else ""
     )
     return f"'{field_name}' must be a list; dropped{hint}"
+
+
+def _parse_duration(raw: object) -> float | None:
+    """`duration` must be a plain number (no unit — the prompt's `_UNIT_LABELS`
+    already tells the agent which unit applies). Agents sometimes write "2 minggu"/
+    "3 days" anyway; `float()` on that raises ValueError and previously crashed the
+    whole parse instead of just dropping this one field — never let one bad
+    `duration` value take down an otherwise-valid report."""
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def parse_report(
@@ -228,6 +263,28 @@ def parse_report(
     if not isinstance(summary, str) or not summary.strip():
         return _invalid("```map block missing required non-empty 'summary'")
 
+    choices: ChoicesDraft | None = None
+    choices_dropped = False
+    choices_dropped_reason: str | None = None
+    choices_raw = data.get("choices")
+    if choices_raw is not None:
+        if not isinstance(choices_raw, dict):
+            choices_dropped = True
+            choices_dropped_reason = "'choices' must be a mapping (type/options); dropped"
+        else:
+            c_type = choices_raw.get("type") if choices_raw.get("type") in VALID_CHOICE_TYPES else "single"
+            c_options_raw = choices_raw.get("options")
+            if not isinstance(c_options_raw, list) or not c_options_raw:
+                choices_dropped = True
+                choices_dropped_reason = "'choices.options' must be a non-empty list; dropped"
+            else:
+                c_options = [str(o).strip() for o in c_options_raw if str(o).strip()]
+                if not c_options:
+                    choices_dropped = True
+                    choices_dropped_reason = "'choices.options' had no usable entries; dropped"
+                else:
+                    choices = ChoicesDraft(type=c_type, options=c_options)
+
     mention_raw = data.get("mention") or []
     if isinstance(mention_raw, str):
         mention_raw = [mention_raw]
@@ -282,7 +339,7 @@ def parse_report(
                         priority=str(item.get("priority") or "medium"),
                         category=raw_category if raw_category in VALID_CATEGORIES else None,
                         sprint=str(item["sprint"]) if item.get("sprint") else None,
-                        duration=float(item["duration"]) if item.get("duration") else None,
+                        duration=_parse_duration(item.get("duration")),
                         epic=str(item["epic"]) if item.get("epic") else None,
                     )
                 )
@@ -324,7 +381,7 @@ def parse_report(
                     SprintDraft(
                         name=str(item["name"]),
                         goal=str(item["goal"]) if item.get("goal") else None,
-                        duration=float(item["duration"]) if item.get("duration") else None,
+                        duration=_parse_duration(item.get("duration")),
                         start_date=str(item["start_date"]) if item.get("start_date") else None,
                         end_date=str(item["end_date"]) if item.get("end_date") else None,
                         status=raw_status if raw_status in VALID_SPRINT_STATUSES else None,
@@ -363,7 +420,7 @@ def parse_report(
                         priority=str(item["priority"]) if item.get("priority") else None,
                         assignee=str(item["assignee"]) if item.get("assignee") else None,
                         sprint=str(item["sprint"]) if item.get("sprint") else None,
-                        duration=float(item["duration"]) if item.get("duration") else None,
+                        duration=_parse_duration(item.get("duration")),
                     )
                 )
 
@@ -509,4 +566,7 @@ def parse_report(
         memories_dropped=memories_dropped,
         memories_dropped_reason=memories_dropped_reason,
         merge_branch=data.get("merge_branch") if isinstance(data.get("merge_branch"), str) else None,
+        choices=choices,
+        choices_dropped=choices_dropped,
+        choices_dropped_reason=choices_dropped_reason,
     )

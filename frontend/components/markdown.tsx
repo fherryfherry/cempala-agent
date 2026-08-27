@@ -1,3 +1,4 @@
+import type { CSSProperties } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
@@ -14,10 +15,16 @@ export function Markdown({
   children,
   className,
   invert = false,
+  style,
 }: {
   children: string;
   className?: string;
   invert?: boolean;
+  /** Escape hatch for callers embedding Markdown in a plain-text bubble that
+   * needs pixel-exact font matching — Typography's `prose-*` size classes set
+   * their own font-size on this element, so a mismatched className alone
+   * isn't reliable; inline style always wins over it. */
+  style?: CSSProperties;
 }) {
   return (
     <div
@@ -26,6 +33,7 @@ export function Markdown({
         invert ? "prose-invert" : "dark:prose-invert",
         className,
       )}
+      style={style}
     >
       <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>{children}</ReactMarkdown>
     </div>

@@ -150,6 +150,142 @@ def test_valid_full_block():
     assert result.tickets_dropped is False
 
 
+def test_choices_block_nested_in_summary_does_not_truncate_map_block():
+    """A ~~~choices block (frontend/lib/parse-choices.ts) embedded in `summary: |`
+    must not be mistaken for the outer ```map fence's own closing marker — it uses
+    tildes precisely so it can't collide, but this guards the contract itself: any
+    fields declared after it (sprints/tickets here) must still parse."""
+    text = _wrap(
+        "status: in_progress\n"
+        "summary: |\n"
+        "  Proposal saya, setuju?\n"
+        "  ~~~choices\n"
+        "  single\n"
+        "  - Oke, lanjutkan\n"
+        "  - Saya mau ubah dulu\n"
+        "  ~~~\n"
+        "tickets:\n"
+        "  - title: Setup project\n"
+        "    assignee: eng-1\n"
+    )
+    result = _parse(text, "pm", VALID_AGENTS, actor_name="pm-1")
+    assert result.ok is True
+    assert "~~~choices" in result.summary
+    assert len(result.tickets) == 1
+    assert result.tickets[0].title == "Setup project"
+
+
+def test_choices_field_parses_type_and_options():
+    text = _wrap(
+        "status: in_progress\n"
+        "summary: |\n"
+        "  Pick one\n"
+        "choices:\n"
+        "  type: multiple\n"
+        "  options:\n"
+        "    - A\n"
+        "    - B\n"
+    )
+    result = _parse(text, "pm", VALID_AGENTS)
+    assert result.ok is True
+    assert result.choices is not None
+    assert result.choices.type == "multiple"
+    assert result.choices.options == ["A", "B"]
+    assert result.choices_dropped is False
+
+
+def test_choices_field_defaults_to_single_for_invalid_type():
+    text = _wrap(
+        "status: in_progress\n"
+        "summary: |\n"
+        "  Pick one\n"
+        "choices:\n"
+        "  type: yesno\n"
+        "  options:\n"
+        "    - A\n"
+    )
+    result = _parse(text, "pm", VALID_AGENTS)
+    assert result.ok is True
+    assert result.choices.type == "single"
+
+
+def test_choices_field_dropped_when_options_missing():
+    text = _wrap(
+        "status: in_progress\n"
+        "summary: |\n"
+        "  Pick one\n"
+        "choices:\n"
+        "  type: single\n"
+    )
+    result = _parse(text, "pm", VALID_AGENTS)
+    assert result.ok is True
+    assert result.choices is None
+    assert result.choices_dropped is True
+    assert "choices.options" in result.choices_dropped_reason
+
+
+def test_choices_field_dropped_when_not_a_mapping():
+    text = _wrap(
+        "status: in_progress\n"
+        "summary: |\n"
+        "  Pick one\n"
+        "choices: not-a-mapping\n"
+    )
+    result = _parse(text, "pm", VALID_AGENTS)
+    assert result.ok is True
+    assert result.choices is None
+    assert result.choices_dropped is True
+
+
+def test_ticket_duration_with_unit_text_dropped_not_crashed():
+    """Agents sometimes write "2 minggu"/"3 days" for duration instead of a plain
+    number — float() on that used to raise ValueError and crash the whole parse.
+    Must drop just the duration field, not the ticket or the report."""
+    text = _wrap(
+        "status: in_progress\n"
+        "summary: |\n"
+        "  plan proposal\n"
+        "tickets:\n"
+        "  - title: sub-task\n"
+        "    assignee: eng-1\n"
+        "    duration: 2 minggu\n"
+    )
+    result = _parse(text, "pm", VALID_AGENTS, ticket_approved=True)
+    assert result.ok is True
+    assert len(result.tickets) == 1
+    assert result.tickets[0].duration is None
+
+
+def test_sprint_duration_with_unit_text_dropped_not_crashed():
+    text = _wrap(
+        "status: in_progress\n"
+        "summary: |\n"
+        "  plan proposal\n"
+        "sprints:\n"
+        "  - name: Sprint 1\n"
+        "    duration: 2 weeks\n"
+    )
+    result = _parse(text, "pm", VALID_AGENTS, ticket_approved=True)
+    assert result.ok is True
+    assert len(result.sprints) == 1
+    assert result.sprints[0].duration is None
+
+
+def test_update_duration_with_unit_text_dropped_not_crashed():
+    text = _wrap(
+        "status: in_progress\n"
+        "summary: |\n"
+        "  plan proposal\n"
+        "updates:\n"
+        "  - ticket: KEY-1\n"
+        "    duration: three days\n"
+    )
+    result = _parse(text, "pm", VALID_AGENTS, ticket_approved=True)
+    assert result.ok is True
+    assert len(result.updates) == 1
+    assert result.updates[0].duration is None
+
+
 def test_malformed_yaml():
     text = _wrap("status: review\nmention: [lead-1\nsummary: broken\n")
     result = _parse(text, "engineer", VALID_AGENTS)

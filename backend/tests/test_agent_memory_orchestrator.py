@@ -228,13 +228,13 @@ def test_memory_injected_into_agents_next_prompt(client, tmp_path, monkeypatch):
 
     detail2 = client.get(f"/api/runs/{run2['id']}").json()
     prompt2 = detail2["events"][0]["payload"]["prompt"]
-    assert "Catatan dari pekerjaanmu sebelumnya" in prompt2
+    assert "Notes from your previous work" in prompt2
     assert "hindari hardcode api key" in prompt2
 
     # The first run's own prompt had no memory yet (nothing saved before it started).
     detail1 = client.get(f"/api/runs/{run1['id']}").json()
     prompt1 = detail1["events"][0]["payload"]["prompt"]
-    assert "Catatan dari pekerjaanmu sebelumnya" not in prompt1
+    assert "Notes from your previous work" not in prompt1
 
 
 def test_owner_added_memory_also_injected_into_prompt(client, tmp_path, monkeypatch):

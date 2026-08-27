@@ -82,6 +82,9 @@ export interface WorkspaceCreate {
   key: string;
   repo_path: string;
   description?: string;
+  /** When set, repo_path is populated via `git clone <clone_url> <repo_path>`
+   * instead of created as an empty directory. */
+  clone_url?: string;
 }
 
 export function listWorkspaces(): Promise<Workspace[]> {
@@ -143,6 +146,26 @@ export function terminateWorkspace(workspaceId: string): Promise<void> {
 
 export function getWorkflowPromptDefault(): Promise<{ workflow_prompt: string }> {
   return apiFetch<{ workflow_prompt: string }>("/workspaces/workflow-prompt-default");
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem browse (onboarding wizard's repo-path folder picker)
+// ---------------------------------------------------------------------------
+
+export interface FsEntry {
+  name: string;
+  path: string;
+}
+
+export interface FsBrowseOut {
+  path: string;
+  parent: string | null;
+  dirs: FsEntry[];
+}
+
+export function browseFs(path?: string): Promise<FsBrowseOut> {
+  const qs = path ? `?path=${encodeURIComponent(path)}` : "";
+  return apiFetch<FsBrowseOut>(`/fs/browse${qs}`);
 }
 
 export type ToolKind = "opencode" | "claude" | "agy" | "codex";
@@ -312,6 +335,12 @@ export function deleteAgentMemory(memoryId: string): Promise<void> {
 
 export function getModels(): Promise<string[]> {
   return apiFetch<string[]>("/models");
+}
+
+/** The host's own `opencode` CLI default model (its opencode.json `"model"` key),
+ * for suggesting a sane default instead of guessing off list order. */
+export function getDefaultModel(): Promise<{ model: string | null }> {
+  return apiFetch<{ model: string | null }>("/models/default");
 }
 
 export interface OrchestratorModel {

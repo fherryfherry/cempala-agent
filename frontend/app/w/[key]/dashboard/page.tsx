@@ -1,9 +1,10 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
+import { toast } from "sonner";
 import {
   formatAgentName,
   listAgents,
@@ -66,6 +67,24 @@ export default function DashboardPage() {
     enabled: !!workspace,
   });
   const { status: sseStatus } = useWorkspaceEvents();
+
+  // One-time welcome toast when arriving here right after onboarding (see
+  // PmHandoff — it sets this flag in sessionStorage just before redirecting,
+  // since the navigation itself doesn't carry React state along).
+  useEffect(() => {
+    if (!workspace) return;
+    let justFinished: string | null = null;
+    try {
+      justFinished = sessionStorage.getItem("onboarding:justFinished");
+    } catch {
+      return;
+    }
+    if (justFinished !== workspaceKey) return;
+    sessionStorage.removeItem("onboarding:justFinished");
+    toast.success(`Selamat datang di workspace "${workspace.name}"! 🎉`, {
+      description: "Tim agent-mu sudah mulai bergerak — pantau progressnya di sini.",
+    });
+  }, [workspace, workspaceKey]);
 
   const counts = useMemo(() => ticketCounts(tickets.data), [tickets.data]);
   const liveRuns = useMemo(() => runStats(runs.data), [runs.data]);
