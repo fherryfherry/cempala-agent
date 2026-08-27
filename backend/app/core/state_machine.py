@@ -22,13 +22,15 @@ STATUSES = {
     "blocked",
 }
 
-ALL_ROLES = frozenset(
-    {"pm", "lead", "engineer", "designer", "qa", "pentester", "business_analyst", "system_architect"}
-)
-
 
 def can_transition(from_status: str, to_status: str, actor_role: str | None) -> tuple[bool, str]:
-    """Return (allowed, reason). `actor_role=None` means the owner (no agent)."""
+    """Return (allowed, reason). `actor_role=None` means the owner (no agent).
+
+    Role keys are dynamic (global `role` table) — unknown-role rejection no longer
+    happens here. The parser/API layer validates the role key against the known
+    roles before the orchestrator ever calls this, so no observable behavior
+    changes from dropping the check.
+    """
     if to_status not in STATUSES or from_status not in STATUSES:
         return False, f"unknown status in transition '{from_status}' -> '{to_status}'"
     if from_status == to_status:
@@ -36,8 +38,5 @@ def can_transition(from_status: str, to_status: str, actor_role: str | None) -> 
 
     if actor_role is None:
         return True, "owner may perform any transition"
-
-    if actor_role not in ALL_ROLES:
-        return False, f"unknown role '{actor_role}'"
 
     return True, f"role '{actor_role}' may transition '{from_status}' -> '{to_status}' (unrestricted)"

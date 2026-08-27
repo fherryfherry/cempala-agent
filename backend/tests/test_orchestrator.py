@@ -1262,7 +1262,7 @@ print(json.dumps({"type": "assistant_text", "text": text, "session_id": "sess-en
 def test_tickets_from_unauthorized_role_dropped_reason_surfaced_to_ticket_and_epic(
     client, tmp_path, monkeypatch
 ):
-    """`engineer` is not in ROLES_ALLOWED_TICKETS (report.py) — report.py already
+    """`engineer` has may_declare_tickets=false (role flags) — report.py already
     drops `tickets:` and computes why, but nothing used to read that reason: the
     agent's own `summary` ("sudah kubuatkan tiket baru") was the only account
     posted, silently misrepresenting what happened. Must now get a system comment

@@ -9,25 +9,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.core.report import ROLES_ALLOWED_TICKETS
 from app.core.state_machine import STATUSES
 
-ROLE_LABELS: dict[str, str] = {
-    "pm": "Project Manager",
-    "lead": "Lead Engineer",
-    "engineer": "Engineer",
-    "designer": "Designer",
-    "qa": "QA",
-    "pentester": "Security Reviewer",
-    "business_analyst": "Business Analyst",
-    "system_architect": "System Architect",
-}
-
-# Reviewer roles get the anti-loop addition (docs/03-agent-design.md §7).
-REVIEWER_ROLES = frozenset({"lead", "qa", "pentester", "system_architect"})
-
 # Default per-role prompt bodies, verbatim from docs/03-agent-design.md §4.
-# Used unless agent.system_prompt overrides them.
+# Used as a defensive seed fallback when a role row's system_prompt is null
+# (backfilled builtin roles won't hit it — the migration copies these into the
+# `role` table). Overridden by agent.system_prompt as before.
 DEFAULT_ROLE_PROMPTS: dict[str, str] = {
     "pm": """\
 Kamu Project Manager. Kamu TIDAK menulis atau mengubah kode/test. Kamu BOLEH menulis dokumen
@@ -168,6 +155,12 @@ class AgentInfo:
     name: str
     role: str
     system_prompt: str | None = None
+    # Resolved by the caller from the role row (dynamic roles spec): the display
+    # label, and the permission flags that gate the prompt's contract blocks.
+    label: str | None = None
+    is_reviewer: bool = False
+    may_declare_tickets: bool = False
+    may_manage_artifacts: bool = False
 
 
 @dataclass
@@ -241,7 +234,7 @@ def _base_block(
     sprint_creator_roles: set[str] | None = None,
 ) -> str:
     roster_lines = "\n".join(
-        f"- {member.name} ({ROLE_LABELS.get(member.role, member.role)})" for member in team_roster
+        f"- {member.name} ({member.label or member.role})" for member in team_roster
     )
     allowed_sprint_roles = sprint_creator_roles or {"pm"}
     sprint_rule = (
@@ -257,7 +250,7 @@ def _base_block(
             "tapi JANGAN mengerjakan implementasi tiket yang belum aktif."
         )
     return f"""\
-Kamu adalah {agent.name}, seorang {ROLE_LABELS.get(agent.role, agent.role)} di tim software \
+Kamu adalah {agent.name}, seorang {agent.label or agent.role} di tim software \
 yang bekerja di repo pada {workspace_repo_path}.
 
 Kamu bekerja lewat sistem tiket. Aturan yang tidak bisa ditawar:
@@ -465,7 +458,7 @@ def _map_contract_block(
         )
 
     tickets_line = ""
-    if agent.role in ROLES_ALLOWED_TICKETS:
+    if agent.may_declare_tickets:
         sprints_line = ""
         if agent.role in allowed_sprint_roles:
             sprint_rule = _sprint_reuse_rule(existing_sprints)
@@ -502,9 +495,9 @@ updates:                    # opsional; ubah tiket LAIN yang sudah ada (bukan bi
     duration: <opsional, perbaiki estimasi durasi tiket ini dalam {unit_label}>{sprints_line}"""
 
     artifact_updates_line = ""
-    if agent.role == "pm":
+    if agent.may_manage_artifacts:
         artifact_updates_line = f"""
-artifact_updates:           # opsional; HANYA PM — rapikan kelompok di menu Artifacts
+artifact_updates:           # opsional; HANYA role dengan izin kelola artifacts — rapikan kelompok di menu Artifacts
   # Cek daftar Artifacts di atas dulu. Nama kelompok harus persis dari daftar itu.
   # op: rename | merge | move | delete
   - op: rename
@@ -617,7 +610,7 @@ def _routine_contract_block(
     existing_sprints = existing_sprints or []
     mention_names = ", ".join(m.name for m in team_roster)
     tickets_line = ""
-    if agent.role in ROLES_ALLOWED_TICKETS:
+    if agent.may_declare_tickets:
         sprints_line = ""
         if agent.role in allowed_sprint_roles:
             sprint_rule = _sprint_reuse_rule(existing_sprints)
@@ -644,9 +637,9 @@ tickets:                    # opsional; tiket backlog baru (status todo, TIDAK o
     duration: <opsional, estimasi durasi tiket ini>{sprints_line}"""
 
     artifact_updates_line = ""
-    if agent.role == "pm":
+    if agent.may_manage_artifacts:
         artifact_updates_line = """
-artifact_updates:           # opsional; HANYA PM — rapikan kelompok di menu Artifacts
+artifact_updates:           # opsional; HANYA role dengan izin kelola artifacts — rapikan kelompok di menu Artifacts
   - op: rename
     group: <nama kelompok lama>
     to: <nama kelompok baru>
@@ -782,7 +775,7 @@ def build_prompt(
     if catalog_block:
         parts.append(catalog_block)
 
-    if agent.role in REVIEWER_ROLES:
+    if agent.is_reviewer:
         anti_loop = _anti_loop_block(review_round, previous_review_feedback)
         if anti_loop:
             parts.append(anti_loop)
@@ -827,7 +820,7 @@ def _chat_contract_block(
     existing_sprints = existing_sprints or []
     mention_names = ", ".join(m.name for m in team_roster)
     tickets_line = ""
-    if agent.role in ROLES_ALLOWED_TICKETS:
+    if agent.may_declare_tickets:
         sprints_line = ""
         if agent.role in allowed_sprint_roles:
             sprint_rule = _sprint_reuse_rule(existing_sprints)
@@ -854,9 +847,9 @@ tickets:                    # opsional; tiket backlog baru (status todo, TIDAK o
     duration: <opsional, estimasi durasi tiket ini>{sprints_line}"""
 
     artifact_updates_line = ""
-    if agent.role == "pm":
+    if agent.may_manage_artifacts:
         artifact_updates_line = """
-artifact_updates:           # opsional; HANYA PM — rapikan kelompok di menu Artifacts
+artifact_updates:           # opsional; HANYA role dengan izin kelola artifacts — rapikan kelompok di menu Artifacts
   - op: rename
     group: <nama kelompok lama>
     to: <nama kelompok baru>

@@ -52,14 +52,13 @@ from app.core.guardrails import (
 from app.core.loop_detector import detect_loop
 from app.core import git as git_module
 from app.core.report import (
-    ROLES_ALLOWED_TICKETS,
     ArtifactDraft,
     ArtifactUpdateDraft,
     SprintDraft,
     TicketDraft,
     parse_report,
 )
-from app.core.state_machine import ALL_ROLES, STATUSES, can_transition
+from app.core.state_machine import STATUSES, can_transition
 
 from app.db.models import (
     Agent,
@@ -73,6 +72,7 @@ from app.db.models import (
     ConversationMessage,
     Event,
     GlobalSetting,
+    Role,
     Routine,
     Run,
     Sprint,
@@ -80,10 +80,6 @@ from app.db.models import (
     TicketAutoCheck,
     Workspace,
 )
-
-# Valid role strings — used for MAP-029's role-not-name mention fallback (see
-# `_resolve_handoff_targets`).
-_ROLES = ALL_ROLES
 
 # Statuses that don't expect a follow-up handoff (docs/03-agent-design.md §5/§6): the
 # flow always routes review/qa/security to a specific next reviewer, so only done/blocked
@@ -611,6 +607,29 @@ def resolve_agent_model(agent_model: str | None, global_model: str | None) -> st
     if agent_model:
         return agent_model
     return global_model
+
+
+async def _role_map(session: AsyncSession) -> dict[str, Role]:
+    """Load every role row keyed by its immutable key — the single source for
+    role labels/flags (dynamic roles spec). Callers fetch once per run and pass
+    the results into the pure prompt/report builders."""
+    roles = (await session.scalars(select(Role))).all()
+    return {r.key: r for r in roles}
+
+
+def _agent_info_from(agent: Agent, role: Role | None) -> AgentInfo:
+    """Enrich an ORM Agent into a prompt `AgentInfo`: role label, resolved default
+    system prompt (agent's own wins; else the role's — dynamic roles fallback),
+    and the permission flags that gate the prompt's contract blocks."""
+    return AgentInfo(
+        name=agent.name,
+        role=agent.role,
+        system_prompt=agent.system_prompt if agent.system_prompt else (role.system_prompt if role else None),
+        label=role.name if role else None,
+        is_reviewer=role.is_reviewer if role else False,
+        may_declare_tickets=role.may_declare_tickets if role else False,
+        may_manage_artifacts=role.may_manage_artifacts if role else False,
+    )
 
 
 async def schedule(
@@ -1747,11 +1766,14 @@ async def _build_prompt_for(
     session, workspace: Workspace, agent: Agent, ticket: Ticket, trigger: str,
     retry_notice: str | None = None,
 ) -> str:
+    role_map = await _role_map(session)
     roster = (
         await session.scalars(select(Agent).where(Agent.workspace_id == workspace.id))
     ).all()
-    team_roster = [AgentInfo(name=a.name, role=a.role) for a in roster]
-    agent_info = AgentInfo(name=agent.name, role=agent.role, system_prompt=agent.system_prompt)
+    team_roster = [
+        _agent_info_from(a, role_map.get(a.role)) for a in roster
+    ]
+    agent_info = _agent_info_from(agent, role_map.get(agent.role))
 
     attachments = (
         await session.scalars(select(Attachment).where(Attachment.ticket_id == ticket.id))
@@ -1789,14 +1811,15 @@ async def _build_prompt_for(
     ]
 
     # "Review round" = how many prior runs on this ticket were done by an agent in a
-    # reviewer role (lead/qa/pentester), regardless of which reviewer. Their summaries
+    # reviewer role (`role.is_reviewer`), regardless of which reviewer. Their summaries
     # double as the previous-review feedback shown to the anti-loop block.
     review_round = 0
     previous_review_feedback: list[str] = []
-    if agent.role in {"lead", "qa", "pentester"}:
+    if agent_info.is_reviewer:
         for r in prior_runs:
             run_agent = await session.get(Agent, r.agent_id)
-            if run_agent is not None and run_agent.role in {"lead", "qa", "pentester"}:
+            prior_role = role_map.get(run_agent.role) if run_agent is not None else None
+            if prior_role is not None and prior_role.is_reviewer:
                 review_round += 1
                 if r.report and r.report.get("summary"):
                     previous_review_feedback.append(r.report["summary"])
@@ -1869,7 +1892,7 @@ async def _build_prompt_for(
     # roles reuse a sprint name exactly instead of drifting into near-duplicates.
     existing_epics: list[str] = []
     existing_sprints: list[str] = []
-    if agent.role in ROLES_ALLOWED_TICKETS:
+    if agent_info.may_declare_tickets:
         epic_rows = (
             await session.scalars(
                 select(Ticket)
@@ -1947,11 +1970,14 @@ async def _build_routine_prompt_for(
     context (description/workflow) + artifact catalog + agent memory + routine ```map
     contract. No ticket context — the routine's own prompt is the task.
     """
+    role_map = await _role_map(session)
     roster = (
         await session.scalars(select(Agent).where(Agent.workspace_id == workspace.id))
     ).all()
-    team_roster = [AgentInfo(name=a.name, role=a.role) for a in roster]
-    agent_info = AgentInfo(name=agent.name, role=agent.role, system_prompt=agent.system_prompt)
+    team_roster = [
+        _agent_info_from(a, role_map.get(a.role)) for a in roster
+    ]
+    agent_info = _agent_info_from(agent, role_map.get(agent.role))
 
     # Artifact catalog (Artifacts menu) so the agent can read/search what's published.
     catalog_rows = (
@@ -1984,7 +2010,7 @@ async def _build_routine_prompt_for(
     # Same epic/sprint reuse catalogs as ticket runs (docs/03-agent-design.md §3).
     existing_epics: list[str] = []
     existing_sprints: list[str] = []
-    if agent.role in ROLES_ALLOWED_TICKETS:
+    if agent_info.may_declare_tickets:
         epic_rows = (
             await session.scalars(
                 select(Ticket)
@@ -2031,11 +2057,14 @@ async def _build_chat_prompt_for(
     """Assemble a chat-run prompt: BASE + role block + conversation transcript +
     workspace tickets + artifact catalog + agent memory + chat ```map contract.
     """
+    role_map = await _role_map(session)
     roster = (
         await session.scalars(select(Agent).where(Agent.workspace_id == workspace.id))
     ).all()
-    team_roster = [AgentInfo(name=a.name, role=a.role) for a in roster]
-    agent_info = AgentInfo(name=agent.name, role=agent.role, system_prompt=agent.system_prompt)
+    team_roster = [
+        _agent_info_from(a, role_map.get(a.role)) for a in roster
+    ]
+    agent_info = _agent_info_from(agent, role_map.get(agent.role))
 
     messages = (
         await session.scalars(
@@ -2106,7 +2135,7 @@ async def _build_chat_prompt_for(
     existing_epics: list[str] = []
     existing_sprints: list[str] = []
     has_active_sprint = True
-    if agent.role in ROLES_ALLOWED_TICKETS:
+    if agent_info.may_declare_tickets:
         epic_rows = (
             await session.scalars(
                 select(Ticket)
@@ -2256,6 +2285,8 @@ async def _finish_routine_run(
         ).all()
     }
     workspace = await session.get(Workspace, workspace_id)
+    role_map = await _role_map(session)
+    actor_role = role_map.get(agent.role)
     parsed = parse_report(
         accumulated_text,
         agent.role,
@@ -2264,6 +2295,10 @@ async def _finish_routine_run(
         ticket_approved=True,
         sprint_creator_roles=set((workspace.sprint_creator_roles if workspace else None) or ["pm"]),
         no_ticket_mode=True,
+        valid_roles=set(role_map),
+        may_declare_tickets=actor_role.may_declare_tickets if actor_role else False,
+        may_manage_artifacts=actor_role.may_manage_artifacts if actor_role else False,
+        is_pm=agent.role == "pm",
     )
 
     if not parsed.ok:
@@ -2570,6 +2605,8 @@ async def _finish_chat_run(
         ).all()
     }
     workspace = await session.get(Workspace, workspace_id)
+    role_map = await _role_map(session)
+    actor_role = role_map.get(agent.role)
     parsed = parse_report(
         accumulated_text,
         agent.role,
@@ -2578,6 +2615,10 @@ async def _finish_chat_run(
         ticket_approved=True,
         sprint_creator_roles=set((workspace.sprint_creator_roles if workspace else None) or ["pm"]),
         no_ticket_mode=True,
+        valid_roles=set(role_map),
+        may_declare_tickets=actor_role.may_declare_tickets if actor_role else False,
+        may_manage_artifacts=actor_role.may_manage_artifacts if actor_role else False,
+        is_pm=agent.role == "pm",
     )
 
     if not parsed.ok:
@@ -3057,6 +3098,8 @@ async def _finish_run(
             )
         ).all()
     }
+    role_map = await _role_map(session)
+    actor_role = role_map.get(agent.role)
     parsed = parse_report(
         accumulated_text,
         agent.role,
@@ -3067,6 +3110,10 @@ async def _finish_run(
         ticket_approved=run.trigger != "mention" or ticket.approved_at is not None,
         # Per-workspace setting (Settings page): which roles may declare `sprints:`.
         sprint_creator_roles=set((workspace.sprint_creator_roles if workspace else None) or ["pm"]),
+        valid_roles=set(role_map),
+        may_declare_tickets=actor_role.may_declare_tickets if actor_role else False,
+        may_manage_artifacts=actor_role.may_manage_artifacts if actor_role else False,
+        is_pm=agent.role == "pm",
     )
 
     if not parsed.ok:
@@ -3743,6 +3790,7 @@ async def _handoff(
     step still fully bounds runaway A -> B -> A -> B ... chains, which is the actual
     runaway-loop risk this guardrail exists for.
     """
+    role_map = await _role_map(session)
     targets: list[Agent] = []
     notes: list[str] = []
     seen_ids: set[str] = set()
@@ -3769,7 +3817,7 @@ async def _handoff(
                 targets.append(a)
 
     for name in parsed.unknown_mentions:
-        if name not in _ROLES:
+        if name not in role_map:
             notes.append(f"mention '{name}' tidak dikenal")
             continue
         resolved = await _resolve_role_agent(session, ticket, name)

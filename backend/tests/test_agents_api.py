@@ -97,7 +97,7 @@ def test_create_invalid_role_422(client, tmp_path):
         f"/api/workspaces/{ws_id}/agents", json=_agent_payload(role="astronaut")
     )
     assert resp.status_code == 422
-    assert resp.json()["error"]["code"] == "validation_error"
+    assert resp.json()["error"]["code"] == "unknown_role"
 
 
 def test_create_invalid_tool_kind_422(client, tmp_path):

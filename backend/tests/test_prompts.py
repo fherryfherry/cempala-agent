@@ -9,12 +9,12 @@ from app.agents.prompts import (
 from app.core.state_machine import STATUSES
 
 ROSTER = [
-    AgentInfo(name="pm-1", role="pm"),
-    AgentInfo(name="lead-1", role="lead"),
-    AgentInfo(name="eng-1", role="engineer"),
-    AgentInfo(name="designer-1", role="designer"),
-    AgentInfo(name="qa-1", role="qa"),
-    AgentInfo(name="pentester-1", role="pentester"),
+    AgentInfo(name="pm-1", role="pm", label="Project Manager", may_declare_tickets=True, may_manage_artifacts=True),
+    AgentInfo(name="lead-1", role="lead", label="Lead Engineer", is_reviewer=True),
+    AgentInfo(name="eng-1", role="engineer", label="Engineer"),
+    AgentInfo(name="designer-1", role="designer", label="Designer"),
+    AgentInfo(name="qa-1", role="qa", label="QA", may_declare_tickets=True, is_reviewer=True),
+    AgentInfo(name="pentester-1", role="pentester", label="Security Reviewer", may_declare_tickets=True, is_reviewer=True),
 ]
 
 TICKET = TicketInfo(
@@ -27,7 +27,23 @@ TICKET = TicketInfo(
 
 
 def _agent(name: str, role: str, system_prompt: str | None = None) -> AgentInfo:
-    return AgentInfo(name=name, role=role, system_prompt=system_prompt)
+    """AgentInfo with the builtin role's default flags/label filled in, mirroring
+    the role seed — tests override flags explicitly where the behavior under
+    test differs."""
+    flags = {
+        "pm": {"label": "Project Manager", "may_declare_tickets": True, "may_manage_artifacts": True},
+        "lead": {"label": "Lead Engineer", "is_reviewer": True},
+        "engineer": {"label": "Engineer"},
+        "designer": {"label": "Designer"},
+        "qa": {"label": "QA", "may_declare_tickets": True, "is_reviewer": True},
+        "pentester": {"label": "Security Reviewer", "may_declare_tickets": True, "is_reviewer": True},
+        "business_analyst": {"label": "Business Analyst", "may_declare_tickets": True},
+        "system_architect": {"label": "System Architect", "is_reviewer": True},
+        # Custom roles get no flags unless the test sets them.
+    }
+    return AgentInfo(
+        name=name, role=role, system_prompt=system_prompt, **flags.get(role, {})
+    )
 
 
 def test_base_always_present():
@@ -125,6 +141,41 @@ def test_custom_system_prompt_replaces_role_block_not_base_or_contract():
     # map contract still present
     assert "```map" in prompt
     assert "status: <salah satu dari:" in prompt
+
+
+def test_role_prompt_fallback_via_agent_info():
+    """Dynamic roles: the orchestrator passes the role row's system_prompt as
+    AgentInfo.system_prompt when the agent's own is null. A custom role's prompt
+    (absent from DEFAULT_ROLE_PROMPTS) must be used as the role block, and the
+    roster/base block shows the role's label."""
+    role_prompt = "Kamu Scrum Master. Fasilitasi sprint."
+    agent = AgentInfo(
+        name="scrum-1",
+        role="scrum_master",
+        system_prompt=role_prompt,
+        label="Scrum Master",
+    )
+    prompt = build_prompt(agent, "/repo", ROSTER, TICKET)
+    assert role_prompt in prompt
+    assert "seorang Scrum Master di tim software" in prompt
+    # Roster member labels come from the role rows too.
+    roster_prompt = build_prompt(
+        _agent("pm-1", "pm"),
+        "/repo",
+        [*ROSTER, agent],
+        TICKET,
+    )
+    assert "scrum-1 (Scrum Master)" in roster_prompt
+
+
+def test_custom_role_prompt_fallback_contracts_gated_by_flags():
+    """A custom role with no flags gets no tickets[]/artifact_updates/anti-loop
+    blocks even though the parser would gate those on the same flags."""
+    agent = AgentInfo(name="scrum-1", role="scrum_master", system_prompt="x", label="Scrum Master")
+    prompt = build_prompt(agent, "/repo", ROSTER, TICKET, review_round=2)
+    assert "tickets:" not in prompt
+    assert "artifact_updates:" not in prompt
+    assert "Ini review ke-" not in prompt
 
 
 def test_map_contract_status_list_is_unrestricted():

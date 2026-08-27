@@ -3,9 +3,6 @@ from typing import Literal
 
 from pydantic import BaseModel, field_validator
 
-Role = Literal[
-    "pm", "lead", "engineer", "designer", "qa", "pentester", "business_analyst", "system_architect"
-]
 ToolKind = Literal["opencode", "claude", "agy", "codex"]
 AvatarTemplate = Literal[
     "person-1", "person-2", "person-3", "person-4", "person-5", "person-6",
@@ -22,7 +19,7 @@ def _validate_avatar_color(v: str | None) -> str | None:
 
 class AgentCreate(BaseModel):
     name: str
-    role: Role
+    role: str
     model: str | None = None
     tool_kind: ToolKind
     system_prompt: str | None = None
@@ -34,7 +31,7 @@ class AgentCreate(BaseModel):
 
 class AgentUpdate(BaseModel):
     name: str | None = None
-    role: Role | None = None
+    role: str | None = None
     model: str | None = None
     tool_kind: ToolKind | None = None
     system_prompt: str | None = None

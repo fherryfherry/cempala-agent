@@ -56,7 +56,10 @@ export function getHealth(): Promise<HealthResponse> {
 
 export type TimeUnit = "hour" | "day";
 
-export type AgentRole = "pm" | "lead" | "engineer" | "designer" | "qa" | "pentester" | "business_analyst" | "system_architect";
+/** Role keys are dynamic (global `role` table) — kept as a string alias for
+ * compatibility; any existing role key string is valid. */
+export type Role = string;
+export type AgentRole = Role;
 
 export interface Workspace {
   id: string;
@@ -142,7 +145,6 @@ export function getWorkflowPromptDefault(): Promise<{ workflow_prompt: string }>
   return apiFetch<{ workflow_prompt: string }>("/workspaces/workflow-prompt-default");
 }
 
-export type Role = "pm" | "lead" | "engineer" | "designer" | "qa" | "pentester" | "business_analyst" | "system_architect";
 export type ToolKind = "opencode" | "claude" | "agy" | "codex";
 export type TicketCategory = "feature" | "improvement" | "fix" | "security" | "performance";
 
@@ -216,6 +218,65 @@ export function updateAgent(agentId: string, body: AgentUpdate): Promise<Agent> 
 
 export function deleteAgent(agentId: string): Promise<void> {
   return apiFetch<void>(`/agents/${agentId}`, { method: "DELETE" });
+}
+
+// ---------------------------------------------------------------------------
+// Roles (global settings — docs/superpowers/specs/2026-08-27-dynamic-roles-design.md)
+// ---------------------------------------------------------------------------
+
+export interface RoleDef {
+  id: string;
+  key: string;
+  name: string;
+  description: string | null;
+  system_prompt: string | null;
+  is_builtin: boolean;
+  may_declare_tickets: boolean;
+  may_manage_artifacts: boolean;
+  is_reviewer: boolean;
+  created_at: string;
+  agent_count: number;
+}
+
+export interface RoleCreate {
+  key: string;
+  name: string;
+  description?: string | null;
+  system_prompt?: string | null;
+  may_declare_tickets?: boolean;
+  may_manage_artifacts?: boolean;
+  is_reviewer?: boolean;
+}
+
+export interface RoleUpdate {
+  name?: string;
+  description?: string | null;
+  system_prompt?: string | null;
+  may_declare_tickets?: boolean;
+  may_manage_artifacts?: boolean;
+  is_reviewer?: boolean;
+}
+
+export function listRoles(): Promise<RoleDef[]> {
+  return apiFetch<RoleDef[]>("/roles");
+}
+
+export function createRole(body: RoleCreate): Promise<RoleDef> {
+  return apiFetch<RoleDef>("/roles", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function updateRole(key: string, body: RoleUpdate): Promise<RoleDef> {
+  return apiFetch<RoleDef>(`/roles/${key}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+export function deleteRole(key: string): Promise<void> {
+  return apiFetch<void>(`/roles/${key}`, { method: "DELETE" });
 }
 
 export interface AgentMemoryEntry {

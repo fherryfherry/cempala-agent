@@ -13,10 +13,12 @@ import {
   getModels,
   listAgentMemory,
   listAgents,
+  listRoles,
   listWorkspaces,
   updateAgent,
   type Agent,
   type Role,
+  type RoleDef,
   type ToolKind,
 } from "@/lib/api";
 import { formatTimestamp } from "@/lib/datetime";
@@ -55,17 +57,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-
-const ROLES: Role[] = [
-  "pm",
-  "business_analyst",
-  "lead",
-  "system_architect",
-  "engineer",
-  "designer",
-  "qa",
-  "pentester",
-];
 
 const TOOL_KINDS: { value: ToolKind; enabled: boolean }[] = [
   { value: "opencode", enabled: true },
@@ -205,6 +196,12 @@ function ModelSelect({
   );
 }
 
+/** Role display label resolved from the global roles list; falls back to the
+ * raw key when unknown (e.g. a role deleted while agents still reference it). */
+function roleLabel(roles: RoleDef[] | undefined, key: string): string {
+  return roles?.find((r) => r.key === key)?.name ?? key;
+}
+
 export default function AgentsPage() {
   const params = useParams<{ key: string }>();
   const workspaceKey = params.key;
@@ -216,6 +213,8 @@ export default function AgentsPage() {
 
   const workspaces = useQuery({ queryKey: ["workspaces"], queryFn: listWorkspaces });
   const workspace = workspaces.data?.find((ws) => ws.key === workspaceKey);
+
+  const roles = useQuery({ queryKey: ["roles"], queryFn: listRoles });
 
   const agents = useQuery({
     queryKey: ["agents", workspace?.id],
@@ -272,7 +271,7 @@ export default function AgentsPage() {
                       color={agent.avatar_color}
                       size={28}
                     />
-                    <span>{agent.name} ({agent.role})</span>
+                    <span>{agent.name} ({roleLabel(roles.data, agent.role)})</span>
                     <Badge variant="outline">{agent.tool_kind}</Badge>
                     <AgentStatusBadge status={agent.status} />
                     <Button
@@ -310,6 +309,7 @@ export default function AgentsPage() {
       {showCreateForm && (
         <CreateAgentForm
           workspaceId={workspace.id}
+          roles={roles.data}
           onCreated={() => setCreating(false)}
           onCancel={() => setCreating(false)}
         />
@@ -351,10 +351,12 @@ export default function AgentsPage() {
 
 function CreateAgentForm({
   workspaceId,
+  roles,
   onCreated,
   onCancel,
 }: {
   workspaceId: string;
+  roles: RoleDef[] | undefined;
   onCreated: () => void;
   onCancel: () => void;
 }) {
@@ -362,8 +364,7 @@ function CreateAgentForm({
   const agents = useQuery({ queryKey: ["agents", workspaceId], queryFn: () => listAgents(workspaceId) });
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
-  const [role, setRole] = useState<Role>("engineer");
-  const [model, setModel] = useState("");
+  const [role, setRole] = useState<Role>("engineer");  const [model, setModel] = useState("");
   const [toolKind, setToolKind] = useState<ToolKind>("opencode");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [avatar, setAvatar] = useState<AvatarSelection>({ template: null, color: null });
@@ -444,13 +445,18 @@ function CreateAgentForm({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {ROLES.map((r) => (
-                  <SelectItem key={r} value={r}>
-                    {r}
+                {(roles ?? []).map((r) => (
+                  <SelectItem key={r.key} value={r.key}>
+                    {r.name} ({r.key})
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
+            {roles && roles.length === 0 && (
+              <p className="text-xs text-zinc-500">
+                Belum ada role — buat role dulu di Settings &rarr; Roles.
+              </p>
+            )}
           </div>
 
           <div className="flex flex-col gap-1.5">

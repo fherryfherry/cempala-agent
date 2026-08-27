@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.errors import AppError
 from app.api.workspaces import _get_workspace_or_404
-from app.db.models import Agent, AgentMemory, Run
+from app.db.models import Agent, AgentMemory, Role, Run
 from app.db.session import get_session
 from app.schemas.agent import AgentCreate, AgentListOut, AgentOut, AgentUpdate
 
@@ -18,6 +18,14 @@ async def _get_agent_or_404(session: AsyncSession, agent_id: str) -> Agent:
     if agent is None:
         raise AppError(404, "not_found", f"agent {agent_id} not found")
     return agent
+
+
+async def _role_exists_or_422(session: AsyncSession, role: str) -> None:
+    """Role keys are dynamic (global `role` table) — reject unknown keys at the
+    API layer so no agent row can reference an orphaned role."""
+    existing = await session.scalar(select(Role.key).where(Role.key == role))
+    if existing is None:
+        raise AppError(422, "unknown_role", f"role '{role}' does not exist")
 
 
 @workspace_agents_router.get("", response_model=list[AgentListOut])
@@ -49,6 +57,7 @@ async def create_agent(
     workspace_id: str, body: AgentCreate, session: AsyncSession = Depends(get_session)
 ):
     await _get_workspace_or_404(session, workspace_id)
+    await _role_exists_or_422(session, body.role)
 
     agent = Agent(
         workspace_id=workspace_id,
@@ -73,6 +82,9 @@ async def create_agent(
 @agents_router.patch("/{agent_id}", response_model=AgentOut)
 async def update_agent(agent_id: str, body: AgentUpdate, session: AsyncSession = Depends(get_session)):
     agent = await _get_agent_or_404(session, agent_id)
+
+    if body.role is not None:
+        await _role_exists_or_422(session, body.role)
 
     for field in ("name", "role", "model", "tool_kind", "system_prompt", "enabled"):
         value = getattr(body, field)
