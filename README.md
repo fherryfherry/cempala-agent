@@ -13,6 +13,8 @@
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 [![Coverage Status](https://coveralls.io/repos/github/fherryfherry/cempala-agent/badge.svg)](https://coveralls.io/github/fherryfherry/cempala-agent)
 
+![CEMPALA](https://is3.cloudhost.id/trixilabs/cempala/Screenshot%202026-08-27%20at%2020.18.13.png)
+
 A Jira-like portal for running a "software team" made entirely of AI agents (PM, Lead Engineer,
 Engineer, Designer, QA, Pentester). You create tickets, the agent team works them autonomously
 inside a local repo folder, and you watch everything happen in real time through an activity feed
