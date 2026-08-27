@@ -1733,6 +1733,35 @@ def test_artifact_catalog_included_in_prompt(client, tmp_path, monkeypatch):
     assert ticket["key"] in prompt
 
 
+def test_duplicate_artifact_filename_skipped(client, tmp_path, monkeypatch):
+    ws_id = _make_workspace(client, tmp_path)
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+    ticket = _make_ticket(client, ws_id)
+    (tmp_path / "docs").mkdir(exist_ok=True)
+    (tmp_path / "docs" / "PRD.md").write_text("# PRD")
+
+    script = _write_python_binary(tmp_path / "opencode", _ARTIFACT_PUBLISH_SCRIPT)
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    # First run publishes PRD.md (among others); second run declares the same
+    # filename again from a later run on the same ticket.
+    run1 = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": eng_id}).json()
+    _wait_for_run(client, run1["id"])
+    run2 = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": eng_id}).json()
+    _wait_for_run(client, run2["id"])
+
+    groups = client.get(f"/api/workspaces/{ws_id}/artifacts").json()
+    by_name = {g["name"]: g for g in groups}
+    prd_count = sum(
+        1 for a in by_name["Dokumen Teknis"]["attachments"] if a["filename"] == "PRD.md"
+    )
+    assert prd_count == 1
+
+    detail = client.get(f"/api/tickets/{ticket['key']}").json()
+    system_bodies = [c["body"] for c in detail["comments"] if c["is_system"]]
+    assert any("sudah ada attachment" in b for b in system_bodies)
+
+
 def test_pm_artifact_updates_organize_groups(client, tmp_path, monkeypatch):
     ws_id = _make_workspace(client, tmp_path)
     eng_id = _make_agent(client, ws_id, "engineer", "eng-1")

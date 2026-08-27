@@ -355,6 +355,9 @@ For change operations (status, sprint, assignee, etc.), use the ```map block's
 Available MCP tools:
 - list_tickets — list all tickets (key, status, priority, assignee, sprint, last update)
 - get_ticket(key) — ticket detail (description, comments, sub-tickets)
+- list_artifacts(filename=...) — search whether a filename is already published; ALWAYS call
+  this before declaring `artifacts:` in the closing ```map block to avoid publishing a
+  duplicate
 - post_comment(key, body) — write a follow-up comment on a ticket
 - create_ticket(title, description, priority) — create a new backlog ticket
 - delete_ticket(key) — PERMANENTLY delete; PM ONLY, only for duplicates/mistakes
@@ -533,7 +536,13 @@ status: <one of: {allowed_statuses}>
 mention: [<agent name from the team list: {mention_names}>]   # handoff: NAME ONLY, no @
 summary: |
   <what you did, which files were touched, and proof that it works>{tickets_line}
-artifacts:                  # optional; files you produced in this repo, shown in the Artifacts menu
+artifacts:                  # optional; IMPORTANT deliverable files only — PRDs, specs, design
+  # docs, evidence/test reports, architecture docs. NOT every file you touched: do NOT declare
+  # source code you wrote/edited (e.g. app.js) — that already lives in the repo/git history,
+  # the Artifacts menu is for documentation-style deliverables, not a mirror of the diff.
+  # DUPLICATE CHECK: use list_artifacts(filename=...) (MCP tool) first — if a file with the
+  # SAME NAME is already published, do NOT declare it again (the backend also blocks exact
+  # re-publishes, but check first so you don't rely on that).
   # GROUP RULE: check the list below first before writing `group`.
   # {groups_rule}
   - path: <file path relative to repo root, e.g. "docs/PRD.md">

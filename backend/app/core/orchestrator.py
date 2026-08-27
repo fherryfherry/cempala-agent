@@ -402,10 +402,25 @@ async def _publish_artifacts(
     since the string comes straight from model output. Files that escape repo_path, don't exist,
     or aren't regular files are skipped and noted rather than failing the whole report — same
     tolerance as `updates:`/`tickets:` malformed entries.
+
+    A filename already attached to this ticket (case-insensitive — matches an earlier agent
+    publish OR a human upload) is skipped rather than duplicated: the prompt asks the agent to
+    check first, but that's advisory only (docs/03-agent-design.md — enforcement belongs here,
+    not the prompt), so this is the actual guard against repeat `artifacts:` declarations
+    across runs producing "app.js" x2 in the Attachments list.
     """
     published: list[dict] = []
     skip_notes: list[str] = []
     repo_root = Path(workspace.repo_path).resolve()
+
+    existing_names = {
+        name.lower()
+        for name in (
+            await session.scalars(
+                select(Attachment.filename).where(Attachment.ticket_id == ticket.id)
+            )
+        ).all()
+    }
 
     for draft in artifacts:
         candidate = (repo_root / draft.path).resolve()
@@ -414,6 +429,9 @@ async def _publish_artifacts(
             continue
         if not candidate.is_file():
             skip_notes.append(f"{draft.path}: file tidak ditemukan")
+            continue
+        if candidate.name.lower() in existing_names:
+            skip_notes.append(f"{draft.path}: sudah ada attachment dengan nama '{candidate.name}' di tiket ini, dilewati")
             continue
         # ponytail: is_file() then read_bytes() below is TOCTOU-able in theory, but the agent
         # process already has arbitrary code execution inside repo_path for this run's whole
@@ -440,6 +458,7 @@ async def _publish_artifacts(
             description=draft.description or None,
         )
         session.add(attachment)
+        existing_names.add(candidate.name.lower())
         published.append({"path": draft.path, "group": group.name})
 
     return published, skip_notes
