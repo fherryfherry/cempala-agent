@@ -65,14 +65,17 @@ that tailnet — the app itself is never rebound to `0.0.0.0` and never touches 
 
 ## Prerequisites
 
-- The [`opencode`](https://opencode.ai) binary installed and authenticated:
+Each agent picks one CLI tool (`tool_kind`) to run its work through. The backend only shells out
+to whichever of these binaries an agent is actually configured with — you only need to install and
+authenticate the ones you plan to use. LLM credentials are never stored by this portal; each CLI
+manages its own auth.
 
-  ```
-  opencode auth login
-  ```
-
-  The backend shells out to this binary for every agent run and for the model list. LLM
-  credentials are never stored by this portal.
+- [`opencode`](https://opencode.ai) — `opencode auth login`. Also used for the model list
+  (`GET /api/models`) regardless of which tool an agent uses.
+- [`claude`](https://claude.com/product/claude-code) (Claude Code) — `claude auth login` (or
+  `claude setup-token`).
+- [`codex`](https://github.com/openai/codex) (OpenAI Codex CLI) — `codex login`.
+- `agy` (Google Antigravity CLI) — see its own setup docs for auth.
 
 ## Setup from scratch
 
