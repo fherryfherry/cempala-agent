@@ -1,19 +1,20 @@
-# Roadmap — MAP MVP
+# Roadmap — MAP
 
-Version 0.2 · MVP
-Tickets: [04-tasks.md](04-tasks.md) · ~26 working days for one person.
+Version 0.3 · **M0–M3 (MVP) shipped**, M4 in progress
+Tickets: [04-tasks.md](04-tasks.md) · Dogfood results: [07-dogfood-report.md](07-dogfood-report.md)
 
 ## Map
 
 ```
-M0 Skeleton      MAP-001…005   ~3 days   ── running, but empty
-M1 Ticketing     MAP-006…016   ~9 days   ── complete Jira-like, no agents
-M2 Agent Runtime MAP-017…026   ~8 days   ── opencode working & monitored, manual trigger
-M3 Autonomy      MAP-027…033   ~6 days   ── fully autonomous  ← MVP RELEASE
+M0 Skeleton      MAP-001…005          ── DONE — running, but empty
+M1 Ticketing     MAP-006…016          ── DONE — complete Jira-like, no agents
+M2 Agent Runtime MAP-017…026          ── DONE — opencode working & monitored, manual trigger
+M3 Autonomy      MAP-027…033          ── DONE — fully autonomous  ← MVP RELEASE (dogfooded MAP-033)
+M4 Post-MVP      MAP-034…053+         ── IN PROGRESS — see below
 ```
 
-Each milestone can be demonstrated on its own. If M3 never gets finished, what already exists
-remains useful: a ticket portal with an opencode agent run manually per ticket.
+M0–M3 are complete and dogfooded (see the report linked above). Everything below M3 in this
+file is historical context for what already shipped; active/planned work now lives in M4.
 
 ---
 
@@ -122,25 +123,32 @@ call. That is why `max_concurrent_runs` defaults to 3.
 
 ---
 
-## After MVP (not scheduled)
+## M4 — Post-MVP (in progress)
 
-Ordered by value per effort, not commitment:
+What the "After MVP" list below originally proposed, resolved against what's actually shipped
+(check `git log --oneline` for exact commits; task numbers below are documented in
+[04-tasks.md](04-tasks.md)):
 
-1. **Git operations** — branch per ticket, commit, diff in the UI. This is what makes Lead review
-   real, and what keeps several Engineers working in parallel on one repo from overwriting each
-   other. A strong candidate for promotion into the MVP if M3 dogfooding shows agents colliding
-   on files.
-2. **MCP server exposing ticketing tools** — replaces the ```map block. Agents can create tickets
-   and change status mid-work, not only at the end, and the format risk is gone. Raise its
-   priority if format compliance is bad in M2/M3 ([ADR-009](06-adr.md)).
-3. **claude / agy / codex adapters** — after the opencode pattern proves itself; `AgentTool`
+**Shipped:**
+- **MCP server exposing ticketing tools** — the ```map block risk called out in ADR-009 was
+  resolved this way. Agents now create/update/delete tickets, sprints, and memory mid-run via MCP
+  tools (MAP-048, MAP-049), not only at the end of a run.
+- **Git operations (read-only)** — branch tree, lane-assigned commit graph, commit history and
+  diff viewer (MAP-053). Write operations (branch/commit from the UI) were not built.
+- **Agent memory across tickets** — MAP-035, built narrower than first proposed: verbatim notes
+  the agent writes itself (not retrieval from old tickets), curatable by the owner.
+- **Dashboard, retry/auto-retry, sprint/epic decoupling, chat-with-PM (conversations separate
+  from tickets), built-in stale-ticket auto-check, workspace pause/resume + terminate, dark mode**
+  — MAP-034, MAP-036, MAP-037, MAP-044, MAP-045–052, plus untracked polish (terminate workspace,
+  theme toggle).
+
+**Still open / not scheduled:**
+1. **Git write operations** — branch-per-ticket, commit from the UI. Needed if several Engineers
+   work the same repo in parallel and collide on files; the read-only Git menu (MAP-053) was step
+   one, not the full answer.
+2. **claude / agy / codex adapters** — after the opencode pattern proves itself; `AgentTool`
    already has a slot for them.
-4. **Sandbox (Docker)** — if the portal is used on repositories that are not fully trusted.
-5. **Sub-tickets deeper than 1 level.**
-6. **Auth & multi-user** — once the portal leaves the laptop. Before that, don't expose it to the
-   network.
-7. ~~**Agent memory across tickets**~~ — **built as MAP-035**, narrower than originally pictured
-   here to avoid the hallucination risk mentioned: not retrieval from old tickets, but verbatim
-   notes the agent writes itself via the ```map block's `memory:` (docs/03-agent-design.md §3),
-   limited in number when injected into the next prompt, and manually curatable (deletable) by the
-   owner via Agents → Memory.
+3. **Sandbox (Docker)** — if the portal is used on repositories that are not fully trusted.
+4. **Sub-tickets deeper than 1 level.**
+5. **Auth & multi-user** — once the portal leaves the laptop. Before that, don't expose it to the
+   network (ADR-005/ADR-010 still apply unchanged).
