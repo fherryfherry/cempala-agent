@@ -228,36 +228,14 @@ export function EventsProvider({
           }
         }
       }
-      if (ev.type === "comment") {
-        // Track agent chat activity so the Chat nav link can show an unread bullet
-        // (header.tsx reads localStorage; the chat page clears it on view).
-        // Use the event's OWN timestamp (not Date.now()): the SSE stream replays
-        // history on (re)connect, and a replay would otherwise stamp "now" and
-        // re-light the bullet even after the chat page cleared it. Also never
-        // regress an existing mark — older replayed events must not overwrite a
-        // newer one.
-        if (ev.payload?.is_system !== true && ev.created_at) {
-          let wrote = false;
-          try {
-            const prev = localStorage.getItem(`lastAgentChatAt:${workspaceId}`);
-            if (!prev || ev.created_at > prev) {
-              localStorage.setItem(`lastAgentChatAt:${workspaceId}`, ev.created_at);
-              wrote = true;
-            }
-          } catch {
-            // storage unavailable — bullet just won't persist; SSE still works.
-          }
-          if (wrote) {
-            bumpUnreadChatCount(workspaceId);
-            window.dispatchEvent(new CustomEvent("map:agent-chat", { detail: { workspaceId, at: ev.created_at } }));
-          }
-        }
-      }
       if (ev.type === "conversation_message") {
         // Chat activity: invalidate the conversation list + the specific
-        // conversation, and mark the workspace chat as unread (same bullet as
-        // agent comments, so the header needs no new key). Same replay-safe
-        // timestamp handling as the comment branch above.
+        // conversation, and mark the workspace chat as unread. This is the
+        // sole source of the Chat nav bullet — conversations are always
+        // PM-owned, so a non-system message here is precisely "the PM
+        // replied to the user." Replay-safe: uses the event's own timestamp
+        // (not Date.now()) and never regresses an existing mark, since the
+        // SSE stream replays history on every (re)connect.
         scheduleInvalidate(queryClient, ["conversations", workspaceId]);
         const conversationId = ev.payload?.conversation_id;
         if (typeof conversationId === "string") {

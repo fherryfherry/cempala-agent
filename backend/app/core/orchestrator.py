@@ -1055,6 +1055,42 @@ async def _write_system_message(
     return message
 
 
+async def _write_agent_message(
+    session: AsyncSession,
+    conversation: Conversation,
+    agent: Agent,
+    body: str,
+    *,
+    run_id: str | None,
+    workspace_id: str | None,
+) -> ConversationMessage:
+    """Append an agent-authored message to a conversation (the PM speaking, not System)."""
+    message = ConversationMessage(
+        conversation_id=conversation.id,
+        run_id=run_id,
+        author_agent_id=agent.id,
+        is_system=False,
+        body=body,
+    )
+    session.add(message)
+    await session.flush()
+    conversation.last_message_at = _now()
+    if run_id is not None and workspace_id is not None:
+        await event_bus.publish(
+            session,
+            run_id=run_id,
+            workspace_id=workspace_id,
+            type="conversation_message",
+            payload={
+                "conversation_id": conversation.id,
+                "is_system": False,
+                "author": agent.name,
+                "body_preview": _comment_preview(body),
+            },
+        )
+    return message
+
+
 async def _block_ticket(
     session: AsyncSession,
     ticket: Ticket,
@@ -2567,27 +2603,13 @@ async def _finish_chat_run(
         return
 
     # `summary` is the PM's reply to the owner — written into the conversation.
-    message = ConversationMessage(
-        conversation_id=conversation.id,
-        run_id=run.id,
-        author_agent_id=agent.id,
-        is_system=False,
-        body=parsed.summary,
-    )
-    session.add(message)
-    await session.flush()
-    conversation.last_message_at = _now()
-    await event_bus.publish(
+    await _write_agent_message(
         session,
+        conversation,
+        agent,
+        parsed.summary,
         run_id=run.id,
         workspace_id=workspace_id,
-        type="conversation_message",
-        payload={
-            "conversation_id": conversation.id,
-            "is_system": False,
-            "author": agent.name,
-            "body_preview": _comment_preview(parsed.summary),
-        },
     )
 
     # `parsed.summary` above was written by the agent BEFORE this parse ran, so it
@@ -2793,9 +2815,10 @@ async def _finish_chat_run(
                 f"- Tiket: **{d.title}**" + (f" (assignee: {d.assignee})" if d.assignee else "")
                 for d in parsed.tickets
             ]
-            await _write_system_message(
+            await _write_agent_message(
                 session,
                 conversation,
+                agent,
                 "Tidak ada sprint aktif saat ini. Usulan dari "
                 f"{agent.name}:\n" + "\n".join(proposal_lines) + "\n\n"
                 'Balas "oke"/"lanjut" untuk approve — sprint dan tiket di atas baru '

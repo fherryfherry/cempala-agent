@@ -271,7 +271,11 @@ def test_routine_run_actions_end_to_end(client, tmp_path, monkeypatch):
 def test_routine_comments_record_at_mentions_from_body(client, tmp_path, monkeypatch):
     """An `@name` written in a routine's `comments[]` body is recorded as a
     comment_mention on the target comment — the UI shows it as a mention badge/link.
-    No run is scheduled (routine reports have no handoff anyway)."""
+    The mention would normally also schedule a run for lead-1 (comments[] has no
+    `mention:` field to use instead), but MAP-002 here has no active sprint, so
+    the `ticket_not_in_active_sprint` guardrail blocks it — see
+    test_routine_comments_at_mention_schedules_run_when_actionable below for the
+    case where it actually fires."""
     ws_id = _make_workspace(client, tmp_path)
     pm_id = _make_agent(client, ws_id, "pm", "pm-1")
     _make_agent(client, ws_id, "lead", "lead-1")
@@ -322,6 +326,72 @@ print(json.dumps({"type": "assistant_text", "text": text}))
     agent_comments = [c for c in target_detail["comments"] if not c["is_system"]]
     assert len(agent_comments) == 1
     assert agent_comments[0]["mentions"] == ["lead-1"]
+
+    # Only the routine run itself exists — the mention was blocked by
+    # ticket_not_in_active_sprint, not silently skipped for some other reason.
+    runs = client.get(f"/api/workspaces/{ws_id}/runs").json()
+    assert len(runs) == 1
+
+
+def test_routine_comments_at_mention_schedules_run_when_actionable(client, tmp_path, monkeypatch):
+    """Same as above, but the target ticket IS in an active sprint and status
+    "todo" — an `@name` in a routine's `comments[]` body must actually schedule
+    a run for the mentioned agent, since no-ticket-mode reports can't declare a
+    `mention:` field at all (comments[] is their only handoff channel)."""
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    lead_id = _make_agent(client, ws_id, "lead", "lead-1")
+    _make_ticket(client, ws_id)  # MAP-001
+
+    sprint_id = client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "S1"}).json()["id"]
+    target = client.post(
+        f"/api/workspaces/{ws_id}/tickets",
+        json={"title": "Target macet", "is_new_epic": True, "sprint_id": sprint_id},
+    ).json()  # MAP-002
+    client.patch(f"/api/tickets/{target['key']}", json={"status": "todo"})
+
+    resp = client.post(
+        f"/api/workspaces/{ws_id}/routines",
+        json={
+            "name": "Cek tiket macet",
+            "prompt": "Cek semua tiket yang tidak bergerak dan komen.",
+            "interval_minutes": 5,
+            "mode": "idle_only",
+            "agent_id": pm_id,
+        },
+    )
+    rid = resp.json()["id"]
+
+    script = _write_python_binary(
+        tmp_path / "opencode",
+        '''
+import json
+text = """routine done
+
+```map
+summary: |
+  Cek tiket macet selesai.
+comments:
+  - ticket: MAP-002
+    body: |
+      Tiket ini tidak bergerak. @lead-1 tolong cek.
+```
+"""
+print(json.dumps({"type": "assistant_text", "text": text}))
+''',
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.post(f"/api/routines/{rid}/run")
+    assert resp.status_code == 200, resp.text
+    runs = client.get(f"/api/workspaces/{ws_id}/runs").json()
+    routine_run = next(r for r in runs if r["trigger"] == "routine")
+    _wait_for_run(client, routine_run["id"])
+
+    runs = client.get(f"/api/workspaces/{ws_id}/runs").json()
+    mention_run = next(r for r in runs if r["trigger"] == "mention")
+    assert mention_run["ticket_id"] == target["id"]
+    assert mention_run["agent_id"] == lead_id
 
 
 def test_routine_run_rejects_status_declaration(client, tmp_path, monkeypatch):

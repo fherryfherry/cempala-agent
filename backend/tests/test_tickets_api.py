@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.config import settings
 from app.db import session as db_session
 from app.db.models import Base
 from app.db.session import get_session
@@ -309,6 +310,91 @@ def test_delete_ticket(client, tmp_path):
 def test_get_nonexistent_ticket_404(client):
     resp = client.get("/api/tickets/MAP-999")
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Assignment auto-schedules a run (owner request: don't require a separate
+# mention/manual-Run click after assigning a ticket that's already actionable).
+# ---------------------------------------------------------------------------
+
+
+def test_patch_assignee_on_todo_ticket_schedules_run(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "OPENCODE_BIN", "/nonexistent/opencode-for-tests")
+    ws_id = _make_workspace(client, tmp_path)
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+    # Needs an active sprint — otherwise `ticket_not_in_active_sprint` blocks the
+    # schedule regardless of status (first sprint created is auto-active).
+    sprint_id = client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "S1"}).json()["id"]
+    ticket = client.post(
+        f"/api/workspaces/{ws_id}/tickets", json=_ticket_payload(sprint_id=sprint_id)
+    ).json()
+    client.patch(f"/api/tickets/{ticket['key']}", json={"status": "todo"})
+
+    resp = client.patch(f"/api/tickets/{ticket['key']}", json={"assignee_id": eng_id})
+    assert resp.status_code == 200, resp.text
+
+    runs = client.get(f"/api/workspaces/{ws_id}/runs").json()
+    assert len(runs) == 1
+    assert runs[0]["ticket_id"] == ticket["id"]
+    assert runs[0]["agent_id"] == eng_id
+    assert runs[0]["trigger"] == "manual"
+
+
+def test_patch_assignee_on_backlog_ticket_does_not_schedule_run(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "OPENCODE_BIN", "/nonexistent/opencode-for-tests")
+    ws_id = _make_workspace(client, tmp_path)
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+    # Fresh ticket stays "backlog" (default) — not queued for work yet, so
+    # assigning it must not start a run.
+    ticket = client.post(f"/api/workspaces/{ws_id}/tickets", json=_ticket_payload()).json()
+    assert ticket["status"] == "backlog"
+
+    resp = client.patch(f"/api/tickets/{ticket['key']}", json={"assignee_id": eng_id})
+    assert resp.status_code == 200, resp.text
+
+    runs = client.get(f"/api/workspaces/{ws_id}/runs").json()
+    assert runs == []
+
+
+def test_patch_reassigning_same_agent_does_not_reschedule(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "OPENCODE_BIN", "/nonexistent/opencode-for-tests")
+    ws_id = _make_workspace(client, tmp_path)
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+    sprint_id = client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "S1"}).json()["id"]
+    ticket = client.post(
+        f"/api/workspaces/{ws_id}/tickets", json=_ticket_payload(sprint_id=sprint_id)
+    ).json()
+    client.patch(f"/api/tickets/{ticket['key']}", json={"status": "todo"})
+
+    client.patch(f"/api/tickets/{ticket['key']}", json={"assignee_id": eng_id})
+    # Same assignee again (e.g. a PATCH that also touches other fields) — no
+    # actual reassignment happened, so no second run.
+    resp = client.patch(
+        f"/api/tickets/{ticket['key']}", json={"assignee_id": eng_id, "priority": "high"}
+    )
+    assert resp.status_code == 200, resp.text
+
+    runs = client.get(f"/api/workspaces/{ws_id}/runs").json()
+    assert len(runs) == 1
+
+
+def test_create_ticket_with_assignee_defaults_to_backlog_no_run(client, tmp_path, monkeypatch):
+    # New tickets always start "backlog" (no status field on TicketCreate), so
+    # assigning at creation time is a documented near no-op today — still worth
+    # asserting so a future status-at-creation feature doesn't silently start
+    # auto-running brand-new tickets.
+    monkeypatch.setattr(settings, "OPENCODE_BIN", "/nonexistent/opencode-for-tests")
+    ws_id = _make_workspace(client, tmp_path)
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+
+    resp = client.post(
+        f"/api/workspaces/{ws_id}/tickets", json=_ticket_payload(assignee_id=eng_id)
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["status"] == "backlog"
+
+    runs = client.get(f"/api/workspaces/{ws_id}/runs").json()
+    assert runs == []
 
 
 @pytest.mark.parametrize("n", [20, 100])

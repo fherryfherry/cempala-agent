@@ -280,7 +280,6 @@ class Ticket(Base):
             "qa",
             "security",
             "done",
-            "release",
             "blocked",
             name="ticket_status",
         ),

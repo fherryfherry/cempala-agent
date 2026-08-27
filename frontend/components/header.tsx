@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils";
 import { AgentAvatars } from "@/components/agent-avatars";
 import { LogoBanner } from "@/components/logo";
 import { NotificationBell } from "@/components/notification-bell";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { WorkspaceSwitcher } from "@/components/workspace-switcher";
 import { readUnreadChatCount } from "@/components/events-context";
 
@@ -100,16 +101,19 @@ export function Header() {
         </Link>
 
         {!activeKey && (
-          <Link
-            href="/settings"
-            aria-current={pathname === "/settings" ? "page" : undefined}
-            className={cn(
-              "ml-auto flex items-center px-3 text-sm text-zinc-600 hover:text-foreground dark:text-zinc-400",
-              pathname === "/settings" && "text-foreground",
-            )}
-          >
-            Settings
-          </Link>
+          <div className="ml-auto flex items-center gap-3">
+            <ThemeToggle />
+            <Link
+              href="/settings"
+              aria-current={pathname === "/settings" ? "page" : undefined}
+              className={cn(
+                "flex items-center px-3 text-sm text-zinc-600 hover:text-foreground dark:text-zinc-400",
+                pathname === "/settings" && "text-foreground",
+              )}
+            >
+              Settings
+            </Link>
+          </div>
         )}
 
         {activeKey && (
@@ -238,6 +242,7 @@ export function Header() {
               {agents.data && agents.data.length > 0 && (
                 <AgentAvatars agents={agents.data} workspaceId={workspaceId!} workspaceKey={activeKey} />
               )}
+              <ThemeToggle />
               {workspaceId && (
                 <NotificationBell
                   workspaceId={workspaceId}

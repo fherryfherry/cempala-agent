@@ -4,7 +4,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 Status = Literal[
-    "backlog", "todo", "in_progress", "review", "qa", "security", "done", "release", "blocked"
+    "backlog", "todo", "in_progress", "review", "qa", "security", "done", "blocked"
 ]
 Priority = Literal["low", "medium", "high", "urgent"]
 Category = Literal["feature", "improvement", "fix", "security", "performance"]

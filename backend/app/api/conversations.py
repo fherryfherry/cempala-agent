@@ -307,8 +307,8 @@ async def _execute_pending_proposal(
     if len(body_lines) == 1:
         body_lines.append("Tidak ada sprint/tiket baru di proposal ini.")
 
-    await orchestrator._write_system_message(
-        session, conversation, "\n\n".join(body_lines), run_id=None, workspace_id=workspace.id
+    await orchestrator._write_agent_message(
+        session, conversation, pm, "\n\n".join(body_lines), run_id=None, workspace_id=workspace.id
     )
     await session.commit()
 

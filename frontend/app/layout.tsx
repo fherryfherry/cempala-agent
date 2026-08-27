@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { ThemeProvider } from "next-themes";
 import "./globals.css";
 import { QueryProvider } from "@/components/query-provider";
 import { EventsShell } from "@/components/events-shell";
@@ -26,15 +27,18 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
     <html
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      suppressHydrationWarning
     >
       <body className="min-h-full flex flex-col">
-        <QueryProvider>
-          <EventsShell>
-            <Header />
-            <main className="flex flex-1 flex-col">{children}</main>
-          </EventsShell>
-          <Toaster />
-        </QueryProvider>
+        <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
+          <QueryProvider>
+            <EventsShell>
+              <Header />
+              <main className="flex flex-1 flex-col">{children}</main>
+            </EventsShell>
+            <Toaster />
+          </QueryProvider>
+        </ThemeProvider>
       </body>
     </html>
   );

@@ -298,10 +298,11 @@ def test_chat_proposes_sprint_when_no_active_sprint(client, tmp_path, monkeypatc
     assert client.get(f"/api/workspaces/{ws_id}/tickets").json() == []
 
     messages = client.get(f"/api/conversations/{conv['id']}/messages").json()
-    system_messages = [m for m in messages if m["is_system"]]
-    assert len(system_messages) == 1
-    assert "Sprint 2" in system_messages[0]["body"]
-    assert "oke" in system_messages[0]["body"].lower()
+    proposal_messages = [
+        m for m in messages if not m["is_system"] and m["author_agent_id"] is not None and "oke" in m["body"].lower()
+    ]
+    assert len(proposal_messages) == 1
+    assert "Sprint 2" in proposal_messages[0]["body"]
 
 
 def test_chat_sprint_proposal_approved_creates_and_activates(client, tmp_path, monkeypatch):
@@ -334,8 +335,8 @@ def test_chat_sprint_proposal_approved_creates_and_activates(client, tmp_path, m
     assert tickets[0]["sprint_id"] == sprints[0]["id"]
 
     messages = client.get(f"/api/conversations/{conv['id']}/messages").json()
-    system_messages = [m for m in messages if m["is_system"]]
-    assert any("disetujui" in m["body"] for m in system_messages)
+    pm_messages = [m for m in messages if not m["is_system"] and m["author_agent_id"] is not None]
+    assert any("disetujui" in m["body"] for m in pm_messages)
 
     # The approval message itself must not have scheduled a fresh PM chat run.
     chat_runs = [
@@ -425,7 +426,7 @@ def test_chat_sprint_proposal_multiple_sprints_only_first_activated(client, tmp_
     assert sprints["Sprint 3"]["status"] == "planned"
 
     messages = client.get(f"/api/conversations/{conv['id']}/messages").json()
-    confirmation = next(m for m in messages if m["is_system"] and "disetujui" in m["body"])
+    confirmation = next(m for m in messages if not m["is_system"] and "disetujui" in m["body"])
     assert "TIDAK diaktifkan" in confirmation["body"]
     assert "Sprint 3" in confirmation["body"]
 

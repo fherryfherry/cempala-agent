@@ -107,6 +107,29 @@ def test_create_comment_with_valid_mention(client, tmp_path):
     assert eng["id"]  # sanity
 
 
+def test_agent_authored_comment_mention_also_schedules_run(client, tmp_path):
+    # Agent-authored comments (e.g. the MCP `post_comment` tool, used mid-run to
+    # follow up on any ticket) trigger a run for the mentioned agent the same way
+    # an owner comment does — this used to be gated to owner-only comments.
+    ws_id = _make_workspace(client, tmp_path)
+    ticket = _make_ticket(client, ws_id)
+    author = _make_agent(client, ws_id, "author-1")
+    eng = _make_agent(client, ws_id, "eng-1")
+
+    resp = client.post(
+        f"/api/tickets/{ticket['key']}/comments",
+        json={"body": "@eng-1 tolong cek ini", "author_agent_id": author["id"]},
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["mentions"] == ["eng-1"]
+
+    # Ticket has no active sprint, so the schedule attempt is guardrail-blocked
+    # (not silently ignored) — same proxy the owner-mention test above uses.
+    listed = client.get(f"/api/tickets/{ticket['key']}/comments").json()
+    system_comments = [c for c in listed if c["is_system"]]
+    assert any("sprint" in c["body"].lower() for c in system_comments), listed
+
+
 def test_unknown_mention_no_row_no_error(client, tmp_path):
     ws_id = _make_workspace(client, tmp_path)
     ticket = _make_ticket(client, ws_id)
