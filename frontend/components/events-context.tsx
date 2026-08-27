@@ -145,6 +145,17 @@ export function EventsProvider({
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const wsIdRef = useRef<string | undefined>(undefined);
 
+  // Reset per-workspace state when the active workspace changes (during render,
+  // per the React "adjusting state when props change" pattern — avoids the
+  // setState-in-effect lint error and the extra render it would trigger).
+  const [prevWorkspaceId, setPrevWorkspaceId] = useState(workspaceId);
+  if (prevWorkspaceId !== workspaceId) {
+    setPrevWorkspaceId(workspaceId);
+    setStatus("connecting");
+    setEvents([]);
+    setNotifications([]);
+  }
+
   // Per-workspace high-water mark of which events have already been toasted.
   // SSE replays the full history on every (re)connect, so without this, a page
   // refresh re-toasts every past activity event ("notifikasinya muncul banyak").
@@ -173,9 +184,6 @@ export function EventsProvider({
   useEffect(() => {
     if (!workspaceId) return;
     wsIdRef.current = workspaceId;
-    setStatus("connecting");
-    setEvents([]);
-    setNotifications([]);
 
     try {
       lastSeenRef.current[workspaceId] = localStorage.getItem(`notifSeenAt:${workspaceId}`) ?? "";

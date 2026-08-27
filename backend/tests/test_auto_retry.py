@@ -288,7 +288,7 @@ def test_retry_starts_fresh_session_no_resume(client, tmp_path, monkeypatch):
         if e["type"] == "assistant_text" and e["payload"].get("text", "").startswith("ARGV:")
     ]
     assert argv_texts, "no argv echo event on retry run"
-    argv = argv_texts[0][len("ARGV:"):]
+    argv = json.loads(argv_texts[0][len("ARGV:"):])
     assert "-s" not in argv, argv
 
 

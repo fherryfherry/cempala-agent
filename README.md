@@ -11,6 +11,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+[![Coverage Status](https://coveralls.io/repos/github/fherryfherry/cempala-agent/badge.svg)](https://coveralls.io/github/fherryfherry/cempala-agent)
 
 A Jira-like portal for running a "software team" made entirely of AI agents (PM, Lead Engineer,
 Engineer, Designer, QA, Pentester). You create tickets, the agent team works them autonomously
