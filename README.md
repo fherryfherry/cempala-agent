@@ -32,60 +32,32 @@ See [`docs/00-overview.md`](docs/00-overview.md) for the full pitch and
 
 ## Features
 
-### A full software team of AI agents
-CEMPALA staffs each workspace with up to 8 built-in roles — **Project Manager, Business
-Analyst, System Architect, Lead Engineer, Engineer, Designer, QA, and Security Reviewer** —
-plus custom roles you define. Every agent is an independent worker with its own name, avatar,
-role, model, system prompt, and coding tool. Agents hand work off to each other autonomously:
-an Engineer finishes a ticket and mentions the QA agent, who picks it up, reviews it, and
-routes it to Security — all without you touching anything.
-
-### Bring your own coding agent
-CEMPALA does not build its own coding agent. Each agent shells out to a real coding CLI —
-**`opencode`, `claude`, `codex`, or `agy`** — configurable per agent, so you can mix and match
-(an Engineer on `opencode`, a Designer on `claude`, a Pentester on `codex`). Models come from
-`opencode models`, and LLM credentials stay in each CLI's own auth — the portal never stores them.
-
-### Kanban board with drag & drop
-A Jira-style board with **Backlog → Todo → In Progress → Review → QA → Security → Done →
-Blocked** columns. Drag cards between columns, filter by sprint or agent, switch to a
-searchable, paginated list view, and create tickets with priority, category, assignee, and epic.
-
-### Real-time everything
-Every event — agent output, tool calls, status changes, comments — streams to the browser over
-**SSE**. Watch agents work live, get toast notifications, and replay any run's full history,
-including the exact prompt that was sent.
-
-### Chat with your PM
-Skip the ticket form: **chat with the PM agent** conversationally. Attach files, use
-speech-to-text, and let the PM turn your idea into tickets, sprints, and epics — with
-quick-send suggestion chips and a typing indicator.
-
-### Sprints & timeline
-Plan work in **sprints** with goals and date ranges. A Gantt-style **timeline** shows tickets
-across the sprint, and the PM can create and activate sprints directly from its report.
-
-### Scheduled routines
-Set up recurring agent tasks — "review the codebase every morning" — with **idle-only** or
-**consistent** modes, so agents keep working even when there are no tickets.
-
-### Guardrails that actually stop things
-Autonomous doesn't mean ungoverned. Per-workspace guardrails cap **run time, cost per run and
-per ticket, handoff depth, and concurrent runs**; a **loop detector** catches agents going in
-circles; **auto-retries** give failed runs another shot; and a **kill switch** pauses everything
-instantly.
-
-### Git visibility
-A read-only **Git menu** shows the branch tree and commit history, so you can see exactly what
-your agents changed in the repo.
-
-### Artifacts & agent memory
-Agents publish deliverables (designs, docs, reports) into an organized **Artifacts** menu, and
-keep **cross-ticket memory notes** so they don't repeat mistakes.
-
-### Multi-workspace
-Run several projects side by side, each with its own repo folder, agents, tickets, sprints,
-and settings.
+- **Full AI software team** — up to 8 built-in roles (Project Manager, Business Analyst, System
+  Architect, Lead Engineer, Engineer, Designer, QA, Security Reviewer) plus custom roles. Agents
+  have their own name, avatar, role, model, system prompt, and coding tool — and hand work off to
+  each other autonomously (Engineer finishes → mentions QA → routes to Security).
+- **Bring your own coding agent** — each agent shells out to a real coding CLI (`opencode`,
+  `claude`, `codex`, `agy`), configurable per agent so you can mix and match. Models come from
+  `opencode models`; LLM credentials live in each CLI's own auth, never in the portal.
+- **Kanban board with drag & drop** — Jira-style columns (Backlog → Todo → In Progress → Review →
+  QA → Security → Done → Blocked), sprint & agent filters, and a searchable, paginated list view.
+- **Real-time everything** — agent output, tool calls, status changes, and comments stream over
+  SSE. Watch agents work live, get toast notifications, and replay any run's full history,
+  including the exact prompt sent.
+- **Chat with your PM** — conversational intake with attachments, speech-to-text, quick-send
+  suggestions, and a typing indicator. The PM turns your idea into tickets, sprints, and epics.
+- **Sprints & Gantt timeline** — plan work in sprints with goals and date ranges; the PM can
+  create and activate sprints directly from its report.
+- **Scheduled routines** — recurring agent tasks (e.g. "review the codebase every morning") in
+  idle-only or consistent mode, so agents keep working even with no tickets.
+- **Guardrails that actually stop things** — caps on run time, cost per run/ticket, handoff depth,
+  and concurrency; a loop detector; auto-retries; and a kill switch.
+- **Git visibility** — read-only branch tree and commit history so you see exactly what agents
+  changed in the repo.
+- **Artifacts & agent memory** — agents publish deliverables into an organized Artifacts menu and
+  keep cross-ticket memory notes so they don't repeat mistakes.
+- **Multi-workspace** — run several projects side by side, each with its own repo folder, agents,
+  tickets, sprints, and settings.
 
 ## ⚠️ Security warning — read before running
 
