@@ -473,27 +473,6 @@ def test_no_existing_sprints_tells_agent_pure_timebox_naming():
     assert "Sprints that ALREADY EXIST" not in prompt
 
 
-def test_artifact_catalog_block_included_when_given():
-    prompt = build_prompt(
-        _agent("eng-1", "engineer"),
-        "/repo",
-        ROSTER,
-        TICKET,
-        artifact_catalog=[
-            "[Technical Docs] PRD.md (MAP-001) — initial PRD",
-            "[Test Results] evidence.md (MAP-002)",
-        ],
-    )
-    assert "Artifacts in this workspace (Artifacts menu)" in prompt
-    assert "- [Technical Docs] PRD.md (MAP-001) — initial PRD" in prompt
-    assert "- [Test Results] evidence.md (MAP-002)" in prompt
-
-
-def test_artifact_catalog_block_omitted_when_empty():
-    prompt = build_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, TICKET)
-    assert "Artifacts in this workspace" not in prompt
-
-
 def test_artifact_updates_contract_present_for_pm_only():
     pm_prompt = build_prompt(_agent("pm-1", "pm"), "/repo", ROSTER, TICKET)
     assert "artifact_updates:" in pm_prompt

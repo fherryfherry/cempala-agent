@@ -1713,7 +1713,10 @@ def _publish_three_artifacts(client, tmp_path, monkeypatch, ticket_key, agent_id
     _wait_for_run(client, run["id"])
 
 
-def test_artifact_catalog_included_in_prompt(client, tmp_path, monkeypatch):
+def test_artifact_catalog_not_inlined_in_prompt(client, tmp_path, monkeypatch):
+    """Full artifact catalog is deliberately NOT injected into every prompt (bloat) —
+    agents look it up on demand via the list_artifacts(filename=...) MCP tool instead.
+    """
     ws_id = _make_workspace(client, tmp_path)
     eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
     ticket = _make_ticket(client, ws_id)
@@ -1726,10 +1729,9 @@ def test_artifact_catalog_included_in_prompt(client, tmp_path, monkeypatch):
 
     detail = client.get(f"/api/runs/{run2['id']}").json()
     prompt = detail["events"][0]["payload"]["prompt"]
-    assert "Artifacts in this workspace (Artifacts menu)" in prompt
-    assert "[Dokumen Teknis] PRD.md" in prompt
-    assert "initial PRD" in prompt
-    assert "[Hasil Testing] evidence.md" in prompt
+    assert "Artifacts in this workspace" not in prompt
+    assert "[Dokumen Teknis] PRD.md" not in prompt
+    assert "list_artifacts(filename=...)" in prompt
     assert ticket["key"] in prompt
 
 

@@ -336,15 +336,6 @@ Notes from your previous work (across tickets) — avoid repeating these:
 {notes_str}"""
 
 
-def _artifacts_catalog_block(catalog: list[str]) -> str | None:
-    if not catalog:
-        return None
-    lines = "\n".join(f"- {line}" for line in catalog)
-    return f"""\
-Artifacts in this workspace (Artifacts menu) — read/search here before creating a new file:
-{lines}"""
-
-
 def _mcp_tools_block_for_opencode() -> str:
     return """\
 This MCP tool is the ONLY way an agent INTERACTS WITH THE TICKET SYSTEM.
@@ -568,14 +559,13 @@ def build_routine_prompt(
     routine_prompt: str,
     extra_instructions: str | None = None,
     agent_memories: list[str] | None = None,
-    artifact_catalog: list[str] | None = None,
     sprint_creator_roles: set[str] | None = None,
     existing_epics: list[str] | None = None,
     existing_sprints: list[str] | None = None,
 ) -> str:
     """Assemble a routine-run prompt (no ticket): BASE + role block + the routine's
-    own task prompt + workspace context + artifact catalog + agent memory + a
-    routine-specific ```map contract (side-effect actions only — no status/mention).
+    own task prompt + workspace context + agent memory + a routine-specific ```map
+    contract (side-effect actions only — no status/mention).
 
     The routine contract teaches `comments:` (comment on other tickets), `tickets[]`
     (backlog, not auto-scheduled), `updates:`, `memory:`, and `artifact_updates:`
@@ -583,7 +573,6 @@ def build_routine_prompt(
     in routine mode.
     """
     agent_memories = agent_memories or []
-    artifact_catalog = artifact_catalog or []
     allowed_sprint_roles = sprint_creator_roles or {"pm"}
     existing_epics = existing_epics or []
     existing_sprints = existing_sprints or []
@@ -603,10 +592,6 @@ def build_routine_prompt(
     memory_block = _agent_memory_block(agent_memories)
     if memory_block:
         parts.append(memory_block)
-
-    catalog_block = _artifacts_catalog_block(artifact_catalog)
-    if catalog_block:
-        parts.append(catalog_block)
 
     # MCP tools (ADR-011) — routine runs are exactly where the agent needs to
     # read the Board and write follow-up comments via tools, not the repo.
@@ -729,14 +714,13 @@ def build_prompt(
     workspace_tickets: list[WorkspaceTicketSummary] | None = None,
     existing_artifact_groups: list[str] | None = None,
     agent_memories: list[str] | None = None,
-    artifact_catalog: list[str] | None = None,
     sprint_creator_roles: set[str] | None = None,
     existing_epics: list[str] | None = None,
     existing_sprints: list[str] | None = None,
 ) -> str:
     """Assemble a full agent prompt: BASE + role block + extra_instructions (if any) +
-    agent memory (if any) + ticket context + workspace tickets (if any) + artifact
-    catalog (if any) + anti-loop + ```map contract.
+    agent memory (if any) + ticket context + workspace tickets (if any) + anti-loop +
+    ```map contract.
 
     docs/02-tsd.md §4.4 assembly order. `agent.system_prompt`, if set, replaces
     only the role block (BASE and the ```map contract are always present).
@@ -753,10 +737,6 @@ def build_prompt(
     `agent_memories` is this agent's own cross-ticket notes (```map `memory:`,
     docs/03-agent-design.md §3) — most-recent-first callers should reverse to
     chronological before passing in, same convention as `previous_summaries`.
-    `artifact_catalog` is a pre-formatted list of the workspace's artifacts
-    (one string per artifact, e.g. "[Technical Docs] PRD.md (MAP-001) — initial
-    PRD") so every agent can read/search what's already been published before
-    producing new files.
     `sprint_creator_roles` is the per-workspace set of roles allowed to declare
     `sprints:` (Settings page pill picker); the contract only teaches the field
     to those roles. Defaults to {"pm"}.
@@ -773,7 +753,6 @@ def build_prompt(
     workspace_tickets = workspace_tickets or []
     existing_artifact_groups = existing_artifact_groups or []
     agent_memories = agent_memories or []
-    artifact_catalog = artifact_catalog or []
     sprint_creator_roles = sprint_creator_roles or {"pm"}
     existing_epics = existing_epics or []
     existing_sprints = existing_sprints or []
@@ -800,10 +779,6 @@ def build_prompt(
 
     if workspace_tickets:
         parts.append(_workspace_tickets_block(workspace_tickets))
-
-    catalog_block = _artifacts_catalog_block(artifact_catalog)
-    if catalog_block:
-        parts.append(catalog_block)
 
     if agent.is_reviewer:
         anti_loop = _anti_loop_block(review_round, previous_review_feedback)
@@ -986,7 +961,6 @@ def build_chat_prompt(
     attachments: list[str] | None = None,
     linked_ticket: str | None = None,
     workspace_tickets: list[WorkspaceTicketSummary] | None = None,
-    artifact_catalog: list[str] | None = None,
     agent_memories: list[str] | None = None,
     sprint_creator_roles: set[str] | None = None,
     existing_epics: list[str] | None = None,
@@ -994,8 +968,8 @@ def build_chat_prompt(
     has_active_sprint: bool = True,
 ) -> str:
     """Assemble a chat-run prompt: BASE + role block + chat context (messages,
-    attachments) + workspace tickets + artifact catalog + agent memory + the chat
-    ```map contract (no status/mention; summary + comments[] + actions).
+    attachments) + workspace tickets + agent memory + the chat ```map contract
+    (no status/mention; summary + comments[] + actions).
 
     Chat runs have no ticket: the conversation transcript IS the context, and the
     owner's latest message is the task. `attachments` are the owner-uploaded files
@@ -1003,7 +977,6 @@ def build_chat_prompt(
     or copy them into a ticket comment if relevant).
     """
     agent_memories = agent_memories or []
-    artifact_catalog = artifact_catalog or []
     sprint_creator_roles = sprint_creator_roles or {"pm"}
     existing_epics = existing_epics or []
     existing_sprints = existing_sprints or []
@@ -1047,10 +1020,6 @@ def build_chat_prompt(
     memory_block = _agent_memory_block(agent_memories)
     if memory_block:
         parts.append(memory_block)
-
-    catalog_block = _artifacts_catalog_block(artifact_catalog)
-    if catalog_block:
-        parts.append(catalog_block)
 
     parts.append(_mcp_tools_block_for_opencode())
 

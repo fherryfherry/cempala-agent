@@ -124,7 +124,7 @@ def test_mcp_tools_end_to_end(client, tmp_path, monkeypatch):
 
     # post_comment (as the running agent), then list_comments shows it first
     out = asyncio.run(_call("post_comment", {"key": ticket["key"], "body": "Tolong dicek."}))
-    assert "terkirim" in out
+    assert "Comment posted" in out
     detail = client.get(f"/api/tickets/{ticket['key']}").json()
     agent_comments = [c for c in detail["comments"] if not c["is_system"]]
     assert len(agent_comments) == 1
@@ -157,35 +157,35 @@ def test_mcp_tools_end_to_end(client, tmp_path, monkeypatch):
     # create_ticket(epic=<a ticket that itself has a parent>) is rejected, not
     # silently top-leveled.
     out = asyncio.run(_call("create_ticket", {"title": "Bad epic", "epic": sub["key"]}))
-    assert "Gagal" in out or "bukan epic top-level" in out
+    assert "Failed" in out or "not a top-level epic" in out
     created = client.get("/api/workspaces/%s/tickets" % ws["id"]).json()
     assert not any(t["title"] == "Bad epic" for t in created)
 
     # update_ticket status -> todo (as agent)
     out = asyncio.run(_call("update_ticket", {"key": ticket["key"], "status": "todo"}))
-    assert "diperbarui" in out
+    assert "updated" in out
     assert client.get(f"/api/tickets/{ticket['key']}").json()["status"] == "todo"
 
     # delete_ticket (PM can delete; ticket gone)
     out = asyncio.run(_call("delete_ticket", {"key": ticket["key"]}))
-    assert "dihapus" in out
+    assert "deleted" in out
     assert client.get(f"/api/tickets/{ticket['key']}").status_code == 404
 
     # memory tools
     out = asyncio.run(_call("create_memory", {"note": "ingat ini"}))
-    assert "Memory disimpan" in out
+    assert "Memory saved" in out
     out = asyncio.run(_call("get_memory", {}))
     assert "ingat ini" in out
     notes = client.get(f"/api/agents/{pm['id']}/memory").json()
     mem_id = notes[0]["id"]
     out = asyncio.run(_call("update_memory", {"memory_id": mem_id, "note": "update"}))
-    assert "diperbarui" in out
+    assert "updated" in out
     notes = client.get(f"/api/agents/{pm['id']}/memory").json()
     assert notes[0]["note"] == "update"
 
     # error path: unknown ticket
     out = asyncio.run(_call("get_ticket", {"key": "MAP-999"}))
-    assert "Gagal" in out
+    assert "Failed" in out
 
 
 def test_ids_resolve_from_cli_args_when_env_missing(monkeypatch):

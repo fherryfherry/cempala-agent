@@ -109,12 +109,9 @@ _TAIL_CHARS = 2000
 # and verbatim, not open-ended retrieval) — same idea as _PM_CHAT_TICKET_LIST_LIMIT below.
 _AGENT_MEMORY_PROMPT_LIMIT = 20
 
-# Cap on how many artifacts get listed in the prompt's artifact catalog (most recent
-# first) — cheap insurance against unbounded prompt growth on large workspaces.
-_ARTIFACT_CATALOG_LIMIT = 100
-
 # Cap on how many existing epics (top-level tickets) get listed in the ```map contract's
-# reuse catalog — most-recently-updated first, same insurance as _ARTIFACT_CATALOG_LIMIT.
+# reuse catalog — most-recently-updated first, cheap insurance against unbounded prompt
+# growth on large workspaces.
 _EPIC_CATALOG_LIMIT = 100
 
 # run.id -> asyncio.Task, for currently-executing runs (used by the stop endpoint).
@@ -1901,24 +1898,6 @@ async def _build_prompt_for(
     ).all()
     existing_artifact_groups = sorted({g.name for g in artifact_groups})
 
-    # Artifact catalog (Artifacts menu) so every agent can read/search what's already
-    # been published before producing new files — most recent first, bounded.
-    catalog_rows = (
-        await session.execute(
-            select(Attachment, Ticket.key, ArtifactGroup.name)
-            .join(Ticket, Attachment.ticket_id == Ticket.id)
-            .outerjoin(ArtifactGroup, Attachment.group_id == ArtifactGroup.id)
-            .where(Ticket.workspace_id == workspace.id, Attachment.origin == "agent")
-            .order_by(Attachment.created_at.desc())
-            .limit(_ARTIFACT_CATALOG_LIMIT)
-        )
-    ).all()
-    artifact_catalog = [
-        f"[{group_name or 'Ungrouped'}] {a.filename} ({ticket_key})"
-        + (f" — {a.description}" if a.description else "")
-        for a, ticket_key, group_name in catalog_rows
-    ]
-
     # Existing epics (top-level tickets) so PM/QA/Pentester reuse a relevant one via
     # `tickets[].epic` instead of spawning a fresh one-off epic every time
     # (docs/03-agent-design.md §3) — only computed for roles that can declare tickets[]
@@ -1990,7 +1969,6 @@ async def _build_prompt_for(
         workspace_tickets=workspace_tickets,
         existing_artifact_groups=existing_artifact_groups,
         agent_memories=agent_memories,
-        artifact_catalog=artifact_catalog,
         sprint_creator_roles=set(workspace.sprint_creator_roles or ["pm"]),
         existing_epics=existing_epics,
         existing_sprints=existing_sprints,
@@ -2001,8 +1979,8 @@ async def _build_routine_prompt_for(
     session, workspace: Workspace, agent: Agent, routine: Routine
 ) -> str:
     """Assemble a routine-run prompt: BASE + role block + routine prompt + workspace
-    context (description/workflow) + artifact catalog + agent memory + routine ```map
-    contract. No ticket context — the routine's own prompt is the task.
+    context (description/workflow) + agent memory + routine ```map contract. No ticket
+    context — the routine's own prompt is the task.
     """
     role_map = await _role_map(session)
     roster = (
@@ -2012,23 +1990,6 @@ async def _build_routine_prompt_for(
         _agent_info_from(a, role_map.get(a.role)) for a in roster
     ]
     agent_info = _agent_info_from(agent, role_map.get(agent.role))
-
-    # Artifact catalog (Artifacts menu) so the agent can read/search what's published.
-    catalog_rows = (
-        await session.execute(
-            select(Attachment, Ticket.key, ArtifactGroup.name)
-            .join(Ticket, Attachment.ticket_id == Ticket.id)
-            .outerjoin(ArtifactGroup, Attachment.group_id == ArtifactGroup.id)
-            .where(Ticket.workspace_id == workspace.id, Attachment.origin == "agent")
-            .order_by(Attachment.created_at.desc())
-            .limit(_ARTIFACT_CATALOG_LIMIT)
-        )
-    ).all()
-    artifact_catalog = [
-        f"[{group_name or 'Ungrouped'}] {a.filename} ({ticket_key})"
-        + (f" — {a.description}" if a.description else "")
-        for a, ticket_key, group_name in catalog_rows
-    ]
 
     # This agent's own cross-ticket memory notes.
     memory_rows = (
@@ -2078,7 +2039,6 @@ async def _build_routine_prompt_for(
         routine_prompt=routine.prompt,
         extra_instructions=extra_instructions,
         agent_memories=agent_memories,
-        artifact_catalog=artifact_catalog,
         sprint_creator_roles=set(workspace.sprint_creator_roles or ["pm"]),
         existing_epics=existing_epics,
         existing_sprints=existing_sprints,
@@ -2089,7 +2049,7 @@ async def _build_chat_prompt_for(
     session, workspace: Workspace, agent: Agent, conversation: Conversation
 ) -> str:
     """Assemble a chat-run prompt: BASE + role block + conversation transcript +
-    workspace tickets + artifact catalog + agent memory + chat ```map contract.
+    workspace tickets + agent memory + chat ```map contract.
     """
     role_map = await _role_map(session)
     roster = (
@@ -2139,22 +2099,6 @@ async def _build_chat_prompt_for(
     workspace_tickets = await _workspace_ticket_summaries(
         session, workspace.id, exclude_ticket_id=""
     )
-
-    catalog_rows = (
-        await session.execute(
-            select(Attachment, Ticket.key, ArtifactGroup.name)
-            .join(Ticket, Attachment.ticket_id == Ticket.id)
-            .outerjoin(ArtifactGroup, Attachment.group_id == ArtifactGroup.id)
-            .where(Ticket.workspace_id == workspace.id, Attachment.origin == "agent")
-            .order_by(Attachment.created_at.desc())
-            .limit(_ARTIFACT_CATALOG_LIMIT)
-        )
-    ).all()
-    artifact_catalog = [
-        f"[{group_name or 'Ungrouped'}] {a.filename} ({ticket_key})"
-        + (f" — {a.description}" if a.description else "")
-        for a, ticket_key, group_name in catalog_rows
-    ]
 
     memory_rows = (
         await session.scalars(
@@ -2206,7 +2150,6 @@ async def _build_chat_prompt_for(
         attachments=attachment_names,
         linked_ticket=conversation.linked_ticket_key,
         workspace_tickets=workspace_tickets,
-        artifact_catalog=artifact_catalog,
         agent_memories=agent_memories,
         sprint_creator_roles=set(workspace.sprint_creator_roles or ["pm"]),
         existing_epics=existing_epics,
