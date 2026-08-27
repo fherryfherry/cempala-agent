@@ -13,12 +13,12 @@
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 [![Coverage Status](https://coveralls.io/repos/github/fherryfherry/cempala-agent/badge.svg)](https://coveralls.io/github/fherryfherry/cempala-agent)
 
-![CEMPALA](https://is3.cloudhost.id/trixilabs/cempala/Screenshot%202026-08-27%20at%2020.18.13.png)
+![CEMPALA](https://is3.cloudhost.id/trixilabs/cempala/thumbnail-dashboard.jpg)
 
-A Jira-like portal for running a "software team" made entirely of AI agents (PM, Lead Engineer,
-Engineer, Designer, QA, Pentester). You create tickets, the agent team works them autonomously
-inside a local repo folder, and you watch everything happen in real time through an activity feed
-and streaming output.
+CEMPALA is a multi-agent tool that runs a "software team" made entirely of AI agents — PM,
+Engineer, Designer, QA, and Pentester. Create a ticket, and the agents plan, code, review, and
+ship it autonomously inside your local repo — while you watch everything in real time through a
+live activity feed.
 
 The portal does not build its own coding agent — it assembles a prompt, hands it to an external
 coding CLI (`opencode`, `claude`, `codex`, or `agy` — configurable per agent), and receives the
