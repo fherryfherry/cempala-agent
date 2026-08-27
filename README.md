@@ -44,6 +44,25 @@ See [`docs/00-overview.md`](docs/00-overview.md) for the full pitch and
 This is not an implementation detail you can ignore — it is a consciously accepted architectural
 consequence (see [ADR-010](docs/06-adr.md)).
 
+### Want to access CEMPALA remotely? Use Tailscale, don't open a port
+
+The backend must stay bound to `127.0.0.1` — never expose it directly to the public internet or a
+LAN via `0.0.0.0` / port forwarding, since there is no auth (ADR-005) and `--auto` means anyone who
+can reach the API can run arbitrary commands as your user.
+
+If you want to check on CEMPALA from another device (phone, laptop, another room) without loosening
+that bind, install [Tailscale](https://tailscale.com) on the machine running `make dev` and use
+`tailscale serve` (not `tailscale funnel`, which exposes a service publicly):
+
+```
+tailscale serve --bg 3000    # frontend
+tailscale serve --bg 8000    # backend (only if you need direct API access)
+```
+
+This proxies your existing `127.0.0.1`-bound ports to your private **tailnet** at
+`https://your-machine.tailnet-name.ts.net`, reachable only from devices you've authenticated into
+that tailnet — the app itself is never rebound to `0.0.0.0` and never touches the public internet.
+
 ## Prerequisites
 
 - The [`opencode`](https://opencode.ai) binary installed and authenticated:
