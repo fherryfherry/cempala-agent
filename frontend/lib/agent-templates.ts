@@ -1,9 +1,10 @@
-import type { AvatarTemplate, Role } from "@/lib/api";
+import type { AvatarTemplate } from "@/lib/api";
 
 /** Slot definition inside a squad template: which role, which avatar, and a
- * default name suggestion derived from NAME_POOL. */
+ * default name suggestion derived from NAME_POOL. Templates only reference
+ * builtin role keys; custom roles aren't in templates. */
 export interface TemplateSlot {
-  role: Role;
+  role: string;
   label: string;
   avatar_template: AvatarTemplate | null;
   avatar_color: string | null;
@@ -16,7 +17,7 @@ export interface AgentTemplate {
   slots: TemplateSlot[];
 }
 
-const ROLE_LABELS: Record<Role, string> = {
+const ROLE_LABELS: Record<string, string> = {
   pm: "Project Manager",
   lead: "Lead Engineer",
   engineer: "Engineer",
@@ -63,7 +64,7 @@ export function suggestSlotNames(
 
 // Six person avatar templates exist; the two newest roles reuse a template with a distinct
 // color rather than needing a 7th/8th bust drawn.
-const AVATARS: Record<Role, { avatar_template: AvatarTemplate; avatar_color: string }> = {
+const AVATARS: Record<string, { avatar_template: AvatarTemplate; avatar_color: string }> = {
   pm: { avatar_template: "person-1", avatar_color: "#10b981" },
   lead: { avatar_template: "person-2", avatar_color: "#0ea5e9" },
   engineer: { avatar_template: "person-3", avatar_color: "#8b5cf6" },

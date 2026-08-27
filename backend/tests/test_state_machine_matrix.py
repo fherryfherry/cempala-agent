@@ -5,23 +5,23 @@ table written independently of app/core/state_machine.py's internals, so a
 deliberate regression in the implementation has to satisfy this table too, not
 just mirror whatever the code does. Any known role/owner may move a ticket
 between any two *distinct* known statuses — the only illegal combos are a
-same-status no-op, an unknown status, or an unknown role.
+same-status no-op or an unknown status. Role keys are dynamic (global `role`
+table); the unknown-role branch was removed since the parser/API layer now
+validates role keys against the DB before this is ever called.
 """
 
 import pytest
 
-from app.core.state_machine import ALL_ROLES, STATUSES, can_transition
+from app.core.state_machine import STATUSES, can_transition
 
-ROLES = sorted(ALL_ROLES)
+ROLES = ["pm", "lead", "engineer", "designer", "qa", "pentester", "business_analyst", "system_architect", "scrum_master"]
 ALL_STATUSES = sorted(STATUSES)
 
 
 def _expected(frm: str, to: str, role: str | None) -> bool:
     if frm == to:
         return False
-    if role is None:
-        return True  # owner bypasses everything
-    return role in ALL_ROLES
+    return True  # owner and every role may perform any distinct-status move
 
 
 _CASES = [
@@ -44,5 +44,4 @@ def test_full_transition_matrix(frm, to, role):
 
 def test_matrix_covers_all_statuses_and_roles():
     assert ALL_STATUSES == sorted(STATUSES)
-    assert set(ROLES) == ALL_ROLES
     assert len(_CASES) == len(ALL_STATUSES) * len(ALL_STATUSES) * (len(ROLES) + 1)

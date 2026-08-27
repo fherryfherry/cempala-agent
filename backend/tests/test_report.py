@@ -2,9 +2,31 @@
 and docs/03-agent-design.md §3/§6 for the rules under test.
 """
 
+from app.core.role_defs import BUILTIN_ROLES
 from app.core.report import parse_report
 
 VALID_AGENTS = {"lead-1", "eng-1", "eng-2", "pm-1", "qa-1", "pentester-1"}
+
+BUILTIN_FLAGS = {r["key"]: r for r in BUILTIN_ROLES}
+
+
+def _flags(role: str) -> dict:
+    """Default permission flags for a role, mirroring the builtin seed — tests
+    that exercise the gates pass explicit overrides where the behavior under
+    test differs."""
+    r = BUILTIN_FLAGS.get(role, {})
+    return {
+        "may_declare_tickets": r.get("may_declare_tickets", False),
+        "may_manage_artifacts": r.get("may_manage_artifacts", False),
+        "is_pm": role == "pm",
+    }
+
+
+def _parse(text: str, role: str, valid_agents=VALID_AGENTS, **kwargs):
+    """parse_report with the role's default permission flags filled in —
+    override any flag by passing it explicitly."""
+    merged = {**_flags(role), **kwargs}
+    return parse_report(text, role, valid_agents, **merged)
 
 
 def _wrap(body: str) -> str:
@@ -20,7 +42,7 @@ def test_tickets_dropped_for_pm_without_approval():
         "  - title: sub-task\n"
         "    assignee: eng-1\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS, ticket_approved=False)
+    result = _parse(text, "pm", VALID_AGENTS, ticket_approved=False)
     assert result.ok is True
     assert result.tickets == []
     assert result.tickets_dropped is True
@@ -36,7 +58,7 @@ def test_pm_tickets_allowed_with_approval():
         "  - title: sub-task\n"
         "    assignee: eng-1\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS, ticket_approved=True)
+    result = _parse(text, "pm", VALID_AGENTS, ticket_approved=True)
     assert result.ok is True
     assert result.tickets_dropped is False
     assert len(result.tickets) == 1
@@ -52,7 +74,7 @@ def test_qa_tickets_unaffected_by_approval_gate():
         "  - title: fix bug A\n"
         "    assignee: eng-1\n"
     )
-    result = parse_report(text, "qa", VALID_AGENTS, ticket_approved=False)
+    result = _parse(text, "qa", VALID_AGENTS, ticket_approved=False)
     assert result.ok is True
     assert result.tickets_dropped is False
     assert len(result.tickets) == 1
@@ -70,7 +92,7 @@ def test_ticket_category_parsed_when_valid():
         "  - title: perf tweak\n"
         "    category: performance\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS, ticket_approved=True)
+    result = _parse(text, "pm", VALID_AGENTS, ticket_approved=True)
     assert result.tickets[0].category == "feature"
     assert result.tickets[1].category == "performance"
 
@@ -84,7 +106,7 @@ def test_ticket_category_invalid_dropped_to_none():
         "  - title: weird\n"
         "    category: not-a-real-category\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS, ticket_approved=True)
+    result = _parse(text, "pm", VALID_AGENTS, ticket_approved=True)
     assert result.tickets[0].category is None
 
 
@@ -98,13 +120,13 @@ def test_ticket_epic_parsed_when_given():
         "    epic: AUTH-001\n"
         "  - title: unrelated\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS, ticket_approved=True)
+    result = _parse(text, "pm", VALID_AGENTS, ticket_approved=True)
     assert result.tickets[0].epic == "AUTH-001"
     assert result.tickets[1].epic is None
 
 
 def test_missing_block():
-    result = parse_report("no fenced block here at all", "engineer", VALID_AGENTS)
+    result = _parse("no fenced block here at all", "engineer", VALID_AGENTS)
     assert result.ok is False
     assert result.reason is not None
     assert "map" in result.reason.lower()
@@ -118,7 +140,7 @@ def test_valid_full_block():
         "  Menambah validasi email di form login.\n"
         "  File: src/auth/login.tsx\n"
     )
-    result = parse_report(text, "engineer", VALID_AGENTS, actor_name="eng-1")
+    result = _parse(text, "engineer", VALID_AGENTS, actor_name="eng-1")
     assert result.ok is True
     assert result.status == "review"
     assert result.valid_mentions == ["lead-1"]
@@ -130,7 +152,7 @@ def test_valid_full_block():
 
 def test_malformed_yaml():
     text = _wrap("status: review\nmention: [lead-1\nsummary: broken\n")
-    result = parse_report(text, "engineer", VALID_AGENTS)
+    result = _parse(text, "engineer", VALID_AGENTS)
     assert result.ok is False
     assert "yaml" in result.reason.lower()
 
@@ -141,7 +163,7 @@ def test_multiple_blocks_last_wins():
         "some more agent output in between\n"
         "```map\nstatus: review\nsummary: |\n  second block, should be used\n```"
     )
-    result = parse_report(text, "engineer", VALID_AGENTS)
+    result = _parse(text, "engineer", VALID_AGENTS)
     assert result.ok is True
     assert result.status == "review"
     assert "second block" in result.summary
@@ -149,43 +171,43 @@ def test_multiple_blocks_last_wins():
 
 def test_missing_summary():
     text = _wrap("status: review\nmention: [lead-1]\n")
-    result = parse_report(text, "engineer", VALID_AGENTS)
+    result = _parse(text, "engineer", VALID_AGENTS)
     assert result.ok is False
     assert "summary" in result.reason.lower()
 
 
 def test_empty_summary():
     text = _wrap("status: review\nsummary: ''\n")
-    result = parse_report(text, "engineer", VALID_AGENTS)
+    result = _parse(text, "engineer", VALID_AGENTS)
     assert result.ok is False
 
 
 def test_legal_status_variety():
     # Any role may now declare any status (owner request: the old per-role
     # status matrix kept producing false blocks on the kanban board).
-    r = parse_report(_wrap("status: review\nsummary: |\n  pm can set review too now\n"), "pm", VALID_AGENTS)
+    r = _parse(_wrap("status: review\nsummary: |\n  pm can set review too now\n"), "pm", VALID_AGENTS)
     assert r.ok and r.status == "review"
-    r = parse_report(_wrap("status: done\nsummary: |\n  lead can close directly now\n"), "lead", VALID_AGENTS)
+    r = _parse(_wrap("status: done\nsummary: |\n  lead can close directly now\n"), "lead", VALID_AGENTS)
     assert r.ok and r.status == "done"
-    r = parse_report(_wrap("status: done\nsummary: |\n  engineer can close directly now\n"), "engineer", VALID_AGENTS)
+    r = _parse(_wrap("status: done\nsummary: |\n  engineer can close directly now\n"), "engineer", VALID_AGENTS)
     assert r.ok and r.status == "done"
     # QA
-    r = parse_report(_wrap("status: security\nsummary: |\n  all tests pass\n"), "qa", VALID_AGENTS)
+    r = _parse(_wrap("status: security\nsummary: |\n  all tests pass\n"), "qa", VALID_AGENTS)
     assert r.ok and r.status == "security"
     # Pentester
-    r = parse_report(_wrap("status: done\nsummary: |\n  audit clean\n"), "pentester", VALID_AGENTS)
+    r = _parse(_wrap("status: done\nsummary: |\n  audit clean\n"), "pentester", VALID_AGENTS)
     assert r.ok and r.status == "done"
 
 
 def test_unknown_status_value():
     text = _wrap("status: not_a_real_status\nsummary: |\n  whoops\n")
-    result = parse_report(text, "engineer", VALID_AGENTS)
+    result = _parse(text, "engineer", VALID_AGENTS)
     assert result.ok is False
 
 
 def test_unknown_mention_dropped_and_recorded():
     text = _wrap("status: review\nmention: [lead-1, ghost-agent]\nsummary: |\n  done\n")
-    result = parse_report(text, "engineer", VALID_AGENTS)
+    result = _parse(text, "engineer", VALID_AGENTS)
     assert result.ok is True
     assert result.valid_mentions == ["lead-1"]
     assert result.unknown_mentions == ["ghost-agent"]
@@ -193,7 +215,7 @@ def test_unknown_mention_dropped_and_recorded():
 
 def test_self_mention_dropped_not_unknown():
     text = _wrap("status: review\nmention: [eng-1, lead-1]\nsummary: |\n  done\n")
-    result = parse_report(text, "engineer", VALID_AGENTS, actor_name="eng-1")
+    result = _parse(text, "engineer", VALID_AGENTS, actor_name="eng-1")
     assert result.ok is True
     assert result.valid_mentions == ["lead-1"]
     assert result.unknown_mentions == []
@@ -210,7 +232,7 @@ def test_tickets_from_unauthorized_role_dropped_and_recorded():
         "    assignee: eng-2\n"
         "    priority: low\n"
     )
-    result = parse_report(text, "engineer", VALID_AGENTS)
+    result = _parse(text, "engineer", VALID_AGENTS)
     assert result.ok is True
     assert result.tickets == []
     assert result.tickets_dropped is True
@@ -232,7 +254,7 @@ def test_tickets_from_authorized_role_parsed():
         "  - title: Login form UI\n"
         "    assignee: eng-2\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS)
+    result = _parse(text, "pm", VALID_AGENTS)
     assert result.ok is True
     assert result.tickets_dropped is False
     assert len(result.tickets) == 2
@@ -252,7 +274,7 @@ def test_business_analyst_may_create_tickets():
         "  - title: New reporting requirement\n"
         "    description: from stakeholder discussion\n"
     )
-    result = parse_report(text, "business_analyst", VALID_AGENTS)
+    result = _parse(text, "business_analyst", VALID_AGENTS)
     assert result.ok is True
     assert result.tickets_dropped is False
     assert len(result.tickets) == 1
@@ -266,7 +288,7 @@ def test_system_architect_cannot_create_tickets():
         "tickets:\n"
         "  - title: follow-up spike\n"
     )
-    result = parse_report(text, "system_architect", VALID_AGENTS)
+    result = _parse(text, "system_architect", VALID_AGENTS)
     assert result.ok is True
     assert result.tickets == []
     assert result.tickets_dropped is True
@@ -283,7 +305,7 @@ def test_ticket_missing_title_is_skipped():
         "  - title: valid one\n"
         "    assignee: eng-2\n"
     )
-    result = parse_report(text, "qa", VALID_AGENTS)
+    result = _parse(text, "qa", VALID_AGENTS)
     assert result.ok is True
     assert len(result.tickets) == 1
     assert result.tickets[0].title == "valid one"
@@ -291,7 +313,7 @@ def test_ticket_missing_title_is_skipped():
 
 def test_not_a_mapping_yaml():
     text = _wrap("- just\n- a\n- list\n")
-    result = parse_report(text, "engineer", VALID_AGENTS)
+    result = _parse(text, "engineer", VALID_AGENTS)
     assert result.ok is False
 
 
@@ -307,7 +329,7 @@ def test_updates_from_authorized_role_parsed():
         "  - ticket: MAP-003\n"
         "    assignee: eng-2\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS)
+    result = _parse(text, "pm", VALID_AGENTS)
     assert result.ok is True
     assert result.updates_dropped is False
     assert len(result.updates) == 2
@@ -330,7 +352,7 @@ def test_update_sprint_and_duration_parsed():
         "    sprint: Sprint 2\n"
         "    duration: 1.5\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS)
+    result = _parse(text, "pm", VALID_AGENTS)
     assert result.ok is True
     assert result.updates_dropped is False
     assert result.updates[0].sprint == "Sprint 2"
@@ -347,7 +369,7 @@ def test_update_missing_ticket_key_is_skipped():
         "  - ticket: MAP-004\n"
         "    priority: low\n"
     )
-    result = parse_report(text, "qa", VALID_AGENTS)
+    result = _parse(text, "qa", VALID_AGENTS)
     assert result.ok is True
     assert len(result.updates) == 1
     assert result.updates[0].ticket_key == "MAP-004"
@@ -362,7 +384,7 @@ def test_updates_from_unauthorized_role_dropped_and_recorded():
         "  - ticket: MAP-002\n"
         "    priority: high\n"
     )
-    result = parse_report(text, "engineer", VALID_AGENTS)
+    result = _parse(text, "engineer", VALID_AGENTS)
     assert result.ok is True
     assert result.updates == []
     assert result.updates_dropped is True
@@ -384,7 +406,7 @@ def test_ticket_sprint_and_duration_parsed():
         "    sprint: Sprint 1\n"
         "    duration: 0.5\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS, ticket_approved=True)
+    result = _parse(text, "pm", VALID_AGENTS, ticket_approved=True)
     assert result.ok is True
     assert result.sprints_dropped is False
     assert len(result.sprints) == 1
@@ -404,7 +426,7 @@ def test_sprints_dropped_for_pm_without_approval():
         "  - name: Sprint 1\n"
         "    goal: explore\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS, ticket_approved=False)
+    result = _parse(text, "pm", VALID_AGENTS, ticket_approved=False)
     assert result.ok is True
     assert result.sprints == []
     assert result.sprints_dropped is True
@@ -419,7 +441,7 @@ def test_sprints_from_unauthorized_role_dropped():
         "sprints:\n"
         "  - name: Sprint 1\n"
     )
-    result = parse_report(text, "engineer", VALID_AGENTS)
+    result = _parse(text, "engineer", VALID_AGENTS)
     assert result.ok is True
     assert result.sprints == []
     assert result.sprints_dropped is True
@@ -434,7 +456,7 @@ def test_sprints_allowed_for_role_in_sprint_creator_roles():
         "  - name: Sprint 1\n"
         "    goal: ship login\n"
     )
-    result = parse_report(text, "qa", VALID_AGENTS, sprint_creator_roles={"pm", "qa"})
+    result = _parse(text, "qa", VALID_AGENTS, sprint_creator_roles={"pm", "qa"})
     assert result.ok is True
     assert result.sprints_dropped is False
     assert len(result.sprints) == 1
@@ -451,7 +473,7 @@ def test_sprints_parse_start_end_dates():
         "    start_date: 2026-08-25\n"
         "    end_date: 2026-08-29\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS)
+    result = _parse(text, "pm", VALID_AGENTS)
     assert result.ok is True
     assert len(result.sprints) == 1
     assert result.sprints[0].start_date == "2026-08-25"
@@ -467,7 +489,7 @@ def test_sprints_ignore_missing_dates():
         "  - name: Sprint 1\n"
         "    goal: ship\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS)
+    result = _parse(text, "pm", VALID_AGENTS)
     assert result.ok is True
     assert result.sprints[0].start_date is None
     assert result.sprints[0].end_date is None
@@ -482,7 +504,7 @@ def test_sprints_status_active_parsed():
         "  - name: Sprint 1\n"
         "    status: active\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS)
+    result = _parse(text, "pm", VALID_AGENTS)
     assert result.ok is True
     assert result.sprints[0].status == "active"
 
@@ -496,7 +518,7 @@ def test_sprints_status_completed_parsed():
         "  - name: Sprint 1\n"
         "    status: completed\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS)
+    result = _parse(text, "pm", VALID_AGENTS)
     assert result.ok is True
     assert result.sprints[0].status == "completed"
 
@@ -510,7 +532,7 @@ def test_sprints_status_invalid_value_ignored():
         "  - name: Sprint 1\n"
         "    status: launched\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS)
+    result = _parse(text, "pm", VALID_AGENTS)
     assert result.ok is True
     assert result.sprints[0].status is None
 
@@ -519,7 +541,7 @@ def test_sprints_status_absent_defaults_to_none():
     text = _wrap(
         "status: in_progress\nsummary: |\n  plain sprint\nsprints:\n  - name: Sprint 1\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS)
+    result = _parse(text, "pm", VALID_AGENTS)
     assert result.ok is True
     assert result.sprints[0].status is None
 
@@ -532,7 +554,7 @@ def test_sprints_dropped_for_role_not_in_sprint_creator_roles():
         "sprints:\n"
         "  - name: Sprint 1\n"
     )
-    result = parse_report(text, "qa", VALID_AGENTS, sprint_creator_roles={"pm"})
+    result = _parse(text, "qa", VALID_AGENTS, sprint_creator_roles={"pm"})
     assert result.ok is True
     assert result.sprints == []
     assert result.sprints_dropped is True
@@ -552,7 +574,7 @@ def test_sprints_literal_block_mistake_gets_diagnostic_hint():
         "  - name: Sprint 6\n"
         "    goal: test\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS)
+    result = _parse(text, "pm", VALID_AGENTS)
     assert result.ok is True
     assert result.sprints == []
     assert result.sprints_dropped is True
@@ -568,7 +590,7 @@ def test_tickets_literal_block_mistake_gets_diagnostic_hint():
         "tickets: |\n"
         "  - title: sub-task\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS)
+    result = _parse(text, "pm", VALID_AGENTS)
     assert result.ok is True
     assert result.tickets_dropped is True
     assert "tickets: |" in result.tickets_dropped_reason
@@ -584,7 +606,7 @@ def test_artifacts_parsed_for_any_role():
         "    group: Dokumen Teknis\n"
         "    description: initial PRD\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS)
+    result = _parse(text, "pm", VALID_AGENTS)
     assert result.ok is True
     assert len(result.artifacts) == 1
     assert result.artifacts[0].path == "docs/PRD.md"
@@ -603,7 +625,7 @@ def test_artifacts_missing_path_or_group_skipped():
         "  - path: docs/TSD.md\n"
         "    group: Dokumen Teknis\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS)
+    result = _parse(text, "pm", VALID_AGENTS)
     assert result.ok is True
     assert len(result.artifacts) == 1
     assert result.artifacts[0].path == "docs/TSD.md"
@@ -611,7 +633,7 @@ def test_artifacts_missing_path_or_group_skipped():
 
 def test_artifacts_absent_defaults_to_empty_list():
     text = _wrap("status: in_progress\nsummary: |\n  nothing to publish\n")
-    result = parse_report(text, "engineer", VALID_AGENTS)
+    result = _parse(text, "engineer", VALID_AGENTS)
     assert result.ok is True
     assert result.artifacts == []
     assert result.artifacts_dropped is False
@@ -624,7 +646,7 @@ def test_artifacts_non_list_dropped_and_recorded():
         "  malformed artifacts\n"
         "artifacts: not-a-list\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS)
+    result = _parse(text, "pm", VALID_AGENTS)
     assert result.ok is True
     assert result.artifacts == []
     assert result.artifacts_dropped is True
@@ -650,7 +672,7 @@ def test_artifact_updates_parsed_for_pm():
         "  - op: delete\n"
         "    group: Kelompok Kosong\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS)
+    result = _parse(text, "pm", VALID_AGENTS)
     assert result.ok is True
     assert result.artifact_updates_dropped is False
     assert len(result.artifact_updates) == 4
@@ -675,11 +697,11 @@ def test_artifact_updates_from_non_pm_dropped_and_recorded():
         "    group: A\n"
         "    to: B\n"
     )
-    result = parse_report(text, "engineer", VALID_AGENTS)
+    result = _parse(text, "engineer", VALID_AGENTS)
     assert result.ok is True
     assert result.artifact_updates == []
     assert result.artifact_updates_dropped is True
-    assert "only pm" in result.artifact_updates_dropped_reason
+    assert "may_manage_artifacts" in result.artifact_updates_dropped_reason
 
 
 def test_artifact_updates_malformed_and_unknown_ops_skipped():
@@ -695,7 +717,7 @@ def test_artifact_updates_malformed_and_unknown_ops_skipped():
         "    group: A\n"
         "    to: C\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS)
+    result = _parse(text, "pm", VALID_AGENTS)
     assert result.ok is True
     assert len(result.artifact_updates) == 1
     assert result.artifact_updates[0].op == "rename"
@@ -704,7 +726,7 @@ def test_artifact_updates_malformed_and_unknown_ops_skipped():
 
 def test_artifact_updates_absent_defaults_to_empty_list():
     text = _wrap("status: in_progress\nsummary: |\n  nothing to organize\n")
-    result = parse_report(text, "pm", VALID_AGENTS)
+    result = _parse(text, "pm", VALID_AGENTS)
     assert result.ok is True
     assert result.artifact_updates == []
     assert result.artifact_updates_dropped is False
@@ -716,7 +738,7 @@ def test_routine_mode_rejects_status():
         "summary: |\n"
         "  routine work\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS, no_ticket_mode=True)
+    result = _parse(text, "pm", VALID_AGENTS, no_ticket_mode=True)
     assert result.ok is False
     assert "status" in result.reason
 
@@ -730,7 +752,7 @@ def test_routine_mode_comments_parsed():
         "    body: |\n"
         "      Tiket ini tidak bergerak, tolong dicek.\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS, no_ticket_mode=True)
+    result = _parse(text, "pm", VALID_AGENTS, no_ticket_mode=True)
     assert result.ok is True
     assert len(result.comments) == 1
     assert result.comments[0].ticket_key == "MAP-002"
@@ -747,7 +769,7 @@ def test_routine_mode_comments_malformed_skipped():
         "  - ticket: MAP-003\n"
         "    body: valid one\n"
     )
-    result = parse_report(text, "pm", VALID_AGENTS, no_ticket_mode=True)
+    result = _parse(text, "pm", VALID_AGENTS, no_ticket_mode=True)
     assert result.ok is True
     assert len(result.comments) == 1
     assert result.comments[0].ticket_key == "MAP-003"
@@ -762,7 +784,7 @@ def test_comments_rejected_in_normal_ticket_run():
         "  - ticket: MAP-002\n"
         "    body: hi\n"
     )
-    result = parse_report(text, "engineer", VALID_AGENTS)
+    result = _parse(text, "engineer", VALID_AGENTS)
     assert result.ok is True
     assert result.comments == []
     assert result.comments_dropped is True
@@ -778,7 +800,7 @@ def test_memory_parsed_for_any_role():
         "  - jangan lupa jalankan migrasi sebelum test\n"
         "  - repo ini pakai uv, bukan pip langsung\n"
     )
-    result = parse_report(text, "engineer", VALID_AGENTS)
+    result = _parse(text, "engineer", VALID_AGENTS)
     assert result.ok is True
     assert result.memories == [
         "jangan lupa jalankan migrasi sebelum test",
@@ -791,7 +813,7 @@ def test_memory_single_string_treated_as_list():
     text = _wrap(
         "status: review\nsummary: |\n  ok\nmemory: satu catatan saja\n"
     )
-    result = parse_report(text, "engineer", VALID_AGENTS)
+    result = _parse(text, "engineer", VALID_AGENTS)
     assert result.ok is True
     assert result.memories == ["satu catatan saja"]
 
@@ -806,7 +828,7 @@ def test_memory_empty_and_non_string_entries_skipped():
         "  - 42\n"
         "  - valid note\n"
     )
-    result = parse_report(text, "engineer", VALID_AGENTS)
+    result = _parse(text, "engineer", VALID_AGENTS)
     assert result.ok is True
     assert result.memories == ["valid note"]
 
@@ -814,14 +836,14 @@ def test_memory_empty_and_non_string_entries_skipped():
 def test_memory_note_truncated_to_max_length():
     long_note = "x" * 1000
     text = _wrap(f"status: review\nsummary: |\n  ok\nmemory:\n  - {long_note}\n")
-    result = parse_report(text, "engineer", VALID_AGENTS)
+    result = _parse(text, "engineer", VALID_AGENTS)
     assert result.ok is True
     assert len(result.memories[0]) == 500
 
 
 def test_memory_absent_defaults_to_empty_list():
     text = _wrap("status: in_progress\nsummary: |\n  nothing to remember\n")
-    result = parse_report(text, "engineer", VALID_AGENTS)
+    result = _parse(text, "engineer", VALID_AGENTS)
     assert result.ok is True
     assert result.memories == []
     assert result.memories_dropped is False
@@ -831,7 +853,7 @@ def test_memory_non_list_dropped_and_recorded():
     text = _wrap(
         "status: in_progress\nsummary: |\n  malformed memory\nmemory:\n  foo: bar\n"
     )
-    result = parse_report(text, "engineer", VALID_AGENTS)
+    result = _parse(text, "engineer", VALID_AGENTS)
     assert result.ok is True
     assert result.memories == []
     assert result.memories_dropped is True
@@ -848,9 +870,9 @@ def test_dropped_notes_collects_every_dropped_reason():
         "sprints: |\n"
         "  - name: Sprint 1\n"
     )
-    result = parse_report(text, "engineer", VALID_AGENTS)
+    result = _parse(text, "engineer", VALID_AGENTS)
     notes = result.dropped_notes()
-    # engineer isn't in ROLES_ALLOWED_TICKETS at all, so tickets:/sprints: are
+    # engineer's role has may_declare_tickets=false, so tickets:/sprints: are
     # dropped for the role gate, not the malformed-shape branch — either way,
     # both reasons must show up here uncollapsed.
     assert len(notes) == 2
@@ -860,5 +882,5 @@ def test_dropped_notes_collects_every_dropped_reason():
 
 def test_dropped_notes_empty_when_nothing_dropped():
     text = _wrap("status: in_progress\nsummary: |\n  clean run\n")
-    result = parse_report(text, "engineer", VALID_AGENTS)
+    result = _parse(text, "engineer", VALID_AGENTS)
     assert result.dropped_notes() == []

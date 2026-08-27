@@ -4,8 +4,6 @@ from typing import Literal
 
 from pydantic import BaseModel, field_validator
 
-from app.schemas.agent import Role
-
 KEY_RE = re.compile(r"^[A-Z]{2,5}$")
 
 DEFAULT_GUARDRAILS = {
@@ -134,7 +132,7 @@ class WorkspaceUpdate(BaseModel):
     workflow_prompt: str | None = None
     time_unit: Literal["hour", "day"] | None = None
     timezone: str | None = None
-    sprint_creator_roles: list[Role] | None = None
+    sprint_creator_roles: list[str] | None = None
     main_branch: str | None = None
 
 

@@ -17,6 +17,7 @@ from sqlalchemy import (
     Text,
     TypeDecorator,
     UniqueConstraint,
+    event,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -92,6 +93,65 @@ class GlobalSetting(Base):
     )
 
 
+class Role(Base):
+    """Global, workspace-agnostic role definitions — docs/superpowers/specs/
+    2026-08-27-dynamic-roles-design.md.
+
+    The 8 builtin roles are seeded by migration (is_builtin=True, undeletable);
+    custom roles can be created/edited/deleted freely. `key` is the immutable
+    slug agents reference (`agent.role`); the `"pm"` heuristics across the
+    codebase are safe because the key is immutable and pm is undeletable.
+    `system_prompt` is the default prompt agents fall back to when their own
+    `system_prompt` is null.
+    """
+
+    __tablename__ = "role"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    key: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_builtin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    may_declare_tickets: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    may_manage_artifacts: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    is_reviewer: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
+
+
+def _seed_builtin_roles(target, connection, **kwargs):
+    """Seed the 8 builtin roles on every fresh schema (test fixtures via
+    `Base.metadata.create_all` and any other create-all path). Production schema
+    is managed by Alembic, which backfills the same data via its own migration —
+    this event only fires for `create_all` engines, never for migrated ones."""
+    from app.agents.prompts import DEFAULT_ROLE_PROMPTS
+    from app.core.role_defs import BUILTIN_ROLES
+
+    now = _now()
+    for role in BUILTIN_ROLES:
+        connection.execute(
+            target.insert().values(
+                id=f"builtin-{role['key']}",
+                key=role["key"],
+                name=role["name"],
+                description=None,
+                system_prompt=DEFAULT_ROLE_PROMPTS.get(role["key"]),
+                is_builtin=True,
+                may_declare_tickets=role["may_declare_tickets"],
+                may_manage_artifacts=role["may_manage_artifacts"],
+                is_reviewer=role["is_reviewer"],
+                created_at=now,
+            )
+        )
+
+
+event.listen(Role.__table__, "after_create", _seed_builtin_roles)
+
+
 class Sprint(Base):
     __tablename__ = "sprint"
 
@@ -124,20 +184,10 @@ class Agent(Base):
         String, ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(String, nullable=False)
-    role: Mapped[str] = mapped_column(
-        Enum(
-            "pm",
-            "lead",
-            "engineer",
-            "designer",
-            "qa",
-            "pentester",
-            "business_analyst",
-            "system_architect",
-            name="agent_role",
-        ),
-        nullable=False,
-    )
+    # Plain string, foreign-key-free: agents may reference any existing role key;
+    # orphaned keys are prevented at the API/parser level (role lookup), and role
+    # deletion is blocked while agents still use it.
+    role: Mapped[str] = mapped_column(String, nullable=False)
     model: Mapped[str | None] = mapped_column(String, nullable=True)
     tool_kind: Mapped[str] = mapped_column(
         Enum("opencode", "claude", "agy", "codex", name="agent_tool_kind"), nullable=False

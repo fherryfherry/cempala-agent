@@ -13,10 +13,7 @@ from dataclasses import dataclass, field
 
 import yaml
 
-from app.core.state_machine import ALL_ROLES, STATUSES
-
-# Roles allowed to include tickets[] in their block. docs/03-agent-design.md §3.
-ROLES_ALLOWED_TICKETS = frozenset({"pm", "qa", "pentester", "business_analyst"})
+from app.core.state_machine import STATUSES
 
 # Categories a ticket may carry (docs/02-tsd.md §2, kanban category badge).
 VALID_CATEGORIES = frozenset({"feature", "improvement", "fix", "security", "performance"})
@@ -179,6 +176,10 @@ def parse_report(
     ticket_approved: bool = True,
     sprint_creator_roles: set[str] | None = None,
     no_ticket_mode: bool = False,
+    valid_roles: set[str] | None = None,
+    may_declare_tickets: bool = False,
+    may_manage_artifacts: bool = False,
+    is_pm: bool = False,
 ) -> ParseResult:
     matches = _MAP_BLOCK_RE.findall(text or "")
     if not matches:
@@ -217,7 +218,10 @@ def parse_report(
         if status not in STATUSES:
             return _invalid(f"unknown status '{status}'")
 
-        if actor_role not in ALL_ROLES:
+        # Role keys are dynamic (global `role` table). The parser still rejects
+        # roles the caller doesn't vouch for — the caller (orchestrator/API layer)
+        # passes the set of known role keys loaded from the DB.
+        if valid_roles is not None and actor_role not in valid_roles:
             return _invalid(f"unknown role '{actor_role}'")
 
     summary = data.get("summary")
@@ -246,13 +250,13 @@ def parse_report(
     tickets_dropped_reason = None
     tickets_raw = data.get("tickets")
     if tickets_raw:
-        if actor_role not in ROLES_ALLOWED_TICKETS:
+        if not may_declare_tickets:
             tickets_dropped = True
             tickets_dropped_reason = (
                 f"role '{actor_role}' is not allowed to declare tickets[] "
-                f"(allowed: {sorted(ROLES_ALLOWED_TICKETS)}); dropped"
+                f"(may_declare_tickets=false); dropped"
             )
-        elif actor_role == "pm" and not ticket_approved:
+        elif is_pm and not ticket_approved:
             # Explorative gate (owner chat): a PM may not create tickets[] before the
             # owner explicitly approves the plan (docs/03-agent-design.md §4). The
             # report itself is still accepted — the PM may keep asking questions or
@@ -300,7 +304,7 @@ def parse_report(
                 f"role '{actor_role}' is not allowed to declare sprints[] "
                 f"(allowed: {sorted(allowed_sprint_roles)}); dropped"
             )
-        elif actor_role == "pm" and not ticket_approved:
+        elif is_pm and not ticket_approved:
             sprints_dropped = True
             sprints_dropped_reason = (
                 "user belum menyetujui plan PM; sprints[] diabaikan sampai user "
@@ -339,11 +343,11 @@ def parse_report(
     updates_dropped_reason = None
     updates_raw = data.get("updates")
     if updates_raw:
-        if actor_role not in ROLES_ALLOWED_TICKETS:
+        if not may_declare_tickets:
             updates_dropped = True
             updates_dropped_reason = (
                 f"role '{actor_role}' is not allowed to declare updates[] "
-                f"(allowed: {sorted(ROLES_ALLOWED_TICKETS)}); dropped"
+                f"(may_declare_tickets=false); dropped"
             )
         elif not isinstance(updates_raw, list):
             updates_dropped = True
@@ -398,11 +402,11 @@ def parse_report(
     artifact_updates_dropped_reason = None
     artifact_updates_raw = data.get("artifact_updates")
     if artifact_updates_raw:
-        if actor_role != "pm":
+        if not may_manage_artifacts:
             artifact_updates_dropped = True
             artifact_updates_dropped_reason = (
                 f"role '{actor_role}' is not allowed to declare artifact_updates[] "
-                "(only pm); dropped"
+                f"(may_manage_artifacts=false); dropped"
             )
         elif not isinstance(artifact_updates_raw, list):
             artifact_updates_dropped = True

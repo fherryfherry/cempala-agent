@@ -424,6 +424,40 @@ def test_role_mention_resolves_to_idle_agent_with_that_role(client, tmp_path, mo
     assert followup_agent["role"] == "lead"
 
 
+def test_role_mention_resolves_custom_role(client, tmp_path, monkeypatch):
+    """Dynamic roles: a role-not-name mention resolves against the DB `role`
+    table, so custom role keys work exactly like builtin ones."""
+    ws_id = _make_workspace(client, tmp_path)
+    eng = _make_agent(client, ws_id, "engineer", "eng-1")
+
+    created = client.post(
+        "/api/roles",
+        json={"key": "scrum_master", "name": "Scrum Master", "system_prompt": "Kamu Scrum Master."},
+    )
+    assert created.status_code == 201, created.text
+    _make_agent(client, ws_id, "scrum_master", "scrum-1")
+
+    ticket = _make_ticket(client, ws_id)
+    _set_status(client, ticket["key"], "todo")
+    _set_status(client, ticket["key"], "in_progress")
+
+    script = _write_python_binary(tmp_path / "opencode", _script("review", "scrum_master"))
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": eng["id"]})
+    assert resp.status_code == 201, resp.text
+    first = _wait_for_run(client, resp.json()["id"])
+    assert first["status"] == "done", first
+
+    runs = _wait_for_run_count(client, ws_id, ticket["id"], 2)
+    followup = next(r for r in runs if r["id"] != first["id"])
+    assert followup["trigger"] == "handoff"
+    agents = client.get(f"/api/workspaces/{ws_id}/agents").json()
+    followup_agent = next(a for a in agents if a["id"] == followup["agent_id"])
+    assert followup_agent["name"] == "scrum-1"
+    assert followup_agent["role"] == "scrum_master"
+
+
 # ---------------------------------------------------------------------------
 # (d) role mention with multiple candidates prefers the one with fewer runs on ticket
 # ---------------------------------------------------------------------------
