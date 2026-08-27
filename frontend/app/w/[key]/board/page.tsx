@@ -59,7 +59,6 @@ const COLUMNS: { status: TicketStatus; label: string }[] = [
   { status: "qa", label: "QA" },
   { status: "security", label: "Security" },
   { status: "done", label: "Done" },
-  { status: "release", label: "Release" },
   { status: "blocked", label: "Blocked" },
 ];
 
@@ -538,8 +537,8 @@ function CreateTicketDialog({ workspaceId }: { workspaceId: string }) {
   const epicCandidates = [...(tickets.data ?? [])]
     .filter((t) => !t.parent_id)
     .sort((a, b) => {
-      const aOpen = a.status !== "done" && a.status !== "release" ? 0 : 1;
-      const bOpen = b.status !== "done" && b.status !== "release" ? 0 : 1;
+      const aOpen = a.status !== "done" ? 0 : 1;
+      const bOpen = b.status !== "done" ? 0 : 1;
       return aOpen !== bOpen ? aOpen - bOpen : a.title.localeCompare(b.title);
     });
   const epicChildCount = (epicId: string) =>

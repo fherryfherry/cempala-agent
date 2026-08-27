@@ -160,26 +160,9 @@ def test_empty_summary():
     assert result.ok is False
 
 
-def test_release_cannot_be_declared_by_any_role():
-    for role in (
-        "pm",
-        "lead",
-        "engineer",
-        "designer",
-        "qa",
-        "pentester",
-        "business_analyst",
-        "system_architect",
-    ):
-        text = _wrap("status: release\nsummary: |\n  trying to release myself\n")
-        result = parse_report(text, role, VALID_AGENTS)
-        assert result.ok is False, role
-        assert "release" in result.reason
-
-
 def test_legal_status_variety():
-    # Any role may now declare any non-release status (owner request: the old
-    # per-role status matrix kept producing false blocks on the kanban board).
+    # Any role may now declare any status (owner request: the old per-role
+    # status matrix kept producing false blocks on the kanban board).
     r = parse_report(_wrap("status: review\nsummary: |\n  pm can set review too now\n"), "pm", VALID_AGENTS)
     assert r.ok and r.status == "review"
     r = parse_report(_wrap("status: done\nsummary: |\n  lead can close directly now\n"), "lead", VALID_AGENTS)

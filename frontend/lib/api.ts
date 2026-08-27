@@ -276,7 +276,6 @@ export type TicketStatus =
   | "qa"
   | "security"
   | "done"
-  | "release"
   | "blocked";
 export type TicketPriority = "low" | "medium" | "high" | "urgent";
 

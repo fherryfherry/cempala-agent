@@ -6,7 +6,7 @@ from app.agents.prompts import (
     WorkspaceTicketSummary,
     build_prompt,
 )
-from app.core.report import AGENT_DECLARABLE_STATUSES
+from app.core.state_machine import STATUSES
 
 ROSTER = [
     AgentInfo(name="pm-1", role="pm"),
@@ -127,12 +127,11 @@ def test_custom_system_prompt_replaces_role_block_not_base_or_contract():
     assert "status: <salah satu dari:" in prompt
 
 
-def test_map_contract_status_list_is_unrestricted_but_excludes_release():
-    expected = ", ".join(sorted(AGENT_DECLARABLE_STATUSES))
+def test_map_contract_status_list_is_unrestricted():
+    expected = ", ".join(sorted(STATUSES))
     for role in ("pm", "lead", "engineer", "designer", "qa", "pentester"):
         prompt = build_prompt(_agent(f"{role}-x", role), "/repo", ROSTER, TICKET)
         assert f"status: <salah satu dari: {expected}>" in prompt
-        assert "release" not in expected
 
 
 def test_tickets_instruction_present_for_pm_qa_pentester():

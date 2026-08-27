@@ -465,7 +465,7 @@ print(json.dumps({"type": "assistant_text", "text": text}))
     _set_status(client, ticket["key"], "in_progress")
 
     # Now PM mentions role "lead" -- lead-b (0 runs on ticket) should be preferred over
-    # lead-a (1 prior run), both idle. Status "review" (not "done"/"release"): a
+    # lead-a (1 prior run), both idle. Status "review" (not "done"): a
     # completion-status report's mentions are informational only and don't schedule
     # a follow-up (see test_mention_on_completed_ticket_does_not_schedule_followup_run).
     script = _write_python_binary(tmp_path / "opencode", _script("review", "lead"))
@@ -676,7 +676,7 @@ def test_blocked_report_with_mention_still_schedules_handoff(client, tmp_path, m
     _set_status(client, ticket["key"], "in_progress")
 
     # eng reports itself stuck ("blocked") but mentions lead-1 to ask for a decision —
-    # unlike "done"/"release", "blocked" + a mention is real forward momentum and must
+    # unlike "done", "blocked" + a mention is real forward momentum and must
     # still schedule the follow-up run.
     script = _write_python_binary(
         tmp_path / "opencode",

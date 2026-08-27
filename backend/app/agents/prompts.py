@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.core.report import AGENT_DECLARABLE_STATUSES, ROLES_ALLOWED_TICKETS
+from app.core.report import ROLES_ALLOWED_TICKETS
+from app.core.state_machine import STATUSES
 
 ROLE_LABELS: dict[str, str] = {
     "pm": "Project Manager",
@@ -441,7 +442,7 @@ def _map_contract_block(
     existing_epics: list[str] | None = None,
     existing_sprints: list[str] | None = None,
 ) -> str:
-    allowed_statuses = ", ".join(sorted(AGENT_DECLARABLE_STATUSES))
+    allowed_statuses = ", ".join(sorted(STATUSES))
     mention_names = ", ".join(m.name for m in team_roster)
     unit_label = _UNIT_LABELS.get(time_unit, time_unit)
     allowed_sprint_roles = sprint_creator_roles or {"pm"}

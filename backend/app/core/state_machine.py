@@ -7,9 +7,8 @@ layer (app/api/tickets.py) is responsible for turning a `False` result into a 42
 Any known role (or the owner) may move a ticket between any two distinct known
 statuses — the from/to matrix that used to restrict this (e.g. only Lead could do
 review -> qa) was removed by owner request: it kept producing false blocks on the
-kanban board for perfectly reasonable manual moves. What a role may *declare* in
-its own ```map block is a separate, narrower gate (report.py's `status == "release"`
-check) — this function only governs "is this move structurally legal at all".
+kanban board for perfectly reasonable manual moves. This function only governs
+"is this move structurally legal at all".
 """
 
 STATUSES = {
@@ -20,7 +19,6 @@ STATUSES = {
     "qa",
     "security",
     "done",
-    "release",
     "blocked",
 }
 

@@ -243,7 +243,6 @@ const STATUS_LEGEND: { status: TicketStatus; label: string }[] = [
   { status: "qa", label: "QA" },
   { status: "security", label: "Security" },
   { status: "done", label: "Done" },
-  { status: "release", label: "Release" },
   { status: "blocked", label: "Blocked" },
 ];
 
@@ -815,7 +814,7 @@ function CompleteSprintButton({ onComplete, completing }: { onComplete: () => vo
         <DialogHeader>
           <DialogTitle>Selesaikan sprint ini?</DialogTitle>
           <DialogDescription>
-            Tiket yang belum berstatus done/release akan otomatis dipindahkan ke sprint aktif
+            Tiket yang belum berstatus done akan otomatis dipindahkan ke sprint aktif
             lain, atau sprint planned dengan index terkecil, atau ke backlog kalau tidak ada
             sprint lain. Setiap tiket yang dipindah akan mendapat catatan sistem.
           </DialogDescription>

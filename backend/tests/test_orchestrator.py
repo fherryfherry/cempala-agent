@@ -754,8 +754,7 @@ def test_updates_illegal_status_change_skipped_with_note(client, tmp_path, monke
     target = _make_ticket(client, ws_id, "target")
     # Any role may now move a ticket between any two distinct known statuses (owner
     # request: the old per-role transition matrix kept producing false blocks) — the
-    # only things still illegal here are an unknown status string and `release`
-    # (see test_updates_cannot_set_release_on_other_ticket below).
+    # only thing still illegal here is an unknown status string.
     assert target["status"] == "backlog"
 
     entries = f"  - ticket: {target['key']}\n    status: not_a_real_status\n"
@@ -775,35 +774,6 @@ def test_updates_illegal_status_change_skipped_with_note(client, tmp_path, monke
     source_detail = client.get(f"/api/tickets/{source['key']}").json()
     system_bodies = [c["body"] for c in source_detail["comments"] if c["is_system"]]
     assert any("Beberapa updates diabaikan" in b for b in system_bodies)
-
-
-def test_updates_cannot_set_release_on_other_ticket(client, tmp_path, monkeypatch):
-    # `release` is owner/PM-manual-only (docs/03-agent-design.md §3) — QA filing
-    # updates: on another ticket must not be able to slip it past that gate.
-    ws_id = _make_workspace(client, tmp_path)
-    qa_id = _make_agent(client, ws_id, "qa", "qa-1")
-    source = _make_ticket(client, ws_id, "source")
-    target = _make_ticket(client, ws_id, "target")
-    _set_status(client, target["key"], "todo")
-    _set_status(client, target["key"], "in_progress")
-    _set_status(client, target["key"], "review")
-    _set_status(client, target["key"], "qa")
-    _set_status(client, target["key"], "security")
-    _set_status(client, target["key"], "done")
-
-    entries = f"  - ticket: {target['key']}\n    status: release\n"
-    script = _write_python_binary(tmp_path / "opencode", _updates_script(entries))
-    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
-
-    resp = client.post(f"/api/tickets/{source['key']}/run", json={"agent_id": qa_id})
-    run = resp.json()
-    final = _wait_for_run(client, run["id"])
-    assert final["status"] == "done", final
-    assert final["report"]["updates"][0]["applied"] == []
-    assert final["report"]["updates"][0]["skipped"]
-
-    target_detail = client.get(f"/api/tickets/{target['key']}").json()
-    assert target_detail["status"] == "done"
 
 
 def test_updates_unknown_or_wrong_workspace_ticket_skipped_cleanly(client, tmp_path, monkeypatch):

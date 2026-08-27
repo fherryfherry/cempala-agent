@@ -15,14 +15,6 @@ import yaml
 
 from app.core.state_machine import ALL_ROLES, STATUSES
 
-# Every status a role may declare in its own ```map block, except `release`: that
-# one stays a manual owner/PM action (Board/Timeline), never something an agent
-# reports for itself — see the dedicated check in parse_report below. Everything
-# else is unrestricted by owner request (docs/03-agent-design.md §3/§5 update):
-# roles used to be limited to a handful of statuses each, which kept producing
-# false "cannot transition" blocks for reasonable manual moves.
-AGENT_DECLARABLE_STATUSES = STATUSES - {"release"}
-
 # Roles allowed to include tickets[] in their block. docs/03-agent-design.md §3.
 ROLES_ALLOWED_TICKETS = frozenset({"pm", "qa", "pentester", "business_analyst"})
 
@@ -227,11 +219,6 @@ def parse_report(
 
         if actor_role not in ALL_ROLES:
             return _invalid(f"unknown role '{actor_role}'")
-        if status not in AGENT_DECLARABLE_STATUSES:
-            return _invalid(
-                f"status '{status}' can only be set manually by the owner, not declared in a "
-                "```map block"
-            )
 
     summary = data.get("summary")
     if not isinstance(summary, str) or not summary.strip():

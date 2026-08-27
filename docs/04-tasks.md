@@ -411,7 +411,7 @@ ter-render jadi link.
 When a sprint transitions to `active` (`PATCH /sprints/{id}`), the backend schedules a
 run (`trigger="manual"`) for every ticket in that sprint that still needs work
 (status in backlog/todo/in_progress/review/qa/security/blocked) and has an assignee
-(enabled agent). Tickets already `done`/`release` are skipped — if every ticket is
+(enabled agent). Tickets already `done` are skipped — if every ticket is
 done, nothing is triggered. Tickets without an assignee are skipped (no agent to run
 them). Guardrail trips (e.g. `max_concurrent_runs`) are swallowed per ticket —
 `schedule()` already wrote its own system comment naming the guardrail, and the

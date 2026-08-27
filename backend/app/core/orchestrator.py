@@ -52,7 +52,6 @@ from app.core.guardrails import (
 from app.core.loop_detector import detect_loop
 from app.core import git as git_module
 from app.core.report import (
-    AGENT_DECLARABLE_STATUSES,
     ROLES_ALLOWED_TICKETS,
     ArtifactDraft,
     ArtifactUpdateDraft,
@@ -89,7 +88,7 @@ _ROLES = ALL_ROLES
 # Statuses that don't expect a follow-up handoff (docs/03-agent-design.md §5/§6): the
 # flow always routes review/qa/security to a specific next reviewer, so only done/blocked
 # count as "final" for the purposes of "no valid mention -> block so it doesn't hang".
-_FINAL_STATUSES = frozenset({"done", "release", "blocked"})
+_FINAL_STATUSES = frozenset({"done", "blocked"})
 
 # MAP-050 anti-spam (auto_check.py): an auto-nudged agent with nothing new to report
 # still has to fill the ```map contract's mandatory `summary`, which converges on
@@ -104,7 +103,7 @@ _AUTO_CHECK_DUP_RATIO = 0.8
 # two agents can keep re-confirming an already-"done" ticket to each other forever (each
 # mention scheduling a fresh run with an identical closing report) until the loop
 # detector eventually catches it — a real incident, not a hypothetical.
-_COMPLETION_STATUSES = frozenset({"done", "release"})
+_COMPLETION_STATUSES = frozenset({"done"})
 
 _TAIL_CHARS = 2000
 
@@ -2346,11 +2345,6 @@ async def _finish_routine_run(
         if draft.status is not None:
             if draft.status not in STATUSES:
                 skipped.append(f"status '{draft.status}' tidak dikenal")
-            elif draft.status not in AGENT_DECLARABLE_STATUSES:
-                skipped.append(
-                    f"status '{draft.status}' hanya bisa diset manual oleh owner, bukan lewat "
-                    "laporan agent"
-                )
             else:
                 allowed, reason = can_transition(target.status, draft.status, agent.role)
                 if not allowed:
@@ -2695,11 +2689,6 @@ async def _finish_chat_run(
         if draft.status is not None:
             if draft.status not in STATUSES:
                 skipped.append(f"status '{draft.status}' tidak dikenal")
-            elif draft.status not in AGENT_DECLARABLE_STATUSES:
-                skipped.append(
-                    f"status '{draft.status}' hanya bisa diset manual oleh owner, bukan lewat "
-                    "laporan agent"
-                )
             else:
                 allowed, reason = can_transition(target.status, draft.status, agent.role)
                 if not allowed:
@@ -3168,14 +3157,6 @@ async def _finish_run(
         if draft.status is not None:
             if draft.status not in STATUSES:
                 skipped.append(f"status '{draft.status}' tidak dikenal")
-            elif draft.status not in AGENT_DECLARABLE_STATUSES:
-                # Same rule as an agent's own top-level status (report.py): `release`
-                # is never something an agent report sets, whether on its own ticket
-                # or, via updates:, on someone else's.
-                skipped.append(
-                    f"status '{draft.status}' hanya bisa diset manual oleh owner, bukan lewat "
-                    "laporan agent"
-                )
             else:
                 allowed, reason = can_transition(target.status, draft.status, agent.role)
                 if not allowed:

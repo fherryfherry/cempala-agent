@@ -282,9 +282,6 @@ def test_complete_sprint_terminal_tickets_untouched(client, tmp_path):
     ws_id = _make_workspace(client, tmp_path)
     sprint = client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "Sprint A"}).json()
     ticket = _make_ticket(client, ws_id, sprint_id=sprint["id"], status="done")
-    resp = client.patch(f"/api/tickets/{ticket['key']}", json={"status": "release"})
-    assert resp.status_code == 200
-    ticket = resp.json()
 
     client.patch(f"/api/sprints/{sprint['id']}", json={"status": "completed"})
 

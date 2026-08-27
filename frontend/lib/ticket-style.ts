@@ -51,7 +51,6 @@ export const STATUS_BLOCK_COLOR: Record<TicketStatus, string> = {
   qa: "bg-amber-500",
   security: "bg-rose-600",
   done: "bg-emerald-600",
-  release: "bg-teal-600",
   blocked: "bg-red-600",
 };
 
@@ -65,6 +64,5 @@ export const STATUS_HEX: Record<TicketStatus, string> = {
   qa: "#f59e0b", // amber-500
   security: "#e11d48", // rose-600
   done: "#059669", // emerald-600
-  release: "#0d9488", // teal-600
   blocked: "#dc2626", // red-600
 };

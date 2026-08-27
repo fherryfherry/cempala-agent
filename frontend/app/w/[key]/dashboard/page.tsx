@@ -28,7 +28,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-const ACTIVE_STATUSES = ["todo", "in_progress", "review", "qa", "security", "release"];
+const ACTIVE_STATUSES = ["todo", "in_progress", "review", "qa", "security"];
 const RUN_STATUS_VARIANT: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
   queued: "outline",
   running: "default",

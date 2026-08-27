@@ -29,7 +29,6 @@ const STATUS_ORDER: TicketStatus[] = [
   "qa",
   "security",
   "done",
-  "release",
   "blocked",
 ];
 

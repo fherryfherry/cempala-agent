@@ -70,21 +70,20 @@ summary: |
 
 | Role | Allowed `status` | `tickets[]` | Touches code |
 |---|---|---|---|
-| PM | any status except `release` | **yes** (must be approved by owner in chat first; see §4) | no |
-| Business Analyst | any status except `release` | **yes** (backlog from business need) | no |
-| Lead Engineer | any status except `release` | no | no |
-| System Architect | any status except `release` | no | no |
-| Engineer | any status except `release` | no | yes |
-| Designer | any status except `release` | no | yes |
-| QA | any status except `release` | **yes** (bugs) | test files only |
-| Pentester | any status except `release` | **yes** (findings) | no |
+| PM | any status | **yes** (must be approved by owner in chat first; see §4) | no |
+| Business Analyst | any status | **yes** (backlog from business need) | no |
+| Lead Engineer | any status | no | no |
+| System Architect | any status | no | no |
+| Engineer | any status | no | yes |
+| Designer | any status | no | yes |
+| QA | any status | **yes** (bugs) | test files only |
+| Pentester | any status | **yes** (findings) | no |
 
 **Update:** at the owner's request, the old per-role status matrix (e.g. Engineer could only
 use `review`/`blocked`, Lead could only use `qa`/`in_progress`/`blocked`) has been removed —
 that matrix often blocked legitimate status moves (e.g. a Lead moving a `done` ticket back to
 `qa`). Each role is now free to declare any status in the ```map block and may move from any
-status to any other status (§5) — the only exception is `release`, which remains a manual owner
-action (see below).
+status to any other status (§5).
 
 The "touches code" column is a prompt instruction, not technical enforcement — opencode runs
 with `--auto` and can write anything ([02-tsd.md](02-tsd.md) §7). The `tickets[]` column is
@@ -100,11 +99,6 @@ paths, function/variable names, code snippets, or other ticket IDs. Technical de
 touched, reproduction steps, etc.) go into the `description`. This is a prompt instruction
 (the ```map contract — see the example format in §2), not parser enforcement, same as the
 "touches code" column above.
-
-The `release` status (kanban column after `done`, marking a ticket as released) is
-deliberately **not** in the list of statuses any role may declare above — it is not something
-an agent decides via the ```map block. Only the owner (and PM through its wildcard
-transition, §5) may move a ticket from `done` to `release`, via a manual action in the Board.
 
 PM may (optionally) include `sprint`/`duration` per `tickets[]` item, and a top-level
 `sprints:` block (name, focus/`goal`, `duration`) to declare or update sprints — see §4.
@@ -428,7 +422,7 @@ FINDINGS                 → status: in_progress, mention the engineer, send one
 ## 5. State machine & transition permissions
 
 ```
-backlog → todo → in_progress → review → qa → security → done → release
+backlog → todo → in_progress → review → qa → security → done
 ```
 
 **Update:** at the owner's request, transitions between statuses are no longer restricted per
@@ -440,7 +434,6 @@ other status**, including drag & drop of the kanban card. The only remaining res
 |---|---|
 | Unknown status | rejected (from an agent or from a manual PATCH) |
 | Same status (no-op) | rejected — not a real transition |
-| `done` → `release` | structurally allowed for anyone, but **`release` cannot be declared via the ```map block** (§3) — only a manual owner action (or PM via its allowed status) in the Board/Timeline |
 | `blocked` → anything | allowed for anyone (owner/agent alike), but see the note below about when this realistically happens automatically |
 
 `blocked` is by design the point where the autonomous flow usually stops and asks for your
@@ -461,7 +454,7 @@ details display it directly, without having to dig through comments.
   (and the ticket is not in a final status), `ticket.assignee_id` follows the handoff:
   the first valid target becomes the assignee. A fan-out (several mentions in one report)
   still schedules every target, but the ticket keeps exactly one assignee — the first one.
-  Informational mentions on a final status (`done`/`release`) and `@agent` in comment text
+  Informational mentions on a final status (`done`) and `@agent` in comment text
   do NOT change the assignee; only an actionable ```map `mention:` handoff does.
 - `mention` must contain an **agent name**, not a role — the name list is already in the
   prompt. If the model still writes a role (`qa`), the orchestrator picks the agent `idle`

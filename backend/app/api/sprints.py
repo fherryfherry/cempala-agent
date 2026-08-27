@@ -14,7 +14,7 @@ from app.schemas.sprint import SprintCreate, SprintOut, SprintUpdate
 workspace_sprints_router = APIRouter(prefix="/workspaces/{workspace_id}/sprints", tags=["sprints"])
 sprints_router = APIRouter(prefix="/sprints", tags=["sprints"])
 
-_TERMINAL_TICKET_STATUSES = {"done", "release"}
+_TERMINAL_TICKET_STATUSES = {"done"}
 
 # Statuses that still need work — a ticket in any of these gets a run triggered
 # when its sprint is activated.
@@ -124,7 +124,7 @@ async def _kick_off_sprint_tickets(session: AsyncSession, sprint: Sprint) -> int
     """Trigger a run for every ticket in the sprint that still needs work and has
     an assignee (owner request: activating a sprint starts the team on its tickets).
 
-    Tickets already `done`/`release` are skipped — if every ticket is done, nothing
+    Tickets already `done` are skipped — if every ticket is done, nothing
     is triggered. Tickets without an assignee can't run (no agent to execute them),
     so they're skipped too. Guardrail trips (e.g. `max_concurrent_runs`) are
     swallowed: `schedule()` already wrote its own system comment naming the
