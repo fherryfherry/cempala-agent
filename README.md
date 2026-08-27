@@ -67,37 +67,72 @@ that tailnet — the app itself is never rebound to `0.0.0.0` and never touches 
 
 ## Prerequisites
 
+CEMPALA itself (backend + `make dev`) is written and tested for **macOS/Linux** — the Makefile
+uses `.venv/bin/...` shell paths. **On Windows, use WSL** for the backend/dev-runner steps; native
+Windows PowerShell/CMD is only relevant below for installing the agent CLIs, which mostly ship
+native Windows installers.
+
 Install these before touching the repo:
 
 - **Git** — to clone the repo.
+  - Official: [git-scm.com/downloads](https://git-scm.com/downloads) (has native installers for
+    macOS, Linux, and Windows).
+  - macOS: `brew install git`. Linux: `apt install git` / `dnf install git`. Windows: use the
+    official installer above, or inside WSL: `sudo apt install git`.
 - **Python 3.11+** (3.12 recommended — that's what the setup command below pins). Check with
-  `python3 --version`. Get it from [python.org](https://www.python.org/downloads/) or your OS
-  package manager (`brew install python@3.12`, `apt install python3.12`, etc.).
+  `python3 --version`.
+  - Official: [python.org/downloads](https://www.python.org/downloads/).
+  - macOS: `brew install python@3.12`. Linux: `apt install python3.12` (or your distro's package
+    manager). Windows: use python.org's installer, or (recommended) install inside WSL the same
+    way as Linux.
 - **[`uv`](https://docs.astral.sh/uv/getting-started/installation/)** (recommended) — a fast
-  Python package/venv manager. Install with `curl -LsSf https://astral.sh/uv/install.sh | sh` (or
-  `pipx install uv`). Not strictly required: [Setup from scratch](#setup-from-scratch) below gives
-  a plain `venv`/`pip` fallback if you'd rather not install it.
+  Python package/venv manager. Not strictly required: [Setup from scratch](#setup-from-scratch)
+  below gives a plain `venv`/`pip` fallback if you'd rather not install it.
+  - Official install script — macOS/Linux/WSL: `curl -LsSf https://astral.sh/uv/install.sh | sh`.
+    Windows PowerShell: `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`.
+  - macOS: `brew install uv`.
 - **Node.js** (v20 or newer — required by Next.js 16) and **npm**. Check with `node --version`.
-  Get it from [nodejs.org](https://nodejs.org) or a version manager like `nvm`.
-- **`make`** — used to run the dev/migrate/test commands. Preinstalled on macOS and most Linux
-  distros; on Windows use WSL.
+  - Official: [nodejs.org](https://nodejs.org) (LTS installer, has macOS/Linux/Windows builds).
+  - macOS: `brew install node`. Linux: use [nvm](https://github.com/nvm-sh/nvm) →
+    `nvm install --lts` (distro repos often ship an outdated Node). Windows: the official installer
+    above, or `winget install OpenJS.NodeJS.LTS`, or inside WSL via `nvm` as on Linux.
+- **`make`** — used to run the dev/migrate/test commands.
+  - macOS: preinstalled (or `xcode-select --install` if missing); brew alternative:
+    `brew install make`.
+  - Linux: preinstalled on most distros; otherwise `apt install make` / `dnf install make`.
+  - Windows: not natively available — **use WSL** (`sudo apt install make` inside it), which is
+    also required for the Makefile's shell paths to work at all.
 
 Then, at least one agent CLI. Each agent picks one CLI tool (`tool_kind`) to run its work through;
 the backend only shells out to whichever of these binaries an agent is actually configured with —
 you only need to install and authenticate the ones you plan to use. LLM credentials are never
 stored by this portal; each CLI manages its own auth.
 
-- [`opencode`](https://opencode.ai) — `opencode auth login`. Also used for the model list
-  (`GET /api/models`) regardless of which tool an agent uses.
-- [`claude`](https://claude.com/product/claude-code) (Claude Code) — `claude auth login` (or
-  `claude setup-token`).
-- [`codex`](https://github.com/openai/codex) (OpenAI Codex CLI) — `codex login`.
-- `agy` (Google Antigravity CLI) — see its own setup docs for auth.
+- [`opencode`](https://opencode.ai) — also used for the model list (`GET /api/models`) regardless
+  of which tool an agent uses.
+  - Official install script — macOS/Linux: `curl -fsSL https://opencode.ai/install | bash`.
+    Windows: see [opencode.ai/docs](https://opencode.ai/docs) for the native Windows method, or
+    run the Linux script inside WSL.
+  - macOS/brew: `brew install sst/tap/opencode`.
+  - Authenticate: `opencode auth login`.
+- [`claude`](https://claude.com/product/claude-code) (Claude Code):
+  - Official install script — macOS/Linux/WSL: `curl -fsSL https://claude.ai/install.sh | bash`.
+    Windows PowerShell: `irm https://claude.ai/install.ps1 | iex`. Windows CMD:
+    `curl -fsSL https://claude.ai/install.cmd -o install.cmd && install.cmd && del install.cmd`.
+  - macOS/brew: `brew install --cask claude-code`. Windows: `winget install Anthropic.ClaudeCode`.
+  - Authenticate: run `claude` and follow the browser login prompt.
+- [`codex`](https://github.com/openai/codex) (OpenAI Codex CLI):
+  - Official install script — macOS/Linux: `curl -fsSL https://chatgpt.com/codex/install.sh | sh`.
+    Windows PowerShell: `powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"`.
+  - Cross-platform via npm: `npm install -g @openai/codex`. macOS/brew: `brew install --cask codex`.
+  - Authenticate: run `codex` and choose "Sign in with ChatGPT" (or configure an API key).
+- `agy` (Google Antigravity CLI) — see [antigravity.google](https://antigravity.google) / Google's
+  own setup docs for install and auth on each OS; no official brew formula at time of writing.
 
 ## Setup from scratch
 
 1. Make sure Git, Python 3.11+, Node.js 20+, and `make` are installed (see
-   [Prerequisites](#prerequisites)).
+   [Prerequisites](#prerequisites)). **On Windows, do the rest of these steps inside WSL.**
 2. Clone the repo and `cd` into it: `git clone <this-repo-url> && cd cempala`.
 3. Install & authenticate at least one agent CLI (see [Prerequisites](#prerequisites)) — `opencode`
    is the simplest to start with: `opencode auth login`.
