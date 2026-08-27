@@ -2,6 +2,8 @@
 name = "map-backend"
 version = "0.1.0"
 description = "Multi-Agent Portal backend (FastAPI). Never talks to an LLM directly — shells out to the opencode binary."
+license = { text = "MIT" }
+authors = [{ name = "Ferry", email = "ferdevelop15@gmail.com" }]
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",

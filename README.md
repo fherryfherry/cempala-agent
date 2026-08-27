@@ -9,6 +9,9 @@
 
 # CEMPALA
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+
 A Jira-like portal for running a "software team" made entirely of AI agents (PM, Lead Engineer,
 Engineer, Designer, QA, Pentester). You create tickets, the agent team works them autonomously
 inside a local repo folder, and you watch everything happen in real time through an activity feed
@@ -163,3 +166,13 @@ frontend/   Next.js App Router
 storage/    Attachments (outside the agent repo_path, not source code)
 docs/       Specification — read this first
 ```
+
+## Contributing
+
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) first — it
+covers the dev setup, testing conventions, and the project's security constraints.
+By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## License
+
+[MIT](LICENSE) © Ferry
