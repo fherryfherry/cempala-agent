@@ -67,10 +67,25 @@ that tailnet — the app itself is never rebound to `0.0.0.0` and never touches 
 
 ## Prerequisites
 
-Each agent picks one CLI tool (`tool_kind`) to run its work through. The backend only shells out
-to whichever of these binaries an agent is actually configured with — you only need to install and
-authenticate the ones you plan to use. LLM credentials are never stored by this portal; each CLI
-manages its own auth.
+Install these before touching the repo:
+
+- **Git** — to clone the repo.
+- **Python 3.11+** (3.12 recommended — that's what the setup command below pins). Check with
+  `python3 --version`. Get it from [python.org](https://www.python.org/downloads/) or your OS
+  package manager (`brew install python@3.12`, `apt install python3.12`, etc.).
+- **[`uv`](https://docs.astral.sh/uv/getting-started/installation/)** (recommended) — a fast
+  Python package/venv manager. Install with `curl -LsSf https://astral.sh/uv/install.sh | sh` (or
+  `pipx install uv`). Not strictly required: [Setup from scratch](#setup-from-scratch) below gives
+  a plain `venv`/`pip` fallback if you'd rather not install it.
+- **Node.js** (v20 or newer — required by Next.js 16) and **npm**. Check with `node --version`.
+  Get it from [nodejs.org](https://nodejs.org) or a version manager like `nvm`.
+- **`make`** — used to run the dev/migrate/test commands. Preinstalled on macOS and most Linux
+  distros; on Windows use WSL.
+
+Then, at least one agent CLI. Each agent picks one CLI tool (`tool_kind`) to run its work through;
+the backend only shells out to whichever of these binaries an agent is actually configured with —
+you only need to install and authenticate the ones you plan to use. LLM credentials are never
+stored by this portal; each CLI manages its own auth.
 
 - [`opencode`](https://opencode.ai) — `opencode auth login`. Also used for the model list
   (`GET /api/models`) regardless of which tool an agent uses.
@@ -81,13 +96,21 @@ manages its own auth.
 
 ## Setup from scratch
 
-1. Install & authenticate at least one agent CLI (see [Prerequisites](#prerequisites)) — `opencode`
+1. Make sure Git, Python 3.11+, Node.js 20+, and `make` are installed (see
+   [Prerequisites](#prerequisites)).
+2. Clone the repo and `cd` into it: `git clone <this-repo-url> && cd cempala`.
+3. Install & authenticate at least one agent CLI (see [Prerequisites](#prerequisites)) — `opencode`
    is the simplest to start with: `opencode auth login`.
-2. Set up the backend: `cd backend && uv venv --python 3.12 .venv && uv pip install -e ".[dev]"`
-   (without `uv`: `python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"`).
-3. Set up the frontend: `cd frontend && npm install`.
-4. `make migrate` — apply database migrations.
-5. `make dev` — run backend (`:8000`) and frontend (`:3000`) together; `Ctrl+C` stops both.
+4. Set up the backend from `backend/`:
+   - With `uv` (recommended): `uv venv --python 3.12 .venv && uv pip install -e ".[dev]"`.
+   - Without `uv`: `python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"`.
+5. Set up the frontend: `cd frontend && npm install`.
+6. Back at the repo root, run `make migrate` — applies database migrations (creates
+   `backend/map.db`).
+7. `make dev` — runs backend (`:8000`) and frontend (`:3000`) together; `Ctrl+C` stops both.
+8. Open `http://localhost:3000` — the root page shows backend status. Create a workspace pointing
+   at a real repo folder, add an agent (pick whichever CLI you authenticated), and create your
+   first ticket.
 
 ## Running
 
