@@ -23,12 +23,10 @@ jobs:
         working-directory: backend
         run: uv run pytest -q --cov-report=term-missing
       - name: Upload coverage to Coveralls
-        env:
-          COVERALLS_REPO_TOKEN: ${{ secrets.COVERALLS_REPO_TOKEN }}
-          COVERALLS_SERVICE_NAME: github
-          COVERALLS_GIT_BRANCH: ${{ github.head_ref || github.ref_name }}
-          COVERALLS_GIT_COMMIT: ${{ github.sha }}
-        run: coveralls --basedir backend --data-file backend/.coverage --output backend/coveralls.json
+        uses: coverallsapp/github-action@v2
+        with:
+          file: backend/coverage.xml
+          base-path: backend
 
   frontend:
     name: Frontend (lint)
