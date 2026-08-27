@@ -136,20 +136,20 @@ stored by this portal; each CLI manages its own auth.
 2. Clone the repo and `cd` into it: `git clone <this-repo-url> && cd cempala`.
 3. Install & authenticate at least one agent CLI (see [Prerequisites](#prerequisites)) — `opencode`
    is the simplest to start with: `opencode auth login`.
-4. Set up the backend from `backend/`:
-   - With `uv` (recommended): `uv venv --python 3.12 .venv && uv pip install -e ".[dev]"`.
-   - Without `uv`: `python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"`.
-5. Set up the frontend: `cd frontend && npm install`.
-6. Back at the repo root, run `make migrate` — applies database migrations (creates
-   `backend/map.db`).
-7. `make dev` — runs backend (`:8000`) and frontend (`:3000`) together; `Ctrl+C` stops both.
-8. Open `http://localhost:3000` — the root page shows backend status. Create a workspace pointing
+4. Run `./run.sh` — sets up the backend venv and frontend `node_modules` on first run (skipped on
+   later runs), applies DB migrations, then starts backend (`:8000`) and frontend (`:3000`)
+   together. `Ctrl+C` stops both. (Equivalent manual steps, if you'd rather not use the script:
+   backend `uv venv --python 3.12 .venv && uv pip install -e ".[dev]"` — or without `uv`,
+   `python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"` — then frontend `npm install`,
+   then `make migrate && make dev`.)
+5. Open `http://localhost:3000` — the root page shows backend status. Create a workspace pointing
    at a real repo folder, add an agent (pick whichever CLI you authenticated), and create your
    first ticket.
 
 ## Running
 
 ```
+./run.sh       # first-time setup (if needed) + migrate + backend & frontend together
 make dev       # backend (uvicorn :8000) + frontend (next dev :3000)
 make migrate   # alembic upgrade head
 make test      # pytest
