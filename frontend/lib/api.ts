@@ -346,21 +346,6 @@ export function getDefaultModel(): Promise<{ model: string | null }> {
   return apiFetch<{ model: string | null }>("/models/default");
 }
 
-export interface OrchestratorModel {
-  model: string | null;
-}
-
-export function getOrchestratorModel(): Promise<OrchestratorModel> {
-  return apiFetch<OrchestratorModel>("/settings/orchestrator-model");
-}
-
-export function setOrchestratorModel(model: string | null): Promise<OrchestratorModel> {
-  return apiFetch<OrchestratorModel>("/settings/orchestrator-model", {
-    method: "PUT",
-    body: JSON.stringify({ model }),
-  });
-}
-
 export type TicketStatus =
   | "backlog"
   | "todo"

@@ -6,14 +6,9 @@ import pytest
 import yaml
 
 from app.core.settings_store import (
-    GlobalSettings,
     SettingsLoadError,
     WorkspaceSettings,
-    global_settings_lock,
-    global_settings_path,
-    load_global_settings,
     load_workspace_settings,
-    save_global_settings,
     save_workspace_settings,
     workspace_settings_lock,
     workspace_settings_path,
@@ -94,21 +89,7 @@ def test_atomic_write_leaves_no_temp_files(tmp_path):
     assert names == {"settings.yaml"}
 
 
-def test_global_settings_round_trip(tmp_path, monkeypatch):
-    monkeypatch.setattr("app.core.settings_store.Path.home", lambda: tmp_path)
-    assert load_global_settings() == GlobalSettings()
-
-    asyncio.run(save_global_settings(GlobalSettings(orchestrator_model="anthropic/claude")))
-    assert global_settings_path() == tmp_path / ".cempala" / "settings.yaml"
-    assert load_global_settings().orchestrator_model == "anthropic/claude"
-
-
 def test_workspace_settings_lock_is_reused_for_same_path(tmp_path):
     a = workspace_settings_lock(str(tmp_path))
     b = workspace_settings_lock(str(tmp_path))
     assert a is b
-
-
-def test_global_settings_lock_is_a_singleton(monkeypatch, tmp_path):
-    monkeypatch.setattr("app.core.settings_store.Path.home", lambda: tmp_path)
-    assert global_settings_lock() is global_settings_lock()

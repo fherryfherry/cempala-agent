@@ -65,8 +65,7 @@ def _read_default_model() -> str | None:
     """The user's own `opencode` CLI default (the "model" key in their
     opencode.json), if any — read directly off disk since the backend runs as
     the same host user (ADR-010) and this is just a config-file read, no new
-    trust boundary. Never raises: missing file / bad JSON / missing key -> None,
-    same "unset" contract as `resolve_agent_model` upstream."""
+    trust boundary. Never raises: missing file / bad JSON / missing key -> None."""
     try:
         with open(_opencode_config_path()) as f:
             config = json.load(f)

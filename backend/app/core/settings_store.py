@@ -1,17 +1,15 @@
-"""Per-workspace and global settings, stored as YAML files under a `.cempala` folder
-(ADR-015) instead of the database.
+"""Per-workspace settings, stored as YAML files under a `.cempala` folder (ADR-015)
+instead of the database.
 
 Workspace settings live at `<repo_path>/.cempala/settings.yaml` — deliberately keyed
 off the workspace's *current* `repo_path`, not any database identity, so the file is
 portable: commit it to the project's own repo and every clone/install that points a
-workspace at that repo picks up the same settings. Global (portal-wide) settings live
-at `~/.cempala/settings.yaml`.
+workspace at that repo picks up the same settings.
 
-These files are owner-authored config, not agent output — unlike `core/report.py`'s
+This file is owner-authored config, not agent output — unlike `core/report.py`'s
 tolerant parsing of the agent-written ```map block, a malformed settings file raises
 `SettingsLoadError` instead of silently falling back to defaults (CLAUDE.md: no silent
-failure path). The one deliberate exception is `orchestrator._global_orchestrator_model`,
-which has always swallowed all errors and returned None by contract.
+failure path).
 """
 
 from __future__ import annotations
@@ -48,22 +46,12 @@ class WorkspaceSettings(BaseModel):
     model_config = {"extra": "ignore"}
 
 
-class GlobalSettings(BaseModel):
-    orchestrator_model: str | None = None
-
-    model_config = {"extra": "ignore"}
-
-
 def workspace_settings_path(repo_path: str) -> Path:
     repo_root = Path(repo_path).resolve()
     path = repo_root / _SETTINGS_DIRNAME / _SETTINGS_FILENAME
     if not path.parent.resolve().is_relative_to(repo_root):
         raise ValueError(f"resolved settings path escapes repo_path: {repo_path}")
     return path
-
-
-def global_settings_path() -> Path:
-    return Path.home() / _SETTINGS_DIRNAME / _SETTINGS_FILENAME
 
 
 def _load_yaml(path: Path, model: type[BaseModel]):
@@ -100,16 +88,8 @@ def load_workspace_settings(repo_path: str) -> WorkspaceSettings:
     return _load_yaml(workspace_settings_path(repo_path), WorkspaceSettings)
 
 
-def load_global_settings() -> GlobalSettings:
-    return _load_yaml(global_settings_path(), GlobalSettings)
-
-
 async def save_workspace_settings(repo_path: str, settings: WorkspaceSettings) -> None:
     await asyncio.to_thread(_atomic_write_yaml, workspace_settings_path(repo_path), settings.model_dump())
-
-
-async def save_global_settings(settings: GlobalSettings) -> None:
-    await asyncio.to_thread(_atomic_write_yaml, global_settings_path(), settings.model_dump())
 
 
 # In-process locks guarding a load-modify-save sequence against a concurrent request
@@ -133,7 +113,3 @@ def _lock_for(path: Path) -> asyncio.Lock:
 
 def workspace_settings_lock(repo_path: str) -> asyncio.Lock:
     return _lock_for(workspace_settings_path(repo_path))
-
-
-def global_settings_lock() -> asyncio.Lock:
-    return _lock_for(global_settings_path())

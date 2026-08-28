@@ -324,19 +324,6 @@ opencode. If the list is empty or the command fails → 503 with a message sugge
 `opencode auth login`. Ollama Cloud models appear here once the `ollama` provider is configured
 in opencode by the owner — the portal never stores any LLM API keys.
 
-### Global default model (AI Orchestrator)
-
-```
-GET /settings/orchestrator-model   → {"model": "provider/model" | null}
-PUT /settings/orchestrator-model   {"model": "provider/model" | null}   → same shape
-```
-
-Stores a portal-wide `orchestrator_model` preference in the `global_setting` key-value table
-(no credentials). Any agent run — ticket, routine, or chat (owner↔PM) — falls back to this when
-its `Agent.model` is unset (`Agent.model` is nullable); an agent's own model always wins. A run
-with neither model set is refused with a system comment/message naming the missing-model
-condition. Editable from the global `/settings` page.
-
 ### MCP ticket server (ADR-011)
 
 Each opencode run gets a local MCP server (`app/mcp_server.py`, stdio subprocess) via a

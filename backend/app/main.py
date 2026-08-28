@@ -19,7 +19,6 @@ from app.api.conversations import conversations_router, workspace_conversations_
 from app.api.errors import AppError, app_error_handler, validation_error_handler
 from app.api.events import router as events_router
 from app.api.fs import router as fs_router
-from app.api.global_settings import router as global_settings_router
 from app.api.models import router as models_router
 from app.api.routines import routines_router, workspace_routines_router
 from app.api.roles import router as roles_router
@@ -65,7 +64,6 @@ app.add_exception_handler(RequestValidationError, validation_error_handler)
 app.include_router(workspaces_router, prefix="/api")
 app.include_router(fs_router, prefix="/api")
 app.include_router(models_router, prefix="/api")
-app.include_router(global_settings_router, prefix="/api")
 app.include_router(roles_router, prefix="/api")
 app.include_router(workspace_agents_router, prefix="/api")
 app.include_router(agents_router, prefix="/api")

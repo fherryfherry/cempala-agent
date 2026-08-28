@@ -60,7 +60,7 @@ from app.core.report import (
     TicketDraft,
     parse_report,
 )
-from app.core.settings_store import WorkspaceSettings, load_global_settings, load_workspace_settings
+from app.core.settings_store import WorkspaceSettings, load_workspace_settings
 from app.core.state_machine import STATUSES, can_transition
 
 from app.db.models import (
@@ -598,48 +598,11 @@ async def _apply_artifact_updates(
     return report, skip_notes
 
 
-_ORCHESTRATOR_MODEL_CACHE_TTL = 5.0  # seconds
-_orch_model_cache: tuple[float, str | None] | None = None
-
-
-async def _global_orchestrator_model() -> str | None:
-    """Read the portal-wide default model. Short in-process cache; never raises.
-
-    Returns None when unset/errored — the caller surfaces the missing-model
-    condition (system comment/message), never an exception here. Deliberately
-    swallows `SettingsLoadError` too (a malformed `~/.cempala/settings.yaml` should
-    not crash every run) — this is a pre-existing, narrow exception to the
-    fail-loud-by-default policy the rest of ADR-015 follows.
-    """
-    global _orch_model_cache
-    now = _now().timestamp()
-    if _orch_model_cache is not None and now - _orch_model_cache[0] < _ORCHESTRATOR_MODEL_CACHE_TTL:
-        return _orch_model_cache[1]
-    model: str | None = None
-    try:
-        model = load_global_settings().orchestrator_model
-    except Exception:
-        model = None
-    _orch_model_cache = (now, model)
-    return model
-
-
 def _ws_settings(workspace: Workspace | None) -> WorkspaceSettings | None:
     """Load ADR-015 settings for `workspace`, or None if there's no workspace at all
     (mirrors the pre-existing `workspace.<field> if workspace else <fallback>`
     pattern every call site below used against the old DB columns)."""
     return load_workspace_settings(workspace.repo_path) if workspace is not None else None
-
-
-def resolve_agent_model(agent_model: str | None, global_model: str | None) -> str | None:
-    """Pick the model for a run: the agent's own wins; else the global default.
-
-    Pure function (no DB), so it's trivially unit-testable. Callers load the
-    global model via `_global_orchestrator_model` and pass it in.
-    """
-    if agent_model:
-        return agent_model
-    return global_model
 
 
 async def _role_map(session: AsyncSession) -> dict[str, Role]:
@@ -736,14 +699,11 @@ async def schedule(
         await session.commit()
         raise
 
-    global_model = await _global_orchestrator_model()
-    run_model = resolve_agent_model(agent.model, global_model)
-    if run_model is None:
+    if not agent.model:
         await _write_system_comment(
             session,
             ticket.id,
-            "Run dibatalkan: agent ini tidak punya model dan tidak ada default global. "
-            "Set model pada agent atau isi 'AI Orchestrator (default model)' di Settings.",
+            "Run dibatalkan: agent ini tidak punya model. Set model pada agent.",
             ticket_key=ticket.key,
             workspace_id=ticket.workspace_id,
         )
@@ -757,7 +717,7 @@ async def schedule(
         trigger=trigger,
         parent_run_id=parent_run_id,
         tool_kind=tool_kind_override or agent.tool_kind,
-        model=run_model,
+        model=agent.model,
     )
     session.add(run)
     await session.commit()
@@ -832,9 +792,7 @@ async def schedule_routine_run(
         await session.commit()
         raise
 
-    global_model = await _global_orchestrator_model()
-    run_model = resolve_agent_model(agent.model, global_model)
-    if run_model is None:
+    if not agent.model:
         routine.status = "idle"
         routine.last_run_at = _now()
         await session.commit()
@@ -847,7 +805,7 @@ async def schedule_routine_run(
         trigger="routine",
         routine_id=routine.id,
         tool_kind=agent.tool_kind,
-        model=run_model,
+        model=agent.model,
     )
     session.add(run)
     await session.commit()
@@ -922,14 +880,11 @@ async def schedule_chat(
         await session.commit()
         raise
 
-    global_model = await _global_orchestrator_model()
-    run_model = resolve_agent_model(agent.model, global_model)
-    if run_model is None:
+    if not agent.model:
         await _write_system_message(
             session,
             conversation,
-            "PM tidak bisa membalas: tidak ada model yang ditetapkan untuk PM dan "
-            "tidak ada 'AI Orchestrator (default model)' di Settings. Set model AI di Settings.",
+            "PM tidak bisa membalas: tidak ada model yang ditetapkan untuk PM. Set model pada agent.",
             run_id=None,
             workspace_id=conversation.workspace_id,
         )
@@ -944,7 +899,7 @@ async def schedule_chat(
         trigger="chat",
         parent_run_id=parent_run_id,
         tool_kind=tool_kind_override or agent.tool_kind,
-        model=run_model,
+        model=agent.model,
     )
     session.add(run)
     await session.commit()
@@ -1698,7 +1653,7 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
                 run_id=run.id,
                 workspace_id=workspace.id,
                 agent_id=agent.id,
-                agent_model=run.model or await _global_orchestrator_model(),
+                agent_model=run.model,
                 ticket_id=ticket.id if ticket else None,
                 repo_path=worktree_path,
                 prompt=prompt,

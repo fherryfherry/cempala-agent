@@ -24,7 +24,19 @@ from alembic import op
 import sqlalchemy as sa
 import yaml
 
-from app.core.settings_store import GlobalSettings, WorkspaceSettings, global_settings_path, workspace_settings_path
+from pathlib import Path
+
+from app.core.settings_store import WorkspaceSettings, workspace_settings_path
+
+_SETTINGS_DIRNAME = ".cempala"
+_SETTINGS_FILENAME = "settings.yaml"
+
+
+def _global_settings_path() -> Path:
+    """Inlined rather than imported from `app.core.settings_store`: that module no
+    longer defines global settings (the orchestrator_model default was removed), but
+    this migration must remain replayable against historical DB states."""
+    return Path.home() / _SETTINGS_DIRNAME / _SETTINGS_FILENAME
 
 # revision identifiers, used by Alembic.
 revision: str = 'd97ad763fc97'
@@ -76,8 +88,8 @@ def upgrade() -> None:
         ).mappings().first()
         model = _json_field(gs_row["value"]) if gs_row is not None else None
         _write_yaml(
-            global_settings_path(),
-            GlobalSettings(orchestrator_model=model if isinstance(model, str) else None).model_dump(),
+            _global_settings_path(),
+            {"orchestrator_model": model if isinstance(model, str) else None},
         )
     except Exception as exc:
         print(f"[migration d97ad763fc97] skipping global settings: {exc}", file=sys.stderr)
