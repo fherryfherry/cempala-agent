@@ -88,7 +88,7 @@ def env(monkeypatch):
 
 async def _make_run_async(maker) -> tuple[str, str]:
     async with maker() as session:
-        ws = Workspace(name="Acme", key="ACM", repo_path="/tmp/acme", guardrails={})
+        ws = Workspace(name="Acme", key="ACM", repo_path="/tmp/acme")
         session.add(ws)
         await session.flush()
         agent = Agent(workspace_id=ws.id, name="eng-1", role="engineer", model="x/y", tool_kind="opencode")

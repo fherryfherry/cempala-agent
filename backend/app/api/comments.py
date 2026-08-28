@@ -9,6 +9,7 @@ from app.api.errors import AppError
 from app.api.tickets import _get_ticket_or_404
 from app.core import orchestrator
 from app.core.guardrails import GuardrailBlocked
+from app.core.settings_store import SettingsLoadError
 from app.db import session as db_session
 from app.db.models import Agent, Comment, CommentMention
 from app.db.session import get_session
@@ -118,9 +119,10 @@ async def create_comment(key: str, body: CommentCreate, session: AsyncSession = 
                 agent=agent,
                 trigger="mention",
             )
-        except (GuardrailBlocked, RuntimeError):
+        except (GuardrailBlocked, RuntimeError, SettingsLoadError):
             # schedule() already recorded the reason (blocked ticket / paused
-            # workspace) if applicable; the comment itself still succeeds.
+            # workspace) if applicable; the comment itself still succeeds. A
+            # malformed .cempala/settings.yaml is treated the same way.
             pass
     await session.refresh(comment)
     return await _to_out(session, comment)

@@ -168,7 +168,7 @@ export function browseFs(path?: string): Promise<FsBrowseOut> {
   return apiFetch<FsBrowseOut>(`/fs/browse${qs}`);
 }
 
-export type ToolKind = "opencode" | "claude" | "agy" | "codex";
+export type ToolKind = "opencode" | "claude" | "agy" | "codex" | "cmd";
 export type TicketCategory = "feature" | "improvement" | "fix" | "security" | "performance";
 
 /** Display format for every agent name in the UI: "Budi (Engineer)". */

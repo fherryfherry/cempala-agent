@@ -205,6 +205,24 @@ storage/    Attachments (outside the agent repo_path, not source code)
 docs/       Specification — read this first
 ```
 
+## Settings storage — `.cempala/`
+
+Workspace settings (guardrails, workflow prompt, sprint-creator roles, time unit, timezone, main
+branch) are **not** stored in the database — they live in a `settings.yaml` file inside a
+`.cempala/` folder at the root of the workspace's own `repo_path`. This is deliberate: since the
+file lives inside your project's repo, committing it lets settings travel with the project across
+machines and teammates — clone the repo, point a workspace at it, and the same settings apply
+immediately, with no fresh install ever starting from scratch. See ADR-015 in
+[`docs/06-adr.md`](docs/06-adr.md) for the full rationale.
+
+If you want this portability, **commit `.cempala/` to your project's own git repo** — check that
+your project's own `.gitignore` doesn't already blanket-ignore dotfolders (some generic templates
+do), or `.cempala/` will get silently swallowed instead of tracked.
+
+The one global, portal-wide setting (the default orchestrator model) lives separately at
+`~/.cempala/settings.yaml` in your home directory — it's a per-machine default, not something tied
+to any one project's repo.
+
 ## Contributing
 
 Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) first — it

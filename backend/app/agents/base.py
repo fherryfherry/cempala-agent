@@ -58,10 +58,17 @@ def _tools() -> dict[str, type]:
     """Deferred import to dodge a circular import (each *_tool module imports base)."""
     from app.agents.agy_tool import AgyTool
     from app.agents.claude_tool import ClaudeTool
+    from app.agents.cmd_tool import CmdTool
     from app.agents.codex_tool import CodexTool
     from app.agents.opencode_tool import OpenCodeTool
 
-    return {"opencode": OpenCodeTool, "claude": ClaudeTool, "agy": AgyTool, "codex": CodexTool}
+    return {
+        "opencode": OpenCodeTool,
+        "claude": ClaudeTool,
+        "agy": AgyTool,
+        "codex": CodexTool,
+        "cmd": CmdTool,
+    }
 
 
 TOOLS: dict[str, type] = _tools()

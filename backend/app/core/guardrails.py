@@ -29,8 +29,9 @@ from app.schemas.workspace import DEFAULT_GUARDRAILS
 class GuardrailBlocked(Exception):
     """Raised by `check_guardrails()` when a schedule-time guardrail fires.
 
-    `guardrail` is the exact key from `workspace.guardrails` (e.g.
-    "max_cost_per_ticket") so callers/tests can assert on it without parsing prose.
+    `guardrail` is the exact key from the workspace's `guardrails` setting (ADR-015
+    `.cempala/settings.yaml`, e.g. "max_cost_per_ticket") so callers/tests can assert
+    on it without parsing prose.
     """
 
     def __init__(self, guardrail: str, message: str):
@@ -66,9 +67,10 @@ async def check_guardrails(
 
     `agent_role`/`sprint_creator_roles`: the ticket-not-in-active-sprint gate below
     exempts whichever roles the workspace already trusts to plan sprints (default
-    PM-only, `workspace.sprint_creator_roles`) — those roles must always be able to
-    respond (including to a brand-new backlog ticket) so they can actually do the
-    triage/handoff-into-a-sprint this gate is forcing everyone else to wait for.
+    PM-only, the `sprint_creator_roles` setting — ADR-015 `.cempala/settings.yaml`) —
+    those roles must always be able to respond (including to a brand-new backlog
+    ticket) so they can actually do the triage/handoff-into-a-sprint this gate is
+    forcing everyone else to wait for.
 
     `trigger`: `max_handoff_depth` bounds runaway agent-to-agent handoff chains
     (docs/03-agent-design.md §6) — it is not meant to cap how many times an owner

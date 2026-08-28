@@ -346,9 +346,9 @@ def parse_report(
 
     # `sprints:` is a top-level companion to `tickets[]` (docs/03-agent-design.md §4):
     # declares sprint focus/timeline alongside the breakdown. Which roles may declare it
-    # is a per-workspace setting (`workspace.sprint_creator_roles`, Settings page pill
-    # picker) — default PM-only. Same owner-approval gate as tickets[] since it's only
-    # meaningful together with tickets[].
+    # is a per-workspace setting (`sprint_creator_roles`, Settings page pill picker,
+    # ADR-015 `.cempala/settings.yaml`) — default PM-only. Same owner-approval gate as
+    # tickets[] since it's only meaningful together with tickets[].
     allowed_sprint_roles = sprint_creator_roles or {"pm"}
     sprints: list[SprintDraft] = []
     sprints_dropped = False

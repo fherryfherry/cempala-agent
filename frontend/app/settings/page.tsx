@@ -185,18 +185,18 @@ function OrchestratorModelCard() {
 const FLAG_LABELS: { key: keyof Pick<RoleDef, "may_declare_tickets" | "may_manage_artifacts" | "is_reviewer">; label: string; hint: string }[] = [
   {
     key: "may_declare_tickets",
-    label: "May declare tickets[]",
-    hint: "Boleh mengeluarkan tickets[]/updates[] di blok ```map (membuat/mengubah tiket).",
+    label: "May create tickets",
+    hint: "Bisa membuat tiket baru dan mengedit tiket yang sudah ada saat bekerja.",
   },
   {
     key: "may_manage_artifacts",
     label: "May manage artifacts",
-    hint: "Boleh mengeluarkan artifact_updates[] (merapikan kelompok di menu Artifacts).",
+    hint: "Bisa mengatur dan mengelompokkan berkas hasil kerja di menu Artifacts.",
   },
   {
     key: "is_reviewer",
     label: "Reviewer",
-    hint: "Mendapat blok anti-loop (ringkasan review sebelumnya saat review berulang).",
+    hint: "Melihat ringkasan review sebelumnya, supaya tidak mengulang feedback yang sama kalau proses review-nya berulang.",
   },
 ];
 
@@ -439,6 +439,7 @@ function RoleDialog({
               value={systemPrompt}
               onChange={(e) => setSystemPrompt(e.target.value)}
               rows={5}
+              className="max-h-32 overflow-y-auto transition-[max-height] duration-200 focus:max-h-96"
             />
             <p className="text-xs text-zinc-500">
               Prompt default role — agent dengan system prompt sendiri tetap memakai punyanya.

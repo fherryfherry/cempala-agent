@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     CODEX_STREAM_LIMIT_BYTES: int = 10 * 1024 * 1024
     AGY_BIN: str = "agy"
     AGY_STREAM_LIMIT_BYTES: int = 10 * 1024 * 1024
+    CMD_BIN: str = "cmd"
+    CMD_STREAM_LIMIT_BYTES: int = 10 * 1024 * 1024
     # MCP ticket server: each opencode run gets a per-run opencode.json exposing
     # ticket/artifact/memory tools via stdio (ADR-011). Disable to keep runs pure.
     MAP_MCP_ENABLED: bool = True

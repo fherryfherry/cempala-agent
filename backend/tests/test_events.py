@@ -24,7 +24,7 @@ async def session():
 
 
 async def _make_run(session) -> str:
-    ws = Workspace(name="Acme", key="ACM", repo_path="/tmp/acme", guardrails={})
+    ws = Workspace(name="Acme", key="ACM", repo_path="/tmp/acme")
     session.add(ws)
     await session.flush()
 

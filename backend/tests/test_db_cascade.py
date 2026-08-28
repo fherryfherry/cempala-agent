@@ -29,7 +29,7 @@ async def session():
 
 @pytest.mark.asyncio
 async def test_workspace_delete_cascades_to_agent_and_ticket(session):
-    ws = Workspace(name="Acme", key="ACM", repo_path="/tmp/acme", guardrails={})
+    ws = Workspace(name="Acme", key="ACM", repo_path="/tmp/acme")
     session.add(ws)
     await session.flush()
 

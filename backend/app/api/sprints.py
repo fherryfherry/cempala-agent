@@ -6,6 +6,7 @@ from app.api.errors import AppError
 from app.api.workspaces import _get_workspace_or_404
 from app.core import orchestrator
 from app.core.guardrails import GuardrailBlocked
+from app.core.settings_store import SettingsLoadError
 from app.db import session as db_session
 from app.db.models import Agent, Comment, Sprint, Ticket
 from app.db.session import get_session
@@ -164,9 +165,11 @@ async def _kick_off_sprint_tickets(session: AsyncSession, sprint: Sprint) -> int
                 trigger="manual",
             )
             scheduled += 1
-        except (GuardrailBlocked, RuntimeError):
+        except (GuardrailBlocked, RuntimeError, SettingsLoadError):
             # schedule() already recorded the reason (blocked ticket / paused
             # workspace / guardrail) as a system comment; keep going with the rest.
+            # A malformed .cempala/settings.yaml is treated the same way — best
+            # effort, don't let one workspace's bad file block the rest.
             continue
     return scheduled
 

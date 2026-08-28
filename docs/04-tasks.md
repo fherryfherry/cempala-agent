@@ -536,3 +536,17 @@ refetch. **Dep:** MAP-006 (workspace CRUD)
 correct lane topology for branch/merge history; commit detail shows file stats
 and diff; load more pagination works; non-git repo_path shows friendly empty
 state; read-only enforcement (no write subcommands callable).
+
+## MAP-054 · Workspace + global settings move from DB to `.cempala` YAML files · M · Engineer
+Per-workspace settings (guardrails, workflow_prompt, sprint_creator_roles, time_unit, timezone,
+main_branch) move off `Workspace` DB columns to `<repo_path>/.cempala/settings.yaml`, portable
+and meant to be committed to the target repo. The single global setting (orchestrator_model)
+moves off the `global_setting` table to `~/.cempala/settings.yaml`. New `core/settings_store.py`
+(load/save, atomic write, path-safety, in-process lock); `api/workspaces.py` and
+`api/global_settings.py` compose DB identity + file settings into the unchanged response shape.
+See ADR-015. **Dep:** MAP-006 (workspace CRUD)
+**AC:** `WorkspaceOut`/`WorkspaceUpdate` and `/api/settings/orchestrator-model` API contracts
+unchanged; PATCHing a workspace's settings writes `.cempala/settings.yaml` under its repo_path;
+a malformed settings file surfaces a 500, never silently falls back to defaults; the Alembic
+migration backfills every existing workspace's settings into its `.cempala/settings.yaml` (and
+`orchestrator_model` into `~/.cempala/settings.yaml`) before dropping the old columns/table.

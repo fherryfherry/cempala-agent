@@ -15,6 +15,7 @@ export const TOOL_KINDS: { value: ToolKind; enabled: boolean }[] = [
   { value: "claude", enabled: true },
   { value: "agy", enabled: true },
   { value: "codex", enabled: true },
+  { value: "cmd", enabled: true },
 ];
 
 /** Provider prefixes each tool supports (from `opencode models`). null = all
@@ -24,10 +25,14 @@ const TOOL_MODEL_PROVIDERS: Record<ToolKind, string[] | null> = {
   claude: [],
   agy: [],
   codex: [],
+  cmd: [],
 };
 
-/** `claude`/`agy`/`codex` have no `opencode models`-style listing command — their
- * `--model` flags take a fixed set of aliases instead of a `provider/model` string. */
+/** `claude`/`agy`/`codex`/`cmd` have no `opencode models`-style listing command wired
+ * into the backend — their `--model` flags take a fixed set of aliases instead of a
+ * `provider/model` string. `cmd`'s own `--list-models` does exist, but returns short
+ * ids/aliases (not `provider/model`), so it's captured here as a static list too,
+ * same as the other three (from `cmd --list-models`, v1.36.0). */
 const CLAUDE_MODEL_ALIASES = ["sonnet", "opus", "fable"];
 const CODEX_MODEL_ALIASES = ["gpt-5.1-codex", "gpt-5.1-codex-mini"];
 const AGY_MODEL_ALIASES = [
@@ -46,11 +51,43 @@ const AGY_MODEL_ALIASES = [
   "claude-opus-4-6-thinking",
   "gpt-oss-120b-medium",
 ];
+const CMD_MODEL_ALIASES = [
+  "claude-sonnet-5",
+  "claude-sonnet-4-6",
+  "claude-fable-5",
+  "claude-opus-5",
+  "claude-opus-4-8",
+  "claude-opus-4-7",
+  "claude-haiku-4-5",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+  "gpt-5.5",
+  "gpt-5.4",
+  "gpt-5.3-codex",
+  "gpt-5.4-mini",
+  "gemini-3.7-flash",
+  "gemini-3.6-flash",
+  "gemini-3.5-flash",
+  "gemini-3.5-flash-lite",
+  "gemini-3.1-flash-lite",
+  "grok-4.5",
+  "grok-4.6",
+  "kimi-k3",
+  "kimi-k2.7-code",
+  "kimi-k2.6",
+  "glm-5.3-flash",
+  "glm-5.2",
+  "qwen3.8-max",
+  "qwen3.7-max",
+  "muse-spark-1.2",
+];
 
 const STATIC_ALIAS_MODELS: Partial<Record<ToolKind, string[]>> = {
   claude: CLAUDE_MODEL_ALIASES,
   codex: CODEX_MODEL_ALIASES,
   agy: AGY_MODEL_ALIASES,
+  cmd: CMD_MODEL_ALIASES,
 };
 
 export function modelsForTool(toolKind: ToolKind, models: string[]): string[] {

@@ -50,6 +50,10 @@ class Base(DeclarativeBase):
 
 
 class Workspace(Base):
+    """Identity/lifecycle only — guardrails, workflow_prompt, sprint_creator_roles,
+    time_unit, timezone, and main_branch moved to `<repo_path>/.cempala/settings.yaml`
+    (ADR-015); see `core/settings_store.py`."""
+
     __tablename__ = "workspace"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
@@ -60,37 +64,8 @@ class Workspace(Base):
     # the prompt — see core/orchestrator.py::_build_prompt_for.
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     paused: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    guardrails: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
-    workflow_prompt: Mapped[str] = mapped_column(Text, default="", nullable=False)
     ticket_counter: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    time_unit: Mapped[str] = mapped_column(
-        Enum("hour", "day", name="time_unit"), default="day", nullable=False
-    )
-    # Roles allowed to declare `sprints:` in their ```map block (Settings page pill
-    # picker). Defaults to PM-only; enforced in core/report.py, not trusted to the prompt.
-    sprint_creator_roles: Mapped[list] = mapped_column(
-        JSON, nullable=False, default=list
-    )
-    timezone: Mapped[str] = mapped_column(String, default="Asia/Jakarta", nullable=False)
-    main_branch: Mapped[str] = mapped_column(String, default="main", nullable=False)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
-
-
-class GlobalSetting(Base):
-    """Global key-value settings (global to the whole portal, workspace-agnostic).
-
-    Primary row used by the AI-orchestrator feature: name="orchestrator_model",
-    value is a `provider/model` string or null. Credentials never live here — they
-    belong to `opencode auth`.
-    """
-
-    __tablename__ = "global_setting"
-
-    name: Mapped[str] = mapped_column(String, primary_key=True)
-    value: Mapped[object] = mapped_column(JSON, nullable=True, default=None)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_now, onupdate=_now
-    )
 
 
 class Role(Base):
@@ -190,10 +165,10 @@ class Agent(Base):
     role: Mapped[str] = mapped_column(String, nullable=False)
     model: Mapped[str | None] = mapped_column(String, nullable=True)
     tool_kind: Mapped[str] = mapped_column(
-        Enum("opencode", "claude", "agy", "codex", name="agent_tool_kind"), nullable=False
+        Enum("opencode", "claude", "agy", "codex", "cmd", name="agent_tool_kind"), nullable=False
     )
     fallback_tool_kind: Mapped[str | None] = mapped_column(
-        Enum("opencode", "claude", "agy", "codex", name="agent_tool_kind"), nullable=True
+        Enum("opencode", "claude", "agy", "codex", "cmd", name="agent_tool_kind"), nullable=True
     )
     system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     avatar_template: Mapped[str | None] = mapped_column(String, nullable=True)

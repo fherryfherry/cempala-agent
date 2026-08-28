@@ -2,8 +2,8 @@
 
 Built-in (not a Routine): every workspace gets this by default, no per-workspace
 setup needed; the interval and staleness thresholds are tunable in Settings
-(`workspace.guardrails["auto_check_interval_minutes"]` and
-`["auto_check_stale_minutes"]`, both default 3; 0 disables).
+(`.cempala/settings.yaml`'s `guardrails["auto_check_interval_minutes"]` and
+`["auto_check_stale_minutes"]`, both default 3; 0 disables — see ADR-015).
 
 What it does on each tick, per workspace:
 - Find tickets in the workspace's ACTIVE sprint whose status still needs work
@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core import orchestrator
 from app.core.guardrails import GuardrailBlocked, guardrail_limit
+from app.core.settings_store import SettingsLoadError, load_workspace_settings
 from app.db.models import Agent, Sprint, Ticket, TicketAutoCheck, Workspace
 
 # How often the scheduler wakes up. The actual per-workspace interval is
@@ -92,7 +93,13 @@ async def _tick(session: AsyncSession, session_factory: async_sessionmaker) -> N
     now = _now()
     workspaces = (await session.scalars(select(Workspace))).all()
     for workspace in workspaces:
-        guardrails = workspace.guardrails or {}
+        try:
+            guardrails = load_workspace_settings(workspace.repo_path).guardrails
+        except SettingsLoadError:
+            # Malformed .cempala/settings.yaml for this one workspace — skip just
+            # this workspace's tick, same "never block, never fail loudly" contract
+            # this scheduler already applies to paused workspaces/guardrail trips.
+            continue
         interval = int(guardrail_limit(guardrails, "auto_check_interval_minutes"))
         stale_min = int(guardrail_limit(guardrails, "auto_check_stale_minutes"))
         if interval <= 0 or stale_min <= 0:

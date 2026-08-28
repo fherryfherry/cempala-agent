@@ -9,6 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.errors import AppError
 from app.core.git import GitError, clone_repo
+from app.core.settings_store import (
+    SettingsLoadError,
+    WorkspaceSettings,
+    load_workspace_settings,
+    save_workspace_settings,
+    workspace_settings_lock,
+)
 from app.db.models import (
     ArtifactGroup,
     Conversation,
@@ -20,7 +27,6 @@ from app.db.models import (
 )
 from app.db.session import get_session
 from app.schemas.workspace import (
-    DEFAULT_GUARDRAILS,
     DEFAULT_WORKFLOW_PROMPT,
     WorkspaceCreate,
     WorkspaceOut,
@@ -78,10 +84,38 @@ async def _get_workspace_or_404(session: AsyncSession, workspace_id: str) -> Wor
     return ws
 
 
+def _compose_out(ws: Workspace, settings: WorkspaceSettings) -> WorkspaceOut:
+    """Combine DB identity/lifecycle fields with the file-backed settings (ADR-015)
+    into the response shape the frontend has always seen — only storage moved."""
+    return WorkspaceOut(
+        id=ws.id,
+        name=ws.name,
+        key=ws.key,
+        repo_path=ws.repo_path,
+        description=ws.description,
+        paused=ws.paused,
+        ticket_counter=ws.ticket_counter,
+        created_at=ws.created_at,
+        guardrails=settings.guardrails,
+        workflow_prompt=settings.workflow_prompt,
+        sprint_creator_roles=settings.sprint_creator_roles,
+        time_unit=settings.time_unit,
+        timezone=settings.timezone,
+        main_branch=settings.main_branch,
+    )
+
+
+async def _load_settings_or_500(repo_path: str) -> WorkspaceSettings:
+    try:
+        return load_workspace_settings(repo_path)
+    except SettingsLoadError as exc:
+        raise AppError(500, "invalid_workspace_settings", str(exc))
+
+
 @router.get("", response_model=list[WorkspaceOut])
 async def list_workspaces(session: AsyncSession = Depends(get_session)):
-    result = await session.scalars(select(Workspace))
-    return result.all()
+    rows = (await session.scalars(select(Workspace))).all()
+    return [_compose_out(ws, await _load_settings_or_500(ws.repo_path)) for ws in rows]
 
 
 @router.post("", response_model=WorkspaceOut, status_code=201)
@@ -97,15 +131,15 @@ async def create_workspace(body: WorkspaceCreate, session: AsyncSession = Depend
     else:
         repo_path = _resolve_repo_path(body.repo_path)
 
+    # No .cempala/settings.yaml is written here — if the repo (freshly cloned or
+    # pre-existing) already has one committed, it's picked up for free on read; if
+    # not, the workspace runs on in-memory defaults until first customized (ADR-015).
     ws = Workspace(
         name=body.name,
         key=body.key,
         repo_path=repo_path,
         description=body.description,
-        guardrails=dict(DEFAULT_GUARDRAILS),
-        workflow_prompt=DEFAULT_WORKFLOW_PROMPT,
         ticket_counter=0,
-        sprint_creator_roles=["pm"],
     )
     session.add(ws)
     try:
@@ -114,7 +148,7 @@ async def create_workspace(body: WorkspaceCreate, session: AsyncSession = Depend
         await session.rollback()
         raise AppError(409, "duplicate_key", f"workspace key '{body.key}' already exists")
     await session.refresh(ws)
-    return ws
+    return _compose_out(ws, await _load_settings_or_500(ws.repo_path))
 
 
 @router.get("/workflow-prompt-default")
@@ -125,7 +159,8 @@ async def get_workflow_prompt_default():
 
 @router.get("/{workspace_id}", response_model=WorkspaceOut)
 async def get_workspace(workspace_id: str, session: AsyncSession = Depends(get_session)):
-    return await _get_workspace_or_404(session, workspace_id)
+    ws = await _get_workspace_or_404(session, workspace_id)
+    return _compose_out(ws, await _load_settings_or_500(ws.repo_path))
 
 
 @router.patch("/{workspace_id}", response_model=WorkspaceOut)
@@ -140,20 +175,30 @@ async def update_workspace(
         ws.name = body.name
     if body.description is not None:
         ws.description = body.description
-    if body.guardrails is not None:
-        ws.guardrails = body.guardrails
-    if body.workflow_prompt is not None:
-        ws.workflow_prompt = body.workflow_prompt
-    if body.time_unit is not None:
-        ws.time_unit = body.time_unit
-    if body.timezone is not None:
-        ws.timezone = body.timezone
-    if body.sprint_creator_roles is not None:
-        ws.sprint_creator_roles = body.sprint_creator_roles
 
     await session.commit()
     await session.refresh(ws)
-    return ws
+
+    # Resolved AFTER any repo_path patch above, so a combined
+    # {"repo_path": ..., "time_unit": ...} request writes settings to the new
+    # location — settings are keyed by current repo_path only (ADR-015).
+    async with workspace_settings_lock(ws.repo_path):
+        settings = await _load_settings_or_500(ws.repo_path)
+        if body.guardrails is not None:
+            settings.guardrails = body.guardrails
+        if body.workflow_prompt is not None:
+            settings.workflow_prompt = body.workflow_prompt
+        if body.time_unit is not None:
+            settings.time_unit = body.time_unit
+        if body.timezone is not None:
+            settings.timezone = body.timezone
+        if body.sprint_creator_roles is not None:
+            settings.sprint_creator_roles = body.sprint_creator_roles
+        if body.main_branch is not None:
+            settings.main_branch = body.main_branch
+        await save_workspace_settings(ws.repo_path, settings)
+
+    return _compose_out(ws, settings)
 
 
 @router.post("/{workspace_id}/pause", response_model=WorkspaceOut)
@@ -188,7 +233,7 @@ async def pause_workspace(workspace_id: str, session: AsyncSession = Depends(get
 
     await session.commit()
     await session.refresh(ws)
-    return ws
+    return _compose_out(ws, await _load_settings_or_500(ws.repo_path))
 
 
 @router.post("/{workspace_id}/resume", response_model=WorkspaceOut)
@@ -197,7 +242,7 @@ async def resume_workspace(workspace_id: str, session: AsyncSession = Depends(ge
     ws.paused = False
     await session.commit()
     await session.refresh(ws)
-    return ws
+    return _compose_out(ws, await _load_settings_or_500(ws.repo_path))
 
 
 @router.post("/{workspace_id}/reset", response_model=WorkspaceOut)
@@ -233,7 +278,7 @@ async def reset_workspace(workspace_id: str, session: AsyncSession = Depends(get
     ws.ticket_counter = 0
     await session.commit()
     await session.refresh(ws)
-    return ws
+    return _compose_out(ws, await _load_settings_or_500(ws.repo_path))
 
 
 @router.delete("/{workspace_id}", status_code=204)

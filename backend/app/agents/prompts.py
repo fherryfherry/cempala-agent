@@ -375,8 +375,8 @@ Notes from your previous work (across tickets) — avoid repeating these:
 
 def _mcp_tools_block() -> str:
     """Ticket-system tools exposed over MCP. Only emitted when the run's tool actually
-    wires the map-tickets server (opencode and claude do; codex and agy do not) — the
-    block used to go into every prompt, telling agents with no MCP at all that a
+    wires the map-tickets server (opencode and claude do; codex, agy, and cmd do not) —
+    the block used to go into every prompt, telling agents with no MCP at all that a
     nonexistent tool was "the only way" to reach the ticket system.
 
     The write tools are permission-gated server-side (app/mcp_server.py), matching the
@@ -884,7 +884,7 @@ def build_prompt(
     orchestrator.py) inserted right after the role block.
 
     `has_mcp`: whether this run's agent tool actually wires the map-tickets MCP server
-    (opencode/claude yes, codex/agy no). `loop_threshold` is the workspace's guardrail
+    (opencode/claude yes, codex/agy/cmd no). `loop_threshold` is the workspace's guardrail
     value, quoted in the anti-loop block so its advice matches enforcement.
     """
     attachments = attachments or []

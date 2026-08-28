@@ -466,3 +466,82 @@ a comment.
 - The `_PM_MENTION_EXTRA_INSTRUCTIONS` exploratory-chat flow (owner chat on a ticket
   via `@mention`) remains for ticket-scoped conversations; the new chat page is the
   ticket-free channel.
+
+## ADR-015 · Workspace and global settings move from the DB to `.cempala` YAML files
+
+**Decision.** Per-workspace settings (`guardrails`, `workflow_prompt`, `sprint_creator_roles`,
+`time_unit`, `timezone`, `main_branch`) move off the `workspace` table's columns to a YAML file at
+`<repo_path>/.cempala/settings.yaml`, read/written via `core/settings_store.py`. The single global
+setting (`orchestrator_model`) moves off the `global_setting` key-value table to
+`~/.cempala/settings.yaml`. The public API contract is unchanged — `WorkspaceOut`/`WorkspaceUpdate`
+and `GET/PUT /api/settings/orchestrator-model` keep the same shape; `app/api/workspaces.py`
+composes DB identity fields (`id`, `name`, `key`, `repo_path`, `description`, `paused`,
+`ticket_counter`, `created_at`) with the file-backed settings before responding.
+
+Settings are keyed purely by a workspace's **current** `repo_path`, not any database identity.
+Changing `repo_path` via PATCH does not migrate the old `.cempala/settings.yaml` to the new
+location — if the new path already has one committed (a clone of a repo whose owner already
+checked it in), that becomes the effective settings immediately; if not, the workspace reverts to
+defaults until customized again. `create_workspace` never eagerly writes a settings file for the
+same reason: a pre-existing committed file should simply be picked up on the next read.
+
+`.cempala/settings.yaml` is owner-authored config, not agent output, unlike the
+` ```map ` block `core/report.py` tolerantly parses. A malformed file raises `SettingsLoadError`
+and surfaces as a 500 at the API boundary — never a silent fallback to defaults (CLAUDE.md: no
+silent failure path). Two narrow, pre-existing exceptions keep their old "never raises" contracts
+instead: `orchestrator._global_orchestrator_model()` (always returned `None` on any error, with a
+5s in-process cache) and `core/auto_check.py`'s per-workspace scan tick (already documented as
+"never block, never fail loudly" for paused workspaces/guardrail trips) — both now catch
+`SettingsLoadError` the same way they already caught every other error, rather than becoming a new
+way for one bad file to take down a run or a whole scan.
+
+**Context.** Workspace settings were tied to this backend's own SQLite DB, which meant they lived
+and died with one install — a teammate cloning the same repo into a fresh `map.db` started from
+defaults every time. Storing them as YAML inside the project's own `repo_path` lets them travel
+with the repo: commit `.cempala/settings.yaml` and every clone/install that points a workspace at
+that repo picks up the same guardrails/workflow prompt/etc. Global (portal-wide) settings — today
+just `orchestrator_model` — move to `~/.cempala/settings.yaml` for the same reason: a
+user-machine-scoped default that shouldn't reset with the DB.
+
+This is a deliberate, narrow exception to "the portal never touches files inside `repo_path`"
+(CLAUDE.md, ADR-006's consequence): that line is about not giving *agents* filesystem tools, not a
+literal ban on the backend's own bookkeeping — `.worktrees/` (`core/git.py`) already does exactly
+this for git worktrees. `.cempala/` is the same category: backend-managed, not agent-facing.
+Unlike `.worktrees/`, it is deliberately **not** gitignored — the whole point is for it to be
+committed.
+
+**Alternatives rejected.**
+- **File as a cache, DB stays source of truth** — keeps the DB as the single source of truth and
+  the file just for visibility/portability, but that defeats the actual goal (a teammate cloning
+  the repo into a fresh DB still wouldn't get the committed settings) and adds a cache-invalidation
+  problem for no benefit.
+- **New settings only, existing DB fields untouched** — avoids the API composition/migration work,
+  but leaves the exact problem (settings tied to one DB) unsolved for the fields that actually
+  matter (guardrails, workflow prompt) and only relocates it for whatever new field would be added.
+- **JSON instead of YAML** — `pyyaml` is already a dependency (used for the ```map contract), and
+  YAML is more human-editable (comments, less punctuation) for a file meant to be hand-edited and
+  reviewed in a diff.
+
+**Consequences.**
+- `Workspace` (db/models.py) keeps only identity/lifecycle columns; a data migration
+  (`d97ad763fc97`) backfills every existing workspace's current settings into its
+  `.cempala/settings.yaml` (best-effort per row — a missing/unwritable `repo_path` is skipped with
+  a stderr warning, not a migration failure) before dropping the columns, and does the same for
+  `orchestrator_model` into `~/.cempala/settings.yaml` before dropping `global_setting`. Downgrade
+  restores the columns/table with their original defaults but does not restore values from YAML —
+  there's no safe generic inverse.
+- Every `orchestrator.py` call site that read `workspace.<field>` now loads
+  `core.settings_store.load_workspace_settings(workspace.repo_path)` once per function instead;
+  `core/guardrails.py`, `core/report.py`, and `agents/prompts.py` were already pure functions
+  taking plain `dict`/`set`/`str` parameters and needed no changes.
+- A `.cempala/settings.yaml` read-modify-write (PATCH `/api/workspaces/{id}`, PUT
+  `/api/settings/orchestrator-model`) is guarded by an in-process `asyncio.Lock` keyed by the
+  resolved settings path — this backend is single-process, so no cross-process lock is needed;
+  `os.replace()` already makes each individual write atomic, so plain reads never see a torn file.
+- End users should commit `.cempala/settings.yaml` to their own project's repo if they want
+  settings to travel with it, and should check their project's own `.gitignore` doesn't already
+  blanket-ignore dotfolders.
+
+**Revisit when.** A second global or per-workspace setting is added that genuinely needs to be
+DB-backed (e.g. something that must never be hand-editable, or that needs a foreign key) — at that
+point a hybrid store may be worth it, rather than forcing everything through one mechanism.

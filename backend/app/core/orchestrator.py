@@ -60,6 +60,7 @@ from app.core.report import (
     TicketDraft,
     parse_report,
 )
+from app.core.settings_store import WorkspaceSettings, load_global_settings, load_workspace_settings
 from app.core.state_machine import STATUSES, can_transition
 
 from app.db.models import (
@@ -73,7 +74,6 @@ from app.db.models import (
     ConversationAttachment,
     ConversationMessage,
     Event,
-    GlobalSetting,
     Role,
     Routine,
     Run,
@@ -602,11 +602,14 @@ _ORCHESTRATOR_MODEL_CACHE_TTL = 5.0  # seconds
 _orch_model_cache: tuple[float, str | None] | None = None
 
 
-async def _global_orchestrator_model(session: AsyncSession) -> str | None:
+async def _global_orchestrator_model() -> str | None:
     """Read the portal-wide default model. Short in-process cache; never raises.
 
     Returns None when unset/errored — the caller surfaces the missing-model
-    condition (system comment/message), never an exception here.
+    condition (system comment/message), never an exception here. Deliberately
+    swallows `SettingsLoadError` too (a malformed `~/.cempala/settings.yaml` should
+    not crash every run) — this is a pre-existing, narrow exception to the
+    fail-loud-by-default policy the rest of ADR-015 follows.
     """
     global _orch_model_cache
     now = _now().timestamp()
@@ -614,13 +617,18 @@ async def _global_orchestrator_model(session: AsyncSession) -> str | None:
         return _orch_model_cache[1]
     model: str | None = None
     try:
-        row = await session.get(GlobalSetting, "orchestrator_model")
-        val = row.value if row is not None else None
-        model = val if isinstance(val, str) and val.strip() else None
+        model = load_global_settings().orchestrator_model
     except Exception:
         model = None
     _orch_model_cache = (now, model)
     return model
+
+
+def _ws_settings(workspace: Workspace | None) -> WorkspaceSettings | None:
+    """Load ADR-015 settings for `workspace`, or None if there's no workspace at all
+    (mirrors the pre-existing `workspace.<field> if workspace else <fallback>`
+    pattern every call site below used against the old DB columns)."""
+    return load_workspace_settings(workspace.repo_path) if workspace is not None else None
 
 
 def resolve_agent_model(agent_model: str | None, global_model: str | None) -> str | None:
@@ -685,14 +693,15 @@ async def schedule(
     if workspace is not None and workspace.paused:
         raise RuntimeError("workspace paused")
 
-    guardrails = (workspace.guardrails if workspace else None) or {}
+    ws_settings = _ws_settings(workspace)
+    guardrails = (ws_settings.guardrails if ws_settings else None) or {}
     try:
         await check_guardrails(
             session,
             ticket,
             guardrails,
             agent_role=agent.role,
-            sprint_creator_roles=workspace.sprint_creator_roles if workspace else [],
+            sprint_creator_roles=ws_settings.sprint_creator_roles if ws_settings else [],
             exclude_run_id=exclude_run_id,
             trigger=trigger,
         )
@@ -727,7 +736,7 @@ async def schedule(
         await session.commit()
         raise
 
-    global_model = await _global_orchestrator_model(session)
+    global_model = await _global_orchestrator_model()
     run_model = resolve_agent_model(agent.model, global_model)
     if run_model is None:
         await _write_system_comment(
@@ -814,7 +823,7 @@ async def schedule_routine_run(
     if workspace is not None and workspace.paused:
         raise RuntimeError("workspace paused")
 
-    guardrails = (workspace.guardrails if workspace else None) or {}
+    guardrails = (_ws_settings(workspace).guardrails if workspace else None) or {}
     try:
         await check_guardrails_routine(session, workspace.id, guardrails)
     except GuardrailBlocked as exc:
@@ -823,7 +832,7 @@ async def schedule_routine_run(
         await session.commit()
         raise
 
-    global_model = await _global_orchestrator_model(session)
+    global_model = await _global_orchestrator_model()
     run_model = resolve_agent_model(agent.model, global_model)
     if run_model is None:
         routine.status = "idle"
@@ -899,7 +908,7 @@ async def schedule_chat(
     if workspace is not None and workspace.paused:
         raise RuntimeError("workspace paused")
 
-    guardrails = (workspace.guardrails if workspace else None) or {}
+    guardrails = (_ws_settings(workspace).guardrails if workspace else None) or {}
     try:
         await check_guardrails_routine(session, conversation.workspace_id, guardrails)
     except GuardrailBlocked as exc:
@@ -913,7 +922,7 @@ async def schedule_chat(
         await session.commit()
         raise
 
-    global_model = await _global_orchestrator_model(session)
+    global_model = await _global_orchestrator_model()
     run_model = resolve_agent_model(agent.model, global_model)
     if run_model is None:
         await _write_system_message(
@@ -1266,16 +1275,16 @@ async def _handle_failed_run(
     """Common handling for a failed ticket run: auto-retry or block.
 
     `error_body` is the failure description written to the ticket. When
-    `retryable` and the (ticket, agent) attempt count is at most
-    `workspace.guardrails["max_auto_retries"]` (so `max_auto_retries` = number of
-    retries after the original failure), a child run is scheduled with
+    `retryable` and the (ticket, agent) attempt count is at most the workspace's
+    `guardrails["max_auto_retries"]` (ADR-015 `.cempala/settings.yaml`, so
+    `max_auto_retries` = number of retries after the original failure), a child run is scheduled with
     `parent_run_id` chained to this one and the ticket stays unblocked —
     the agent gets another shot with the failure injected into its prompt.
     Otherwise the ticket is blocked as before (budget exhausted, non-retryable
     failure mode, or auto-retry disabled with `max_auto_retries=0`).
     """
     workspace = await session.get(Workspace, ticket.workspace_id)
-    guardrails = (workspace.guardrails if workspace else None) or {}
+    guardrails = (_ws_settings(workspace).guardrails if workspace else None) or {}
     max_retries = int(guardrail_limit(guardrails, "max_auto_retries"))
 
     if retryable and session_factory is not None:
@@ -1375,7 +1384,7 @@ async def _build_retry_notice(session: AsyncSession, run: Run, agent: Agent) -> 
     if parent.ticket_id is not None:
         ticket = await session.get(Ticket, parent.ticket_id)
         workspace = await session.get(Workspace, ticket.workspace_id) if ticket else None
-        guardrails = (workspace.guardrails if workspace else None) or {}
+        guardrails = (_ws_settings(workspace).guardrails if workspace else None) or {}
         max_retries = int(guardrail_limit(guardrails, "max_auto_retries"))
 
     attempt = await _retry_attempt_count(session, parent, agent.id)
@@ -1529,6 +1538,8 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
             routine = await session.get(Routine, run.routine_id) if run.routine_id else None
             workspace = await session.get(Workspace, routine.workspace_id) if routine else None
 
+        ws_settings = _ws_settings(workspace)
+
         try:
             run.status = "running"
             run.started_at = _now()
@@ -1656,7 +1667,7 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
                 prev_run = None
 
             worktree_path: str = workspace.repo_path
-            merge_into: str = workspace.main_branch or "main"
+            merge_into: str = (ws_settings.main_branch if ws_settings else None) or "main"
             if ticket:
                 epic_branch: str | None = None
                 if ticket.parent_id:
@@ -1669,7 +1680,7 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
                         workspace.repo_path,
                         ticket.key,
                         epic_branch=epic_branch,
-                        base_branch=workspace.main_branch or "main",
+                        base_branch=(ws_settings.main_branch if ws_settings else None) or "main",
                     )
                 except git_module.GitError as ge:
                     detail = f" ({ge.stderr})" if ge.stderr else ""
@@ -1681,13 +1692,13 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
                         ticket_key=ticket.key,
                         workspace_id=workspace.id,
                     )
-                    merge_into = workspace.main_branch or "main"
+                    merge_into = (ws_settings.main_branch if ws_settings else None) or "main"
 
             ctx = RunContext(
                 run_id=run.id,
                 workspace_id=workspace.id,
                 agent_id=agent.id,
-                agent_model=run.model or await _global_orchestrator_model(session),
+                agent_model=run.model or await _global_orchestrator_model(),
                 ticket_id=ticket.id if ticket else None,
                 repo_path=worktree_path,
                 prompt=prompt,
@@ -1695,7 +1706,7 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
                 ticket_key=ticket.key if ticket else "",
                 attachments=attachment_paths,
                 prev_session_id=prev_run.session_id if prev_run else None,
-                guardrails=workspace.guardrails or {},
+                guardrails=(ws_settings.guardrails if ws_settings else None) or {},
                 cancel_event=asyncio.Event(),
             )
             _CANCEL_EVENTS[run.id] = ctx.cancel_event
@@ -1844,13 +1855,14 @@ def _workspace_description_block(workspace: Workspace) -> str | None:
     return f"Context for this project/workspace:\n\n{workspace.description.strip()}"
 
 
-def _workflow_prompt_block(workspace: Workspace) -> str | None:
-    """The owner's team workflow (Settings page), shown to every agent. Empty by default."""
-    if not (workspace.workflow_prompt and workspace.workflow_prompt.strip()):
+def _workflow_prompt_block(workflow_prompt: str | None) -> str | None:
+    """The owner's team workflow (Settings page, ADR-015 `.cempala/settings.yaml`),
+    shown to every agent. Empty by default."""
+    if not (workflow_prompt and workflow_prompt.strip()):
         return None
     return (
         "This is the team workflow the workspace owner defined. Follow it:\n\n"
-        f"{workspace.workflow_prompt.strip()}"
+        f"{workflow_prompt.strip()}"
     )
 
 
@@ -1865,10 +1877,12 @@ async def _artifact_group_names(session, workspace_id: str) -> list[str]:
     return sorted({g.name for g in groups})
 
 
-def _owner_instruction_blocks(workspace: Workspace) -> str | None:
+def _owner_instruction_blocks(workspace: Workspace, workflow_prompt: str | None) -> str | None:
     """Workspace description + workflow prompt, joined — the owner-authored preamble every
     run type appends to `extra_instructions`."""
-    blocks = [b for b in (_workspace_description_block(workspace), _workflow_prompt_block(workspace)) if b]
+    blocks = [
+        b for b in (_workspace_description_block(workspace), _workflow_prompt_block(workflow_prompt)) if b
+    ]
     return "\n\n".join(blocks) if blocks else None
 
 
@@ -1877,6 +1891,7 @@ async def _build_prompt_for(
     retry_notice: str | None = None,
     tool_kind: str | None = None,
 ) -> str:
+    ws_settings = load_workspace_settings(workspace.repo_path)
     role_map = await _role_map(session)
     roster = (
         await session.scalars(select(Agent).where(Agent.workspace_id == workspace.id))
@@ -2026,7 +2041,7 @@ async def _build_prompt_for(
     # Workspace workflow prompt (Settings page): appended to every agent prompt as an
     # additional instruction block, before the `map` contract. Empty by default, so
     # behavior is unchanged unless the owner configured one.
-    workflow_block = _workflow_prompt_block(workspace)
+    workflow_block = _workflow_prompt_block(ws_settings.workflow_prompt)
     if workflow_block:
         extra_instructions = (
             f"{extra_instructions}\n\n{workflow_block}"
@@ -2045,14 +2060,14 @@ async def _build_prompt_for(
         review_round=review_round,
         previous_review_feedback=previous_review_feedback,
         extra_instructions=extra_instructions,
-        time_unit=workspace.time_unit,
+        time_unit=ws_settings.time_unit,
         workspace_tickets=workspace_tickets,
         existing_artifact_groups=existing_artifact_groups,
         agent_memories=agent_memories,
-        sprint_creator_roles=set(workspace.sprint_creator_roles or ["pm"]),
+        sprint_creator_roles=set(ws_settings.sprint_creator_roles or ["pm"]),
         existing_epics=existing_epics,
         existing_sprints=existing_sprints,
-        loop_threshold=int(guardrail_limit(workspace.guardrails or {}, "loop_threshold")),
+        loop_threshold=int(guardrail_limit(ws_settings.guardrails or {}, "loop_threshold")),
         has_mcp=(tool_kind or agent.tool_kind) in MCP_TOOL_KINDS,
     )
 
@@ -2065,6 +2080,7 @@ async def _build_routine_prompt_for(
     context (description/workflow) + agent memory + routine `map` contract. No ticket
     context — the routine's own prompt is the task.
     """
+    ws_settings = load_workspace_settings(workspace.repo_path)
     role_map = await _role_map(session)
     roster = (
         await session.scalars(select(Agent).where(Agent.workspace_id == workspace.id))
@@ -2111,13 +2127,13 @@ async def _build_routine_prompt_for(
         workspace.repo_path,
         team_roster,
         routine_prompt=routine.prompt,
-        extra_instructions=_owner_instruction_blocks(workspace),
+        extra_instructions=_owner_instruction_blocks(workspace, ws_settings.workflow_prompt),
         agent_memories=agent_memories,
-        sprint_creator_roles=set(workspace.sprint_creator_roles or ["pm"]),
+        sprint_creator_roles=set(ws_settings.sprint_creator_roles or ["pm"]),
         existing_epics=existing_epics,
         existing_sprints=existing_sprints,
         existing_artifact_groups=existing_artifact_groups,
-        time_unit=workspace.time_unit,
+        time_unit=ws_settings.time_unit,
         has_mcp=(tool_kind or agent.tool_kind) in MCP_TOOL_KINDS,
     )
 
@@ -2129,6 +2145,7 @@ async def _build_chat_prompt_for(
     """Assemble a chat-run prompt: BASE + role block + conversation transcript +
     workspace tickets + agent memory + chat `map` contract.
     """
+    ws_settings = load_workspace_settings(workspace.repo_path)
     role_map = await _role_map(session)
     roster = (
         await session.scalars(select(Agent).where(Agent.workspace_id == workspace.id))
@@ -2220,15 +2237,15 @@ async def _build_chat_prompt_for(
         linked_ticket=conversation.linked_ticket_key,
         workspace_tickets=workspace_tickets,
         agent_memories=agent_memories,
-        sprint_creator_roles=set(workspace.sprint_creator_roles or ["pm"]),
+        sprint_creator_roles=set(ws_settings.sprint_creator_roles or ["pm"]),
         existing_epics=existing_epics,
         existing_sprints=existing_sprints,
         existing_artifact_groups=existing_artifact_groups,
         has_active_sprint=has_active_sprint,
-        time_unit=workspace.time_unit,
+        time_unit=ws_settings.time_unit,
         has_mcp=(tool_kind or agent.tool_kind) in MCP_TOOL_KINDS,
     )
-    extra_instructions = _owner_instruction_blocks(workspace)
+    extra_instructions = _owner_instruction_blocks(workspace, ws_settings.workflow_prompt)
     if extra_instructions:
         prompt = f"{extra_instructions}\n\n{prompt}"
     return prompt
@@ -2343,7 +2360,7 @@ async def _finish_routine_run(
         valid_names,
         actor_name=agent.name,
         ticket_approved=True,
-        sprint_creator_roles=set((workspace.sprint_creator_roles if workspace else None) or ["pm"]),
+        sprint_creator_roles=set((_ws_settings(workspace).sprint_creator_roles if workspace else None) or ["pm"]),
         no_ticket_mode=True,
         valid_roles=set(role_map),
         may_declare_tickets=actor_role.may_declare_tickets if actor_role else False,
@@ -2663,7 +2680,7 @@ async def _finish_chat_run(
         valid_names,
         actor_name=agent.name,
         ticket_approved=True,
-        sprint_creator_roles=set((workspace.sprint_creator_roles if workspace else None) or ["pm"]),
+        sprint_creator_roles=set((_ws_settings(workspace).sprint_creator_roles if workspace else None) or ["pm"]),
         no_ticket_mode=True,
         valid_roles=set(role_map),
         may_declare_tickets=actor_role.may_declare_tickets if actor_role else False,
@@ -2976,7 +2993,7 @@ async def _handle_failed_chat_run(
         await session.commit()
         return
     workspace = await session.get(Workspace, conversation.workspace_id)
-    guardrails = (workspace.guardrails if workspace else None) or {}
+    guardrails = (_ws_settings(workspace).guardrails if workspace else None) or {}
     max_retries = int(guardrail_limit(guardrails, "max_auto_retries"))
 
     if retryable and session_factory is not None:
@@ -3193,7 +3210,7 @@ async def _finish_run(
         # a manual board run is implicitly approved by the owner pressing Run.
         ticket_approved=run.trigger != "mention" or ticket.approved_at is not None,
         # Per-workspace setting (Settings page): which roles may declare `sprints:`.
-        sprint_creator_roles=set((workspace.sprint_creator_roles if workspace else None) or ["pm"]),
+        sprint_creator_roles=set((_ws_settings(workspace).sprint_creator_roles if workspace else None) or ["pm"]),
         valid_roles=set(role_map),
         may_declare_tickets=actor_role.may_declare_tickets if actor_role else False,
         may_manage_artifacts=actor_role.may_manage_artifacts if actor_role else False,

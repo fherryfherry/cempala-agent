@@ -45,7 +45,7 @@ statuses, and one shared working directory.
 
 | Term | Meaning |
 |---|---|
-| **Workspace** | A project. Has a `repo_path` = the local folder where agents work. |
+| **Workspace** | A project. Has a `repo_path` = the local folder where agents work. Its settings (guardrails, workflow prompt, sprint-creator roles, time unit, timezone, main branch) live in `<repo_path>/.cempala/settings.yaml`, not the database — see ADR-015. |
 | **Agent** | One AI worker. Has a role, model, coding tool, system prompt. Belongs to one workspace. |
 | **Role** | PM, Lead Engineer, Engineer, Designer, QA, Pentester. |
 | **Ticket** | A unit of work. Has a key like `MAP-001`, status, assignee, parent (for sub-tickets). |

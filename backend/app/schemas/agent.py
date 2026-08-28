@@ -3,7 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel, field_validator
 
-ToolKind = Literal["opencode", "claude", "agy", "codex"]
+ToolKind = Literal["opencode", "claude", "agy", "codex", "cmd"]
 AvatarTemplate = Literal[
     "person-1", "person-2", "person-3", "person-4", "person-5", "person-6",
 ]

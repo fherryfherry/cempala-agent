@@ -57,7 +57,9 @@ tools, no LLM client, and no `llm/` package. The portal assembles a prompt, spaw
 `opencode run --format json --dir <repo_path> --auto`, maps its stdout JSON to events, and reads
 the result back.
 
-Consequences worth internalizing: the portal never touches files inside `repo_path`; it stores no
+Consequences worth internalizing: the portal never touches files inside `repo_path` (one narrow,
+backend-only exception: ADR-015's `.cempala/settings.yaml`, same category as the pre-existing
+`.worktrees/` bookkeeping — this is not an agent-facing filesystem tool); it stores no
 LLM credentials (that's `opencode auth`); the model dropdown comes from `opencode models`, not
 from any provider API. Do not add filesystem or shell tools to the backend — that direction was
 explicitly reversed in v0.2.
@@ -92,7 +94,8 @@ Losing the in-process loop meant losing step caps and per-tool control. What rem
 cost per run, cost per ticket, handoff depth, loop detector, `max_concurrent_runs` (default 3,
 because each run is a full subprocess), and `ticket_not_in_active_sprint` (a ticket with no sprint,
 or one that isn't the workspace's active sprint, can't be scheduled — except for whichever roles
-`workspace.sprint_creator_roles` trusts to plan sprints, default PM-only, since those roles need to
+the workspace's `.cempala/settings.yaml` `sprint_creator_roles` (ADR-015) trusts to plan sprints,
+default PM-only, since those roles need to
 be reachable on any ticket to do that triage). Every guardrail trip **must** leave a system comment
 naming which guardrail fired — there is no silent failure path.
 

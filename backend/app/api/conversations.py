@@ -28,6 +28,7 @@ from app.api.workspaces import _get_workspace_or_404
 from app.core import orchestrator
 from app.core.guardrails import GuardrailBlocked
 from app.core.report import SprintDraft, TicketDraft
+from app.core.settings_store import SettingsLoadError
 from app.db import session as db_session
 from app.db.models import (
     Agent,
@@ -214,10 +215,11 @@ async def create_message(
                 conversation=conversation,
                 agent=pm,
             )
-        except (GuardrailBlocked, RuntimeError):
+        except (GuardrailBlocked, RuntimeError, SettingsLoadError):
             # Guardrail trips already wrote a System message on the conversation
             # (schedule_chat); a paused workspace surfaces as a message too. The
-            # owner's message itself is already persisted either way.
+            # owner's message itself is already persisted either way. A malformed
+            # .cempala/settings.yaml is treated the same way — best effort.
             pass
     return message
 

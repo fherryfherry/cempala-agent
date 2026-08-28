@@ -103,8 +103,9 @@ touched, reproduction steps, etc.) go into the `description`. This is a prompt i
 PM may (optionally) include `sprint`/`duration` per `tickets[]` item, and a top-level
 `sprints:` block (name, focus/`goal`, `duration`) to declare or update sprints — see §4.
 **Which roles may declare `sprints:` is configured per workspace** via the
-`sprint_creator_roles` setting on the Settings page (pill picker; default PM only) — enforced
-in the parser, and the ```map contract only teaches this field to allowed roles.
+`sprint_creator_roles` setting on the Settings page (pill picker; default PM only; stored in
+`.cempala/settings.yaml` under the workspace's `repo_path`, not the database — see ADR-015) —
+enforced in the parser, and the ```map contract only teaches this field to allowed roles.
 
 **`artifacts[]`** — different from `tickets[]`, this field is open to **all roles**: anyone
 may declare files they produced in the repo (relative path to the repo + group name) so they
@@ -283,7 +284,8 @@ entry per sprint: `name`, `goal`, `duration`) and each `tickets[]` item may carr
 (target epic key — see §3 "epic on tickets[]"), `sprint` (a sprint name matching one in
 `sprints:`), and `duration` (the duration estimate for that ticket). The `duration` unit
 follows the workspace `time_unit` setting (`hour`/`day`, locked to those two choices,
-configured by owner/PM on the Settings page) — sprints/tickets whose names have never
+configured by owner/PM on the Settings page; stored in `.cempala/settings.yaml` under the
+workspace's `repo_path` — see ADR-015) — sprints/tickets whose names have never
 appeared before are auto-created by the orchestrator (get-or-create by name,
 case-insensitive); the first sprint ever created in a workspace automatically becomes
 `active` as a bootstrap, and afterwards switching the active sprint is a manual action

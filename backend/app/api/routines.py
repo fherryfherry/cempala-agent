@@ -14,6 +14,7 @@ from app.api.errors import AppError
 from app.api.workspaces import _get_workspace_or_404
 from app.core import orchestrator
 from app.core.guardrails import GuardrailBlocked
+from app.core.settings_store import SettingsLoadError
 from app.db import session as db_session
 from app.db.models import Routine
 from app.db.session import get_session
@@ -110,6 +111,8 @@ async def run_routine_now(routine_id: str, session: AsyncSession = Depends(get_s
         raise AppError(409, "workspace_paused", str(exc))
     except GuardrailBlocked as exc:
         raise AppError(409, "guardrail_blocked", str(exc))
+    except SettingsLoadError as exc:
+        raise AppError(500, "invalid_workspace_settings", str(exc))
 
     await session.refresh(routine)
     return routine
