@@ -1,8 +1,10 @@
 "use client";
 
 import { createContext, useContext, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { XIcon } from "lucide-react";
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api";
@@ -134,12 +136,15 @@ const EventsContext = createContext<EventsContextValue | null>(null);
 /** One EventSource per workspace, shared via context. Reconnects handled natively by EventSource. */
 export function EventsProvider({
   workspaceId,
+  workspaceKey,
   children,
 }: {
   workspaceId: string | undefined;
+  workspaceKey: string | undefined;
   children: React.ReactNode;
 }) {
   const queryClient = useQueryClient();
+  const router = useRouter();
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [events, setEvents] = useState<WorkspaceEvent[]>([]);
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
@@ -226,7 +231,52 @@ export function EventsProvider({
           // last toasted one are history being replayed, not fresh notifications.
           const lastSeen = lastSeenRef.current[workspaceId] ?? "";
           if (createdAt > lastSeen) {
-            toast(message, { id: `activity-${ev.id}` });
+            const goToTicket =
+              notifTicketKey && workspaceKey
+                ? () => router.push(`/w/${workspaceKey}/ticket/${notifTicketKey}`)
+                : undefined;
+            // toast.custom (not plain toast()) — sonner's ToastT has no whole-toast
+            // onClick, only a separate action-button onClick, so a click-anywhere
+            // notification needs its own rendered content. Sonner only applies its
+            // fixed toast width (var(--width)) and default close button to
+            // "data-styled" (non-custom) toasts, so both are re-added by hand here
+            // to match the look of every other toast.
+            toast.custom(
+              (toastId) => (
+                <div
+                  onClick={
+                    goToTicket
+                      ? () => {
+                          goToTicket();
+                          toast.dismiss(toastId);
+                        }
+                      : undefined
+                  }
+                  className={`relative flex w-[var(--width)] items-center rounded-md border p-4 pr-8 text-sm shadow-lg ${
+                    goToTicket ? "cursor-pointer hover:opacity-90" : ""
+                  }`}
+                  style={{
+                    background: "var(--normal-bg)",
+                    color: "var(--normal-text)",
+                    borderColor: "var(--normal-border)",
+                  }}
+                >
+                  {message}
+                  <button
+                    type="button"
+                    aria-label="Close toast"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toast.dismiss(toastId);
+                    }}
+                    className="absolute right-2 top-2 rounded-full border border-[var(--normal-border)] bg-[var(--normal-bg)] p-1 text-[var(--normal-text)] opacity-70 hover:opacity-100"
+                  >
+                    <XIcon className="size-3" />
+                  </button>
+                </div>
+              ),
+              { id: `activity-${ev.id}` },
+            );
             lastSeenRef.current[workspaceId] = createdAt;
             try {
               localStorage.setItem(`notifSeenAt:${workspaceId}`, createdAt);
@@ -284,7 +334,7 @@ export function EventsProvider({
       }
       pendingInvalidationsRef.current.clear();
     };
-  }, [workspaceId, queryClient]);
+  }, [workspaceId, workspaceKey, queryClient, router]);
 
   return (
     <EventsContext.Provider value={{ status, events, notifications }}>

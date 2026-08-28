@@ -22,6 +22,7 @@ class AgentCreate(BaseModel):
     role: str
     model: str | None = None
     tool_kind: ToolKind
+    fallback_tool_kind: ToolKind | None = None
     system_prompt: str | None = None
     avatar_template: AvatarTemplate | None = None
     avatar_color: str | None = None
@@ -34,6 +35,7 @@ class AgentUpdate(BaseModel):
     role: str | None = None
     model: str | None = None
     tool_kind: ToolKind | None = None
+    fallback_tool_kind: ToolKind | None = None
     system_prompt: str | None = None
     enabled: bool | None = None
     avatar_template: AvatarTemplate | None = None
@@ -49,6 +51,7 @@ class AgentOut(BaseModel):
     role: str
     model: str | None
     tool_kind: str
+    fallback_tool_kind: str | None
     system_prompt: str | None
     avatar_template: str | None
     avatar_color: str | None

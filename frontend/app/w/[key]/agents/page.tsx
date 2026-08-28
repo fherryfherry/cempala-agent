@@ -229,6 +229,7 @@ function CreateAgentForm({
   const [nameTouched, setNameTouched] = useState(false);
   const [role, setRole] = useState<Role>("engineer");  const [model, setModel] = useState("");
   const [toolKind, setToolKind] = useState<ToolKind>("opencode");
+  const [fallbackToolKind, setFallbackToolKind] = useState<ToolKind | "">("");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [avatar, setAvatar] = useState<AvatarSelection>({ template: null, color: null });
   const [error, setError] = useState<string | null>(null);
@@ -246,6 +247,7 @@ function CreateAgentForm({
         role,
         model,
         tool_kind: toolKind,
+        fallback_tool_kind: fallbackToolKind || null,
         system_prompt: systemPrompt || undefined,
         avatar_template: avatar.template,
         avatar_color: avatar.color,
@@ -255,6 +257,7 @@ function CreateAgentForm({
       setName("");
       setNameTouched(false);
       setModel("");
+      setFallbackToolKind("");
       setSystemPrompt("");
       setAvatar({ template: null, color: null });
       setError(null);
@@ -324,7 +327,13 @@ function CreateAgentForm({
 
           <div className="flex flex-col gap-1.5">
             <Label>Tool</Label>
-            <Select value={toolKind} onValueChange={(v) => setToolKind(v as ToolKind)}>
+            <Select
+              value={toolKind}
+              onValueChange={(v) => {
+                setToolKind(v as ToolKind);
+                if (fallbackToolKind === v) setFallbackToolKind("");
+              }}
+            >
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
@@ -354,6 +363,30 @@ function CreateAgentForm({
                   : "Could not load models — run `opencode auth login`."
               }
             />
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <Label>Fallback tool (optional)</Label>
+            <Select
+              value={fallbackToolKind || "__none__"}
+              onValueChange={(v) => setFallbackToolKind(v === "__none__" ? "" : (v as ToolKind))}
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">None</SelectItem>
+                {TOOL_KINDS.filter((t) => t.value !== toolKind).map((t) => (
+                  <SelectItem key={t.value} value={t.value} disabled={!t.enabled}>
+                    {t.value}
+                    {!t.enabled ? " (coming soon)" : ""}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-zinc-500">
+              Dipakai sekali kalau tool utama gagal terus sampai auto-retry habis.
+            </p>
           </div>
 
           <div className="flex flex-col gap-1.5">
@@ -594,6 +627,9 @@ function EditAgentDialog({
   const queryClient = useQueryClient();
   const [name, setName] = useState(agent.name);
   const [toolKind, setToolKind] = useState<ToolKind>(agent.tool_kind as ToolKind);
+  const [fallbackToolKind, setFallbackToolKind] = useState<ToolKind | "">(
+    (agent.fallback_tool_kind as ToolKind | null) ?? ""
+  );
   const [model, setModel] = useState(agent.model ?? "");
   const [systemPrompt, setSystemPrompt] = useState(agent.system_prompt ?? "");
   const [avatar, setAvatar] = useState<AvatarSelection>({
@@ -609,6 +645,7 @@ function EditAgentDialog({
       updateAgent(agent.id, {
         name,
         tool_kind: toolKind,
+        fallback_tool_kind: fallbackToolKind || null,
         model,
         system_prompt: systemPrompt || undefined,
         avatar_template: avatar.template,
@@ -657,6 +694,7 @@ function EditAgentDialog({
               onValueChange={(v) => {
                 setToolKind(v as ToolKind);
                 setModel(""); // previous model may not exist for the new tool
+                if (fallbackToolKind === v) setFallbackToolKind("");
               }}
             >
               <SelectTrigger>
@@ -688,6 +726,30 @@ function EditAgentDialog({
                   : "Could not load models — run `opencode auth login`."
               }
             />
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <Label>Fallback tool (optional)</Label>
+            <Select
+              value={fallbackToolKind || "__none__"}
+              onValueChange={(v) => setFallbackToolKind(v === "__none__" ? "" : (v as ToolKind))}
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">None</SelectItem>
+                {TOOL_KINDS.filter((t) => t.value !== toolKind).map((t) => (
+                  <SelectItem key={t.value} value={t.value} disabled={!t.enabled}>
+                    {t.value}
+                    {!t.enabled ? " (coming soon)" : ""}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-zinc-500">
+              Dipakai sekali kalau tool utama gagal terus sampai auto-retry habis.
+            </p>
           </div>
 
           <div className="flex flex-col gap-1.5">

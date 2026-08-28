@@ -200,7 +200,7 @@ export function Header() {
                     "bg-zinc-100 text-foreground dark:bg-zinc-800",
                 )}
               >
-                Rutinitas
+                Routines
               </Link>
               <Link
                 href={`/w/${activeKey}/agents`}
@@ -223,6 +223,17 @@ export function Header() {
                 )}
               >
                 Git
+              </Link>
+              <Link
+                href={`/w/${activeKey}/terminal`}
+                aria-current={pathname === `/w/${activeKey}/terminal` ? "page" : undefined}
+                className={cn(
+                  "flex items-center px-3 hover:bg-zinc-100 hover:text-foreground dark:hover:bg-zinc-800",
+                  pathname === `/w/${activeKey}/terminal` &&
+                    "bg-zinc-100 text-foreground dark:bg-zinc-800",
+                )}
+              >
+                Terminal
               </Link>
               <Link
                 href={`/w/${activeKey}/settings`}

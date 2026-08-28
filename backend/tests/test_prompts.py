@@ -473,6 +473,12 @@ def test_no_existing_sprints_tells_agent_pure_timebox_naming():
     assert "Sprints that ALREADY EXIST" not in prompt
 
 
+def test_base_block_lists_terminal_menu():
+    prompt = build_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, TICKET)
+    assert "App menus available to the owner" in prompt
+    assert "Terminal: interactive shell in the repo" in prompt
+
+
 def test_artifacts_contract_mentions_screenshots():
     prompt = build_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, TICKET)
     assert "SCREENSHOTS of any visible UI change" in prompt

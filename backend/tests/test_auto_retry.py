@@ -94,11 +94,11 @@ def _make_workspace(client, tmp_path, key="MAP", **overrides):
     return ws_id
 
 
-def _make_agent(client, ws_id, role, name):
-    resp = client.post(
-        f"/api/workspaces/{ws_id}/agents",
-        json={"name": name, "role": role, "model": "opencode/big-pickle", "tool_kind": "opencode"},
-    )
+def _make_agent(client, ws_id, role, name, fallback_tool_kind=None):
+    payload = {"name": name, "role": role, "model": "opencode/big-pickle", "tool_kind": "opencode"}
+    if fallback_tool_kind is not None:
+        payload["fallback_tool_kind"] = fallback_tool_kind
+    resp = client.post(f"/api/workspaces/{ws_id}/agents", json=payload)
     assert resp.status_code == 201, resp.text
     return resp.json()["id"]
 
@@ -316,6 +316,105 @@ def test_exhausted_retries_block_ticket(client, tmp_path, monkeypatch):
     comments = [c for c in detail["comments"] if c["is_system"]]
     assert any("Auto-retry 1/2 dijalankan" in c["body"] for c in comments)
     assert any("Auto-retry 2/2 dijalankan" in c["body"] for c in comments)
+
+
+def _claude_valid_map_script():
+    return (
+        "import json\n"
+        f"text = {_VALID_MAP!r}\n"
+        'print(json.dumps({"type": "assistant", "message": {"content": '
+        '[{"type": "text", "text": text}]}}))\n'
+        'print(json.dumps({"type": "result", "subtype": "success"}))\n'
+    )
+
+
+def _claude_garbage_script():
+    return (
+        'import json\n'
+        'print(json.dumps({"type": "assistant", "message": {"content": '
+        '[{"type": "text", "text": "still no map block"}]}}))\n'
+        'print(json.dumps({"type": "result", "subtype": "success"}))\n'
+    )
+
+
+def test_fallback_tool_used_after_retries_exhausted(client, tmp_path, monkeypatch):
+    """Once max_auto_retries is exhausted on the primary tool, one extra attempt
+    runs on the agent's configured fallback tool before the ticket blocks."""
+    ws_id = _make_workspace(
+        client, tmp_path, guardrails={**DEFAULT_GUARDRAILS, "max_auto_retries": 1}
+    )
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1", fallback_tool_kind="claude")
+    ticket = _make_ticket(client, ws_id)
+    _set_status(client, ticket["key"], "todo")
+
+    opencode_script = _write_python_binary(tmp_path / "opencode", _garbage_script())
+    monkeypatch.setattr(settings, "OPENCODE_BIN", opencode_script)
+    claude_script = _write_python_binary(tmp_path / "claude", _claude_valid_map_script())
+    monkeypatch.setattr(settings, "CLAUDE_BIN", claude_script)
+
+    client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": eng_id}).json()
+    # 1 original + 1 primary-tool retry (max_auto_retries=1) + 1 fallback attempt
+    runs = _wait_for_ticket_runs(client, ws_id, ticket["id"], 3)
+    assert len(runs) == 3, runs
+    fallback_run = next(r for r in runs if r["tool_kind"] == "claude")
+    assert fallback_run["status"] == "done"
+
+    detail = client.get(f"/api/tickets/{ticket['key']}").json()
+    assert detail["status"] == "done"
+
+    comments = [c for c in detail["comments"] if c["is_system"]]
+    assert any("fallback tool: claude" in c["body"] for c in comments)
+
+
+def test_fallback_tool_also_fails_blocks_ticket(client, tmp_path, monkeypatch):
+    """If the fallback attempt fails too, the ticket blocks — no further chaining."""
+    ws_id = _make_workspace(
+        client, tmp_path, guardrails={**DEFAULT_GUARDRAILS, "max_auto_retries": 1}
+    )
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1", fallback_tool_kind="claude")
+    ticket = _make_ticket(client, ws_id)
+    _set_status(client, ticket["key"], "todo")
+
+    opencode_script = _write_python_binary(tmp_path / "opencode", _garbage_script())
+    monkeypatch.setattr(settings, "OPENCODE_BIN", opencode_script)
+    claude_script = _write_python_binary(tmp_path / "claude", _claude_garbage_script())
+    monkeypatch.setattr(settings, "CLAUDE_BIN", claude_script)
+
+    client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": eng_id}).json()
+    # 1 original + 1 primary-tool retry (max_auto_retries=1) + 1 fallback attempt, no more
+    runs = _wait_for_ticket_runs(client, ws_id, ticket["id"], 3)
+    assert len(runs) == 3, runs
+    assert all(r["status"] == "failed" for r in runs)
+
+    detail = client.get(f"/api/tickets/{ticket['key']}").json()
+    assert detail["status"] == "blocked"
+
+
+def test_fallback_tool_used_immediately_when_max_retries_zero(client, tmp_path, monkeypatch):
+    """max_auto_retries=0 means the primary-tool budget is exhausted on the very
+    first failure — the fallback tool must still get its one shot, not be skipped
+    just because there was no primary-tool retry."""
+    ws_id = _make_workspace(
+        client, tmp_path, guardrails={**DEFAULT_GUARDRAILS, "max_auto_retries": 0}
+    )
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1", fallback_tool_kind="claude")
+    ticket = _make_ticket(client, ws_id)
+    _set_status(client, ticket["key"], "todo")
+
+    opencode_script = _write_python_binary(tmp_path / "opencode", _garbage_script())
+    monkeypatch.setattr(settings, "OPENCODE_BIN", opencode_script)
+    claude_script = _write_python_binary(tmp_path / "claude", _claude_valid_map_script())
+    monkeypatch.setattr(settings, "CLAUDE_BIN", claude_script)
+
+    client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": eng_id}).json()
+    # 1 original failure + 1 fallback attempt, no primary-tool retry in between
+    runs = _wait_for_ticket_runs(client, ws_id, ticket["id"], 2)
+    assert len(runs) == 2, runs
+    fallback_run = next(r for r in runs if r["tool_kind"] == "claude")
+    assert fallback_run["status"] == "done"
+
+    detail = client.get(f"/api/tickets/{ticket['key']}").json()
+    assert detail["status"] == "done"
 
 
 def test_zero_max_retries_disables_retry(client, tmp_path, monkeypatch):

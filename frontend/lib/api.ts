@@ -191,6 +191,7 @@ export interface Agent {
   role: Role;
   model: string | null;
   tool_kind: ToolKind;
+  fallback_tool_kind: ToolKind | null;
   system_prompt: string | null;
   avatar_template: AvatarTemplate | null;
   avatar_color: string | null;
@@ -205,6 +206,7 @@ export interface AgentCreate {
   role: Role;
   model?: string | null;
   tool_kind: ToolKind;
+  fallback_tool_kind?: ToolKind | null;
   system_prompt?: string;
   avatar_template?: AvatarTemplate | null;
   avatar_color?: string | null;
@@ -215,6 +217,7 @@ export interface AgentUpdate {
   role?: Role;
   model?: string;
   tool_kind?: ToolKind;
+  fallback_tool_kind?: ToolKind | null;
   system_prompt?: string;
   enabled?: boolean;
   avatar_template?: AvatarTemplate | null;
@@ -669,6 +672,11 @@ export function createComment(key: string, body: CommentCreate): Promise<Comment
 
 export function attachmentUrl(id: string, opts?: { inline?: boolean }): string {
   return `${API_BASE_URL}/attachments/${id}${opts?.inline ? "?inline=1" : ""}`;
+}
+
+export function terminalWebSocketUrl(workspaceId: string): string {
+  const wsBase = API_BASE_URL.replace(/^http/, "ws");
+  return `${wsBase}/workspaces/${workspaceId}/terminal/ws`;
 }
 
 export async function uploadAttachment(key: string, file: File): Promise<Attachment> {

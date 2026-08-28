@@ -192,6 +192,9 @@ class Agent(Base):
     tool_kind: Mapped[str] = mapped_column(
         Enum("opencode", "claude", "agy", "codex", name="agent_tool_kind"), nullable=False
     )
+    fallback_tool_kind: Mapped[str | None] = mapped_column(
+        Enum("opencode", "claude", "agy", "codex", name="agent_tool_kind"), nullable=True
+    )
     system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     avatar_template: Mapped[str | None] = mapped_column(String, nullable=True)
     avatar_color: Mapped[str | None] = mapped_column(String, nullable=True)

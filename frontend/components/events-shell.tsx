@@ -17,5 +17,9 @@ export function EventsShell({ children }: { children: React.ReactNode }) {
   });
   const workspaceId = workspaces.data?.find((ws) => ws.key === params?.key)?.id;
 
-  return <EventsProvider workspaceId={workspaceId}>{children}</EventsProvider>;
+  return (
+    <EventsProvider workspaceId={workspaceId} workspaceKey={params?.key}>
+      {children}
+    </EventsProvider>
+  );
 }

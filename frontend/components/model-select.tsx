@@ -1,4 +1,6 @@
-import type { ToolKind } from "@/lib/api";
+import { useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { getDefaultModel, type ToolKind } from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -83,6 +85,26 @@ export function ModelSelect({
   // Tools with their own static alias list don't depend on the opencode `/api/models`
   // fetch — a failure/loading state there is irrelevant to them, skip straight to the picker.
   const hasStaticAliases = Boolean(STATIC_ALIAS_MODELS[toolKind]);
+
+  // Only opencode has a host-level default (its opencode.json "model" key) — the
+  // other tools use a fixed alias list unrelated to that config file.
+  const defaultModel = useQuery({
+    queryKey: ["default-model"],
+    queryFn: getDefaultModel,
+    retry: false,
+    enabled: toolKind === "opencode",
+  });
+
+  // Auto-pick a model whenever there's no selection yet — e.g. right after switching
+  // tools, so the form isn't left with an empty required field. Prefers the host's own
+  // opencode default over whatever sorts first in the list.
+  useEffect(() => {
+    if (model.trim() !== "" || available.length === 0) return;
+    const hostDefault = toolKind === "opencode" ? defaultModel.data?.model : null;
+    const picked = hostDefault && available.includes(hostDefault) ? hostDefault : available[0];
+    onModelChange(picked);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [toolKind, available.join("|"), defaultModel.data?.model]);
 
   if (!hasStaticAliases && isError) {
     return (

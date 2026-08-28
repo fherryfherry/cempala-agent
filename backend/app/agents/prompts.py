@@ -240,6 +240,26 @@ TICKETS IN THIS WORKSPACE (Board menu — the source of truth for status/age, NO
 {chr(10).join(lines)}"""
 
 
+def _app_menus_block() -> str:
+    """One-line-per-menu orientation so any role can accurately point the owner at the
+    right screen. Keep this in sync with the nav in frontend/components/header.tsx —
+    update it whenever a menu is added, renamed, or removed.
+    """
+    return """\
+App menus available to the owner (mention the relevant one by name when useful):
+- Dashboard: workspace overview/at-a-glance status
+- Chat: direct chat with you and the team
+- Board: ticket status/assignee/sprint — the source of truth for ticket state
+- Timeline: chronological view of ticket activity across the workspace
+- Activity: recent events/audit feed across the workspace
+- Artifacts: files/docs produced by agents during runs
+- Rutinitas (Routines): scheduled/recurring agent runs
+- Agents: team roster and per-agent config
+- Git: read-only branch/commit/diff browser for the repo
+- Terminal: interactive shell in the repo, for the owner to run commands themselves
+- Settings: workspace configuration"""
+
+
 def _base_block(
     agent: AgentInfo,
     workspace_repo_path: str,
@@ -286,7 +306,9 @@ How to write your answer:
   concise.
 
 Team members in this workspace:
-{roster_lines}"""
+{roster_lines}
+
+{_app_menus_block()}"""
 
 
 def _ticket_context_block(

@@ -11,6 +11,7 @@ const Toaster = ({ ...props }: ToasterProps) => {
     <Sonner
       theme={theme as ToasterProps["theme"]}
       position="top-right"
+      offset={{ top: "4.5rem" }}
       closeButton
       gap={10}
       duration={4500}

@@ -539,7 +539,7 @@ def prepare_worktree(
     Worktree path: `.worktrees/feat-{sanitized_key}/` inside `repo_path`.
     Branch name: `feat/{ticket_key}`.
 
-    Raises GitError if the worktree already exists or branch creation fails.
+    Raises GitError if branch creation fails.
     """
     worktrees_root = os.path.join(repo_path, ".worktrees")
     safe_name = _sanitize_worktree_name(ticket_key)
@@ -553,9 +553,27 @@ def prepare_worktree(
         parent_branch = epic_branch
 
     os.makedirs(worktrees_root, exist_ok=True)
-    run_mutation(
-        repo_path, "worktree", "add", "--branch", branch_name, worktree_path, parent_branch
-    )
+
+    # A ticket runs through many handoffs (Engineer -> Lead -> QA -> ...), each its
+    # own call to this function for the SAME ticket_key — only the first should
+    # create the branch+worktree; every later call must reuse it. Without this
+    # check, `worktree add -b` on an already-existing feat/<ticket> branch failed
+    # every non-first run ("git_mutation_failed") since the branch survives
+    # cleanup_abandoned_worktree (which only removes the worktree, not the branch).
+    if os.path.isdir(worktree_path):
+        return worktree_path
+    if _branch_exists(repo_path, branch_name):
+        # Branch survived an earlier cleanup but the worktree directory is gone —
+        # reattach the existing branch instead of trying to (re)create it.
+        run_mutation(repo_path, "worktree", "add", worktree_path, branch_name)
+    else:
+        # `-b` (short form), NOT `--branch` — `git worktree add` has no long-form
+        # --branch option (unlike `git checkout`/`git switch`); passing it made
+        # every worktree creation fail outright with "error: unknown option
+        # `branch'", the actual root cause of every "git_mutation_failed" report.
+        run_mutation(
+            repo_path, "worktree", "add", "-b", branch_name, worktree_path, parent_branch
+        )
     return worktree_path
 
 

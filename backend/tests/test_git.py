@@ -12,7 +12,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.core.git import GitError, clone_repo
+import os
+
+from app.core.git import GitError, clone_repo, prepare_worktree
 from app.db import session as db_session
 from app.db.models import Base
 from app.db.session import get_session
@@ -410,3 +412,33 @@ class TestCloneRepo:
             clone_repo("https://example.com/repo.git", str(tmp_path / "cloned"))
 
         assert "timed out" in exc_info.value.args[0]
+
+
+class TestPrepareWorktreeReuse:
+    """A ticket goes through many runs/handoffs (Engineer -> Lead -> QA -> ...),
+    each calling prepare_worktree() again for the SAME ticket_key. Regression
+    coverage for the bug where every non-first call failed with
+    git_mutation_failed because it always tried to (re)create the branch.
+    """
+
+    def test_second_call_reuses_existing_worktree(self, tmp_path):
+        repo = _init_repo(tmp_path)
+
+        first = prepare_worktree(str(repo), "MAP-123", base_branch="main")
+        second = prepare_worktree(str(repo), "MAP-123", base_branch="main")
+
+        assert first == second
+        assert os.path.isdir(second)
+
+    def test_reattaches_branch_when_worktree_dir_removed(self, tmp_path):
+        repo = _init_repo(tmp_path)
+
+        path = prepare_worktree(str(repo), "MAP-123", base_branch="main")
+        _git(repo, "worktree", "remove", "--force", path)
+        assert not os.path.isdir(path)
+
+        # Branch survives the removal (cleanup_abandoned_worktree never deletes
+        # it) — a later run must reattach it, not fail trying to recreate it.
+        reattached = prepare_worktree(str(repo), "MAP-123", base_branch="main")
+        assert reattached == path
+        assert os.path.isdir(reattached)

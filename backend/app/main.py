@@ -12,6 +12,7 @@ from app.api.agent_memory import agent_memory_router, memory_router
 from app.api.agents import agents_router, workspace_agents_router
 from app.api.artifacts import workspace_artifacts_router
 from app.api.git import workspace_git_router
+from app.api.terminal import workspace_terminal_router
 from app.api.attachments import attachments_router, ticket_attachments_router
 from app.api.comments import comments_router
 from app.api.conversations import conversations_router, workspace_conversations_router
@@ -76,6 +77,7 @@ app.include_router(workspace_sprints_router, prefix="/api")
 app.include_router(sprints_router, prefix="/api")
 app.include_router(workspace_artifacts_router, prefix="/api")
 app.include_router(workspace_git_router, prefix="/api")
+app.include_router(workspace_terminal_router, prefix="/api")
 app.include_router(workspace_routines_router, prefix="/api")
 app.include_router(routines_router, prefix="/api")
 app.include_router(comments_router, prefix="/api")

@@ -65,6 +65,7 @@ async def create_agent(
         role=body.role,
         model=body.model,
         tool_kind=body.tool_kind,
+        fallback_tool_kind=body.fallback_tool_kind,
         system_prompt=body.system_prompt,
         avatar_template=body.avatar_template,
         avatar_color=body.avatar_color,
@@ -98,12 +99,10 @@ async def update_agent(agent_id: str, body: AgentUpdate, session: AsyncSession =
     if "avatar_color" in body.model_fields_set:
         agent.avatar_color = body.avatar_color
 
-    # avatar_template/avatar_color are the one pair where explicit null is meaningful
-    # (clearing back to plain initials), so honor field presence over non-null values.
-    if "avatar_template" in body.model_fields_set:
-        agent.avatar_template = body.avatar_template
-    if "avatar_color" in body.model_fields_set:
-        agent.avatar_color = body.avatar_color
+    # fallback_tool_kind is also an explicit-null-clears field (removing a
+    # previously set fallback), so honor presence the same way.
+    if "fallback_tool_kind" in body.model_fields_set:
+        agent.fallback_tool_kind = body.fallback_tool_kind
 
     try:
         await session.commit()

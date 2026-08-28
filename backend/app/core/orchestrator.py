@@ -658,6 +658,7 @@ async def schedule(
     trigger: str,
     parent_run_id: str | None = None,
     exclude_run_id: str | None = None,
+    tool_kind_override: str | None = None,
 ) -> Run:
     """Create a queued Run row, then either start it now or leave it queued.
 
@@ -738,7 +739,7 @@ async def schedule(
         status="queued",
         trigger=trigger,
         parent_run_id=parent_run_id,
-        tool_kind=agent.tool_kind,
+        tool_kind=tool_kind_override or agent.tool_kind,
         model=run_model,
     )
     session.add(run)
@@ -873,6 +874,7 @@ async def schedule_chat(
     conversation: Conversation,
     agent: Agent,
     parent_run_id: str | None = None,
+    tool_kind_override: str | None = None,
 ) -> Run:
     """Schedule a chat run (no ticket) — same queue mechanics as `schedule()`.
 
@@ -924,7 +926,7 @@ async def schedule_chat(
         status="queued",
         trigger="chat",
         parent_run_id=parent_run_id,
-        tool_kind=agent.tool_kind,
+        tool_kind=tool_kind_override or agent.tool_kind,
         model=run_model,
     )
     session.add(run)
@@ -1268,9 +1270,9 @@ async def _handle_failed_run(
     guardrails = (workspace.guardrails if workspace else None) or {}
     max_retries = int(guardrail_limit(guardrails, "max_auto_retries"))
 
-    if retryable and session_factory is not None and max_retries > 0:
+    if retryable and session_factory is not None:
         attempt = await _retry_attempt_count(session, run, agent.id)
-        if attempt <= max_retries:
+        if max_retries > 0 and attempt <= max_retries:
             await _write_system_comment(
                 session,
                 ticket.id,
@@ -1298,6 +1300,37 @@ async def _handle_failed_run(
             except RuntimeError:
                 # workspace got paused mid-flight; the ticket stays unblocked and
                 # the owner can resume later.
+                pass
+            return
+
+        if agent.fallback_tool_kind and attempt == max_retries + 1:
+            # Primary-tool retry budget is exhausted but the agent has a fallback
+            # tool configured and it hasn't been tried yet in this chain (attempt
+            # count is monotonic across primary+fallback runs) — give it exactly
+            # one shot before blocking, instead of chaining further fallbacks.
+            await _write_system_comment(
+                session,
+                ticket.id,
+                f"{error_body}\n\nAuto-retry habis pada tool utama ({agent.tool_kind}) — "
+                f"mencoba 1x dengan fallback tool: {agent.fallback_tool_kind}.",
+                ticket_key=ticket.key,
+                run_id=run.id,
+                workspace_id=ticket.workspace_id,
+            )
+            try:
+                await schedule(
+                    session,
+                    session_factory,
+                    ticket=ticket,
+                    agent=agent,
+                    trigger="auto",
+                    parent_run_id=run.id,
+                    exclude_run_id=run.id,
+                    tool_kind_override=agent.fallback_tool_kind,
+                )
+            except GuardrailBlocked as exc:
+                run.error = str(exc)
+            except RuntimeError:
                 pass
             return
 
@@ -1626,10 +1659,11 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
                         base_branch=workspace.main_branch or "main",
                     )
                 except git_module.GitError as ge:
+                    detail = f" ({ge.stderr})" if ge.stderr else ""
                     await _write_system_comment(
                         session,
                         ticket.id,
-                        f"Gagal membuat worktree untuk {ticket.key}: {ge}. "
+                        f"Gagal membuat worktree untuk {ticket.key}: {ge}{detail}. "
                         "Run akan menggunakan repo utama (mungkin ada konflik).",
                         ticket_key=ticket.key,
                         workspace_id=workspace.id,
@@ -1653,7 +1687,7 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
             )
             _CANCEL_EVENTS[run.id] = ctx.cancel_event
 
-            tool_cls = TOOLS[agent.tool_kind]
+            tool_cls = TOOLS[run.tool_kind]
             tool = tool_cls()
 
             text_buffer: list[str] = []
@@ -2906,9 +2940,9 @@ async def _handle_failed_chat_run(
     guardrails = (workspace.guardrails if workspace else None) or {}
     max_retries = int(guardrail_limit(guardrails, "max_auto_retries"))
 
-    if retryable and session_factory is not None and max_retries > 0:
+    if retryable and session_factory is not None:
         attempt = await _retry_attempt_count(session, run, agent.id)
-        if attempt <= max_retries:
+        if max_retries > 0 and attempt <= max_retries:
             await _write_system_message(
                 session,
                 conversation,
@@ -2928,6 +2962,31 @@ async def _handle_failed_chat_run(
             except GuardrailBlocked:
                 run.error = str(run.error or "")
                 # schedule_chat already wrote its own System message naming the guardrail.
+            except RuntimeError:
+                pass
+            await session.commit()
+            return
+
+        if agent.fallback_tool_kind and attempt == max_retries + 1:
+            await _write_system_message(
+                session,
+                conversation,
+                f"{error_body}\n\nAuto-retry habis pada tool utama ({agent.tool_kind}) — "
+                f"mencoba 1x dengan fallback tool: {agent.fallback_tool_kind}.",
+                run_id=run.id,
+                workspace_id=conversation.workspace_id,
+            )
+            try:
+                await schedule_chat(
+                    session,
+                    session_factory,
+                    conversation,
+                    agent,
+                    parent_run_id=run.id,
+                    tool_kind_override=agent.fallback_tool_kind,
+                )
+            except GuardrailBlocked:
+                run.error = str(run.error or "")
             except RuntimeError:
                 pass
             await session.commit()
@@ -3636,10 +3695,11 @@ async def _finish_run(
                 merge_into=merge_into,
             )
         except git_module.GitError as ge:
+            detail = f" ({ge.stderr})" if ge.stderr else ""
             await _write_system_comment(
                 session,
                 ticket.id,
-                f"Worktree merge gagal setelah run selesai: {ge}. "
+                f"Worktree merge gagal setelah run selesai: {ge}{detail}. "
                 "Worktree dan branch tetap tersedia untuk manual merge.",
                 ticket_key=ticket.key,
                 run_id=run.id,
