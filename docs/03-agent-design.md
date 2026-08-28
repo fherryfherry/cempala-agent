@@ -146,10 +146,16 @@ incorrect/stale notes.
 epic (top-level ticket). An epic is a large feature area in the project that **is used
 repeatedly** as a parent for future feature/story/bug/enhancement tickets — not a single-use
 container per request. The ```map block includes a catalog of existing epics (same pattern as
-the `artifacts:` catalog), and the agent **MUST** pick the relevant one; they may leave
-`epic:` empty only if it's genuinely a brand-new large feature area — the ticket currently
-being worked on itself will become the new epic (old behavior; unchanged if `epic:` is not
-set and this ticket has no parent).
+the `artifacts:` catalog), and the agent **MUST** pick the relevant one, matching by
+module/domain rather than exact title (e.g. a login bug matches a "Module Login" epic even
+though its own title says nothing about bugs); they may leave `epic:` empty only if it's
+genuinely a brand-new module not covered by any epic above — the ticket currently being
+worked on itself will become the new epic (old behavior; unchanged if `epic:` is not set and
+this ticket has no parent). **Naming rule**: an epic's title is always the general
+module/feature area it covers (e.g. "Module Transaksi"), never the specific bug/request that
+triggered its creation — that specific problem belongs on the sub-ticket, not the epic. If a
+ticket is about to become a new epic, its title must be renamed to the module name before
+creation.
 
 Resolution without explicit `epic:`: if the ticket being worked on **already has a parent**
 (e.g. QA/Pentester reporting a bug from a feature/story ticket under an epic), the new ticket
@@ -182,11 +188,19 @@ ticket**: the owner writes the task prompt, interval, mode, and agent. An in-pro
   no auto-schedule), `updates[]`, `memory[]`, `artifact_updates[]` (PM). No ticket status
   transitions of any kind — tickets that are commented on/updated do not change status unless
   via an explicit `updates[].status`.
-- **Agents read the Board via MCP, not via the prompt** (ADR-011): every run — routine or
-  ticket — gets a local MCP server with the tools `list_tickets`/`get_ticket`/`post_comment`/
-  `create_ticket`/`update_ticket`/`list_artifacts`/`read_artifact`/`get_memory`/
-  `create_memory`/`update_memory`. Routine prompts do not need to inject ticket lists; the
-  agent calls a tool to see ticket status/age and write follow-up comments.
+- **Agents read the Board via MCP, not via the prompt** (ADR-011): runs whose agent tool
+  wires the MCP server (`opencode` and `claude` — see `MCP_TOOL_KINDS` in
+  `app/agents/mcp_config.py`; `codex` and `agy` do not) get a local server with the tools
+  `list_tickets`/`get_ticket`/`list_comments`/`post_comment`/`create_ticket`/`update_ticket`/
+  `list_artifacts`/`read_artifact`/`get_memory`/`create_memory`/`update_memory`. Routine
+  prompts do not need to inject ticket lists; the agent calls a tool to see ticket status/age
+  and write follow-up comments. The prompt only advertises the block when the run actually
+  has it.
+- **The write tools carry the same role gates as the parser.** `create_ticket`/`update_ticket`
+  require `may_declare_tickets` (checked in `app/mcp_server.py`, reading the same `role` table
+  flags report.py reads), so they can't be used to route around §3's permission matrix. Known
+  gap: the PM owner-approval gate is chat-scoped state the MCP server can't see, so it applies
+  to the ```map block only.
 - Example use case: a PM routine "check stuck tickets" every 5 minutes (idle_only) — PM calls
   `list_tickets`, finds tickets whose `updated_at` is old, then `post_comment` a follow-up to
   their assignee. Actions via MCP do not trigger runs (agent comments do not trigger
@@ -477,17 +491,21 @@ details display it directly, without having to dig through comments.
 
 ## 7. Anti-loop in the prompt
 
-Beyond the guardrails in the code ([02-tsd.md](02-tsd.md) §6), every reviewer prompt (Lead,
-QA, Pentester, System Architect) gets an extra note if this is not the first review on the
-ticket:
+Beyond the guardrails in the code ([02-tsd.md](02-tsd.md) §6), **every** agent on a ticket
+that has already been reviewed at least once gets an extra note — not just reviewers. The
+ping-pong the loop detector exists to catch is reviewer ↔ implementer, and the implementer
+being asked to re-fix is the side that most needs to stop instead of handing back again:
 
 ```
-This is review #{n} for this ticket. Previous reviews:
+This is review round {n} for this ticket. Previous reviews:
 {summary of previous reviews}
 
-If the same problem is still there after it was asked to fix twice, DON'T ask again.
-status: blocked, and explain why the fix didn't work.
+If the same problem still exists after {loop_threshold} rounds, DON'T hand it back again.
+status: blocked, and explain why the fix isn't landing.
 ```
+
+`{loop_threshold}` is the workspace's actual guardrail value, so the prompt's advice fires in
+step with enforcement rather than at a hardcoded number.
 
 The code is the brake that matters; the prompt only reduces how often that brake is used.
 

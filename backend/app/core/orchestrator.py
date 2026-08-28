@@ -29,6 +29,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.base import AdapterEvent, RunContext, TOOLS
+from app.agents.mcp_config import MCP_TOOL_KINDS
 from app.agents.prompts import (
     AgentInfo,
     ChatMessageInfo,
@@ -109,10 +110,17 @@ _TAIL_CHARS = 2000
 # and verbatim, not open-ended retrieval) — same idea as _PM_CHAT_TICKET_LIST_LIMIT below.
 _AGENT_MEMORY_PROMPT_LIMIT = 20
 
-# Cap on how many existing epics (top-level tickets) get listed in the ```map contract's
-# reuse catalog — most-recently-updated first, cheap insurance against unbounded prompt
-# growth on large workspaces.
-_EPIC_CATALOG_LIMIT = 100
+# Cap on how many prior-run summaries (and reviewer feedback) get replayed into the next
+# prompt. Everything else fed to the prompt is bounded; this one wasn't, so a long-lived
+# epic ticket grew its own prompt without limit, one summary per completed run forever.
+# Most recent N, re-ordered chronologically by the caller.
+_PREV_SUMMARY_PROMPT_LIMIT = 10
+
+# Cap on how many existing epics (top-level tickets) get listed in the reuse catalog —
+# most-recently-updated first, cheap insurance against unbounded prompt growth on large
+# workspaces. 100 was ~4KB of a ~12KB PM prompt; the reuse decision only ever looks at
+# recent, relevant feature areas.
+_EPIC_CATALOG_LIMIT = 25
 
 # run.id -> asyncio.Task, for currently-executing runs (used by the stop endpoint).
 RUNNING: dict[str, asyncio.Task] = {}
@@ -1374,17 +1382,17 @@ async def _build_retry_notice(session: AsyncSession, run: Run, agent: Agent) -> 
     tail = await _tail_text_from_run(session, parent.id)
 
     notice = (
-        "PERINGATAN: RUN SEBELUMNYA GAGAL. Kamu menjalankan tiket ini sebelumnya dan "
-        f"gagal (attempt {attempt}/{max_retries or '?'}). Alasan kegagalan:\n\n"
-        f"{parent.error or 'tidak diketahui'}"
+        "WARNING: YOUR PREVIOUS RUN FAILED. You worked this ticket before and failed "
+        f"(attempt {attempt}/{max_retries or '?'}). Reason:\n\n"
+        f"{parent.error or 'unknown'}"
     )
     if tail:
-        notice += f"\n\nOutput terakhir kamu sebelumnya:\n\n```\n{tail}\n```"
+        notice += f"\n\nYour previous output ended with:\n\n```\n{tail}\n```"
     notice += (
-        "\n\nBACA KONTRAK ```map DI BAWAH INI TELITI sebelum menjawab. "
-        "Jangan ulangi kesalahan yang sama — kalau output kamu sebelumnya tidak "
-        "menutup dengan blok ```map yang valid, pastikan blok itu ada dan "
-        "lengkap kali ini. Kalau ada kendala teknis, coba pendekatan yang berbeda."
+        "\n\nREAD THE `map` CONTRACT BELOW CAREFULLY before answering. Don't repeat the "
+        "same mistake — if your previous output didn't close with a valid `map` block, "
+        "make sure it's there and complete this time. If you hit a technical blocker, "
+        "try a different approach."
     )
     return notice
 
@@ -1551,13 +1559,18 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
 
             if ticket is not None:
                 prompt = await _build_prompt_for(
-                    session, workspace, agent, ticket, run.trigger, retry_notice=retry_notice
+                    session, workspace, agent, ticket, run.trigger,
+                    retry_notice=retry_notice, tool_kind=run.tool_kind,
                 )
             elif run.conversation_id is not None:
-                prompt = await _build_chat_prompt_for(session, workspace, agent, conversation)
+                prompt = await _build_chat_prompt_for(
+                    session, workspace, agent, conversation, tool_kind=run.tool_kind
+                )
             else:
                 routine = await session.get(Routine, run.routine_id)
-                prompt = await _build_routine_prompt_for(session, workspace, agent, routine)
+                prompt = await _build_routine_prompt_for(
+                    session, workspace, agent, routine, tool_kind=run.tool_kind
+                )
 
             await event_bus.publish(
                 session,
@@ -1791,45 +1804,78 @@ async def execute(session_factory: async_sessionmaker, run_id: str) -> None:
 # The structural gate (no tickets[] before the owner approves) lives in report.py's
 # ticket_approved flag; this text makes the expected behavior explicit to the model.
 _PM_MENTION_EXTRA_INSTRUCTIONS = (
-    "Ini pesan langsung dari owner (bukan run otomatis). "
-    "ATURAN WAJIB: JANGAN pernah langsung membuat tickets[] di balasan pertama atau "
-    "sebelum owner secara eksplisit menyetujui. Kamu WAJIB bersikap eksploratif dulu: "
-    "gali informasi yang detail dari owner (tujuan, lingkup, kriteria sukses, batasan, "
-    "asumsi yang belum jelas) — tapi jangan berlebihan, cukup yang relevan. Kalau "
-    "idenya belum cukup jelas, balas dengan pertanyaan klarifikasi: status: "
-    "in_progress, TANPA tickets[]. "
-    "Kalau sudah cukup jelas, TAWARKAN FINAL PLAN dulu di summary (status: "
-    "in_progress, TANPA tickets[]) dan minta owner menyetujui — misalnya 'balas "
-    "\"oke lanjut\" untuk menyetujui'. FINAL PLAN ini WAJIB berisi PERSIS LIMA bagian, "
-    "ditulis satu-satu supaya owner mudah membaca sebelum approve: "
-    "(1) Requirement — ringkasan permintaan owner dengan bahasamu sendiri, bukan "
-    "copy-paste chat; "
-    "(2) Goal — tujuan/hasil akhir yang ingin dicapai; "
-    "(3) Epic tujuan — cek katalog epic yang sudah ada di kontrak ```map di bawah; "
-    "WAJIB sebutkan epic mana yang relevan (reuse) kalau ada, atau nyatakan 'epic "
-    "baru: <nama>' HANYA kalau ini benar-benar area fitur besar baru; "
-    "(4) Breakdown sprint — jadi berapa sprint, dan goal singkat tiap sprint (BUKAN "
-    "nama fitur — sprint cuma timebox, nama fitur/scope itu urusan epic di poin 3); "
-    "(5) Estimasi durasi — total dan/atau per sprint, dihitung realistis untuk "
-    "kecepatan kerja agent AI (jauh lebih cepat dari estimasi tim manusia) — jangan "
-    "menyalin rule-of-thumb durasi sprint manusia (mis. '2 minggu per sprint'). "
-    "Kamu juga BOLEH chat owner duluan kapan pun di tengah perjalanan kalau ada hal "
-    "yang butuh klarifikasi. "
-    "Hanya setelah owner menyetujui barulah balasan berikutnya boleh membawa "
-    "tickets[] — sertakan juga `sprints:` (goal & durasi tiap sprint, BUKAN nama "
-    "fitur) dan, di tiap item tickets[], `epic`/`sprint`/`duration` sesuai kontrak "
-    "di bawah (epic yang sudah dijanjikan di FINAL PLAN wajib konsisten dengan "
-    "`epic:` yang benar-benar ditulis di tickets[]). "
-    "Kamu juga bisa melihat daftar tiket LAIN di workspace ini di bawah (bagian "
-    "'Tiket lain di workspace ini') — kalau owner minta kamu review/rapikan sprint "
-    "tiket-tiket yang sudah ada, gunakan `updates:` dengan field `sprint`/`duration` "
-    "per tiket untuk memindahkan/memperbaikinya (tidak perlu tickets[] baru untuk ini)."
+    "This is a direct message from the owner (not an automated run). "
+    "MANDATORY RULE: NEVER create tickets[] in your first reply, or before the owner "
+    "explicitly approves. Be explorative first: dig for detail from the owner (goal, "
+    "scope, success criteria, constraints, unclear assumptions) — but don't overdo it, "
+    "just what's relevant. If the idea still isn't clear enough, reply with clarifying "
+    "questions: status: in_progress, WITHOUT tickets[]. "
+    "Once it is clear enough, OFFER A FINAL PLAN first in summary (status: in_progress, "
+    "WITHOUT tickets[]) and ask the owner to approve — e.g. 'reply \"oke lanjut\" to "
+    "approve'. The FINAL PLAN must contain EXACTLY FIVE sections, written out one by "
+    "one so the owner can read them before approving: "
+    "(1) Requirement — the owner's request restated in your own words, not a copy-paste "
+    "of the chat; "
+    "(2) Goal — the outcome to be achieved; "
+    "(3) Target epic — check the existing epic catalog shown above the `map` contract "
+    "below; you MUST name which existing epic is relevant (reuse it) if there is one, or "
+    "state 'new epic: <name>' ONLY if this really is a brand-new large feature area; "
+    "(4) Sprint breakdown — how many sprints, and a short goal per sprint (NOT a feature "
+    "name — a sprint is only a timebox; feature/scope names belong to the epic in point 3); "
+    "(5) Duration estimate — total and/or per sprint, realistic for how fast AI agents "
+    "work (far faster than a human team) — do not copy human sprint rules of thumb "
+    "(e.g. '2 weeks per sprint'). "
+    "You MAY also message the owner first at any point if something needs clarifying. "
+    "Only after the owner approves may your next reply carry tickets[] — include "
+    "`sprints:` too (goal & duration per sprint, NOT a feature name) and, on each "
+    "tickets[] item, `epic`/`sprint`/`duration` per the contract below (the epic you "
+    "promised in the FINAL PLAN must match the `epic:` you actually write in tickets[]). "
+    "You can also see the OTHER tickets in this workspace below ('Other tickets in this "
+    "workspace') — if the owner asks you to review/tidy up the sprint assignment of "
+    "existing tickets, use `updates:` with the `sprint`/`duration` fields per ticket to "
+    "move/fix them (no new tickets[] needed for that)."
 )
+
+
+def _workspace_description_block(workspace: Workspace) -> str | None:
+    """Project/product context the owner set at workspace creation, shown to every agent."""
+    if not (workspace.description and workspace.description.strip()):
+        return None
+    return f"Context for this project/workspace:\n\n{workspace.description.strip()}"
+
+
+def _workflow_prompt_block(workspace: Workspace) -> str | None:
+    """The owner's team workflow (Settings page), shown to every agent. Empty by default."""
+    if not (workspace.workflow_prompt and workspace.workflow_prompt.strip()):
+        return None
+    return (
+        "This is the team workflow the workspace owner defined. Follow it:\n\n"
+        f"{workspace.workflow_prompt.strip()}"
+    )
+
+
+async def _artifact_group_names(session, workspace_id: str) -> list[str]:
+    """Artifact group names already in the workspace's Artifacts menu, so the agent
+    reuses a relevant one instead of inventing near-duplicates."""
+    groups = (
+        await session.scalars(
+            select(ArtifactGroup).where(ArtifactGroup.workspace_id == workspace_id)
+        )
+    ).all()
+    return sorted({g.name for g in groups})
+
+
+def _owner_instruction_blocks(workspace: Workspace) -> str | None:
+    """Workspace description + workflow prompt, joined — the owner-authored preamble every
+    run type appends to `extra_instructions`."""
+    blocks = [b for b in (_workspace_description_block(workspace), _workflow_prompt_block(workspace)) if b]
+    return "\n\n".join(blocks) if blocks else None
 
 
 async def _build_prompt_for(
     session, workspace: Workspace, agent: Agent, ticket: Ticket, trigger: str,
     retry_notice: str | None = None,
+    tool_kind: str | None = None,
 ) -> str:
     role_map = await _role_map(session)
     roster = (
@@ -1873,21 +1919,26 @@ async def _build_prompt_for(
     ).all()
     previous_summaries = [
         r.report.get("summary") for r in prior_runs if r.report and r.report.get("summary")
-    ]
+    ][-_PREV_SUMMARY_PROMPT_LIMIT:]
 
     # "Review round" = how many prior runs on this ticket were done by an agent in a
     # reviewer role (`role.is_reviewer`), regardless of which reviewer. Their summaries
     # double as the previous-review feedback shown to the anti-loop block.
+    #
+    # Computed for EVERY agent, not just reviewers: the ping-pong the loop detector
+    # exists to catch is reviewer <-> implementer, and the implementer being asked to
+    # re-fix is the side that most needs to know it's round N and to block instead of
+    # handing back again.
     review_round = 0
     previous_review_feedback: list[str] = []
-    if agent_info.is_reviewer:
-        for r in prior_runs:
-            run_agent = await session.get(Agent, r.agent_id)
-            prior_role = role_map.get(run_agent.role) if run_agent is not None else None
-            if prior_role is not None and prior_role.is_reviewer:
-                review_round += 1
-                if r.report and r.report.get("summary"):
-                    previous_review_feedback.append(r.report["summary"])
+    for r in prior_runs:
+        run_agent = await session.get(Agent, r.agent_id)
+        prior_role = role_map.get(run_agent.role) if run_agent is not None else None
+        if prior_role is not None and prior_role.is_reviewer:
+            review_round += 1
+            if r.report and r.report.get("summary"):
+                previous_review_feedback.append(r.report["summary"])
+    previous_review_feedback = previous_review_feedback[-_PREV_SUMMARY_PROMPT_LIMIT:]
 
     # Sprint context for the ticket — the base-prompt sprint rule references the
     # active sprint, so the agent must see which sprint this ticket actually sits
@@ -1925,12 +1976,7 @@ async def _build_prompt_for(
 
     # Existing artifact group names (Artifacts menu) so the agent reuses a relevant
     # group instead of inventing near-duplicate names.
-    artifact_groups = (
-        await session.scalars(
-            select(ArtifactGroup).where(ArtifactGroup.workspace_id == workspace.id)
-        )
-    ).all()
-    existing_artifact_groups = sorted({g.name for g in artifact_groups})
+    existing_artifact_groups = await _artifact_group_names(session, workspace.id)
 
     # Existing epics (top-level tickets) so PM/QA/Pentester reuse a relevant one via
     # `tickets[].epic` instead of spawning a fresh one-off epic every time
@@ -1970,7 +2016,7 @@ async def _build_prompt_for(
     # Workspace description (set at creation, on the homepage form): project/product context
     # shown to every agent, same mechanism as workflow_prompt below. Empty by default.
     if workspace.description and workspace.description.strip():
-        description_block = f"Konteks proyek/workspace ini:\n\n{workspace.description.strip()}"
+        description_block = _workspace_description_block(workspace)
         extra_instructions = (
             f"{extra_instructions}\n\n{description_block}"
             if extra_instructions
@@ -1978,10 +2024,10 @@ async def _build_prompt_for(
         )
 
     # Workspace workflow prompt (Settings page): appended to every agent prompt as an
-    # additional instruction block, before the ```map contract. Empty by default, so
+    # additional instruction block, before the `map` contract. Empty by default, so
     # behavior is unchanged unless the owner configured one.
-    if workspace.workflow_prompt and workspace.workflow_prompt.strip():
-        workflow_block = f"Ini alur kerja tim yang ditentukan owner workspace. Ikuti:\n\n{workspace.workflow_prompt.strip()}"
+    workflow_block = _workflow_prompt_block(workspace)
+    if workflow_block:
         extra_instructions = (
             f"{extra_instructions}\n\n{workflow_block}"
             if extra_instructions
@@ -2006,14 +2052,17 @@ async def _build_prompt_for(
         sprint_creator_roles=set(workspace.sprint_creator_roles or ["pm"]),
         existing_epics=existing_epics,
         existing_sprints=existing_sprints,
+        loop_threshold=int(guardrail_limit(workspace.guardrails or {}, "loop_threshold")),
+        has_mcp=(tool_kind or agent.tool_kind) in MCP_TOOL_KINDS,
     )
 
 
 async def _build_routine_prompt_for(
-    session, workspace: Workspace, agent: Agent, routine: Routine
+    session, workspace: Workspace, agent: Agent, routine: Routine,
+    tool_kind: str | None = None,
 ) -> str:
     """Assemble a routine-run prompt: BASE + role block + routine prompt + workspace
-    context (description/workflow) + agent memory + routine ```map contract. No ticket
+    context (description/workflow) + agent memory + routine `map` contract. No ticket
     context — the routine's own prompt is the task.
     """
     role_map = await _role_map(session)
@@ -2055,35 +2104,30 @@ async def _build_routine_prompt_for(
         ).all()
         existing_sprints = sorted({s.name for s in sprint_rows})
 
-    extra_instructions: str | None = None
-    if workspace.description and workspace.description.strip():
-        extra_instructions = f"Konteks proyek/workspace ini:\n\n{workspace.description.strip()}"
-    if workspace.workflow_prompt and workspace.workflow_prompt.strip():
-        workflow_block = f"Ini alur kerja tim yang ditentukan owner workspace. Ikuti:\n\n{workspace.workflow_prompt.strip()}"
-        extra_instructions = (
-            f"{extra_instructions}\n\n{workflow_block}"
-            if extra_instructions
-            else workflow_block
-        )
+    existing_artifact_groups = await _artifact_group_names(session, workspace.id)
 
     return build_routine_prompt(
         agent_info,
         workspace.repo_path,
         team_roster,
         routine_prompt=routine.prompt,
-        extra_instructions=extra_instructions,
+        extra_instructions=_owner_instruction_blocks(workspace),
         agent_memories=agent_memories,
         sprint_creator_roles=set(workspace.sprint_creator_roles or ["pm"]),
         existing_epics=existing_epics,
         existing_sprints=existing_sprints,
+        existing_artifact_groups=existing_artifact_groups,
+        time_unit=workspace.time_unit,
+        has_mcp=(tool_kind or agent.tool_kind) in MCP_TOOL_KINDS,
     )
 
 
 async def _build_chat_prompt_for(
-    session, workspace: Workspace, agent: Agent, conversation: Conversation
+    session, workspace: Workspace, agent: Agent, conversation: Conversation,
+    tool_kind: str | None = None,
 ) -> str:
     """Assemble a chat-run prompt: BASE + role block + conversation transcript +
-    workspace tickets + agent memory + chat ```map contract.
+    workspace tickets + agent memory + chat `map` contract.
     """
     role_map = await _role_map(session)
     roster = (
@@ -2164,16 +2208,7 @@ async def _build_chat_prompt_for(
         existing_sprints = sorted({s.name for s in sprint_rows})
         has_active_sprint = any(s.status == "active" for s in sprint_rows)
 
-    extra_instructions: str | None = None
-    if workspace.description and workspace.description.strip():
-        extra_instructions = f"Konteks proyek/workspace ini:\n\n{workspace.description.strip()}"
-    if workspace.workflow_prompt and workspace.workflow_prompt.strip():
-        workflow_block = f"Ini alur kerja tim yang ditentukan owner workspace. Ikuti:\n\n{workspace.workflow_prompt.strip()}"
-        extra_instructions = (
-            f"{extra_instructions}\n\n{workflow_block}"
-            if extra_instructions
-            else workflow_block
-        )
+    existing_artifact_groups = await _artifact_group_names(session, workspace.id)
 
     prompt = build_chat_prompt(
         agent_info,
@@ -2188,8 +2223,12 @@ async def _build_chat_prompt_for(
         sprint_creator_roles=set(workspace.sprint_creator_roles or ["pm"]),
         existing_epics=existing_epics,
         existing_sprints=existing_sprints,
+        existing_artifact_groups=existing_artifact_groups,
         has_active_sprint=has_active_sprint,
+        time_unit=workspace.time_unit,
+        has_mcp=(tool_kind or agent.tool_kind) in MCP_TOOL_KINDS,
     )
+    extra_instructions = _owner_instruction_blocks(workspace)
     if extra_instructions:
         prompt = f"{extra_instructions}\n\n{prompt}"
     return prompt

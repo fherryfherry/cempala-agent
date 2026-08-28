@@ -16,6 +16,12 @@ from pathlib import Path
 from app.config import settings
 
 
+# Agent tools that actually wire the map-tickets MCP server. `codex` and `agy` don't,
+# so their prompts must not advertise MCP tools they can't call (the prompt used to tell
+# them the MCP server was "the only way" to reach the ticket system).
+MCP_TOOL_KINDS = frozenset({"opencode", "claude"})
+
+
 def mcp_config_path(workspace_id: str, agent_id: str) -> str | None:
     """Write a per-run opencode.json wiring the map-tickets MCP server.
 

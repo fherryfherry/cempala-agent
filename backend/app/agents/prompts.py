@@ -3,6 +3,12 @@
 Pure Python — no DB/HTTP/ORM imports. Takes plain data in, returns a prompt
 string out, so it's unit-testable and callable from both the opencode
 adapter (MAP-020) and the orchestrator (MAP-023) without a DB session.
+
+Contract assembly is shared: the ```map skeleton for `tickets:`/`sprints:`/
+`updates:`/`artifacts:`/`memory:`/`artifact_updates:` is emitted by ONE set of
+`_*_field()` helpers used by all three run modes (ticket / routine / chat).
+They used to be three hand-copied blocks, which silently drifted — only the
+ticket contract ever told the agent which time unit `duration` is in.
 """
 
 from __future__ import annotations
@@ -15,6 +21,13 @@ from app.core.state_machine import STATUSES
 # Used as a defensive seed fallback when a role row's system_prompt is null
 # (backfilled builtin roles won't hit it — the migration copies these into the
 # `role` table). Overridden by agent.system_prompt as before.
+#
+# IMPORTANT: this dict is NOT the effective source of role prompts at runtime.
+# The orchestrator reads `agent.system_prompt` -> `role.system_prompt` from the
+# DB; editing text here has no effect on any existing workspace. Any change must
+# ship with an alembic migration in the style of `831e55a8c6a0` (guarded
+# `UPDATE role SET system_prompt = :new WHERE key = ... AND system_prompt = :old`,
+# so owner-customized prompts aren't clobbered).
 DEFAULT_ROLE_PROMPTS: dict[str, str] = {
     "pm": """\
 You are an EXPERIENCED (expert) Project Manager. Don't just ask the owner open-ended
@@ -29,11 +42,11 @@ You do NOT write or change code/tests. You MAY write planning documents
 If this ticket is an epic (has no sub-tickets yet):
 1. Read enough of the repo to understand the context (including existing document folder
    conventions, if any).
-2. Check the existing epic catalog in the ```map contract below — if this request actually
-   belongs to another existing epic, fill in `epic:` on each `tickets[]` entry to attach it
-   to that epic (do NOT create a new epic for a feature area that already exists). An epic is
-   a large feature area meant to be reused as the parent for future tickets — not a one-off
-   container per request.
+2. Check the existing epic catalog listed above the `map` contract below — if this request
+   actually belongs to another existing epic, fill in `epic:` on each `tickets[]` entry to
+   attach it to that epic (do NOT create a new epic for a feature area that already exists).
+   An epic is a large feature area meant to be reused as the parent for future tickets — not
+   a one-off container per request.
 3. Write a short PRD as a markdown file in the repo: goal, scope, acceptance criteria per
    sub-ticket. Declare this file via `artifacts:` (group e.g. "Technical Docs").
 4. Break it into 3-8 sub-tickets via `tickets[]`. Each sub-ticket must be completable by one
@@ -213,6 +226,25 @@ class ChatMessageInfo:
     is_system: bool = False
 
 
+_UNIT_LABELS = {"hour": "hour(s)", "day": "day(s)"}
+
+
+def _unit_label(time_unit: str) -> str:
+    return _UNIT_LABELS.get(time_unit, time_unit)
+
+
+# Appended right after the role block on runs that have NO ticket (routine, chat).
+# Every builtin role prompt ends by telling the agent which `status:` to set and who
+# to `mention` — and the no-ticket contract then forbids both, which report.py
+# rejects outright (run FAILED, then auto-retried into the same contradiction). The
+# role block can't be rewritten per mode (owners customize it), so override it here.
+_NO_TICKET_ROLE_OVERRIDE = """\
+OVERRIDE FOR THIS RUN: your role instructions above tell you to end with `status:` and
+`mention:`. That applies to TICKET runs only. This run has no ticket — do NOT write
+`status:` or `mention:` in your closing block, or the run is rejected. Everything else in
+your role instructions still applies."""
+
+
 def _workspace_tickets_block(tickets: list[WorkspaceTicketSummary]) -> str:
     lines = [
         f"- {t.key} [{t.status}] (sprint: {t.sprint_name or 'no sprint'}) — {t.title}"
@@ -221,29 +253,11 @@ def _workspace_tickets_block(tickets: list[WorkspaceTicketSummary]) -> str:
     return "Other tickets in this workspace (for context/review):\n" + "\n".join(lines)
 
 
-def _workspace_tickets_catalog_block(tickets: list[WorkspaceTicketSummary]) -> str | None:
-    """Ticket board snapshot for routine runs: status, assignee, last-updated time.
-    The agent reads/staleness-checks from THIS list — never from the repo.
-    """
-    if not tickets:
-        return None
-    lines = []
-    for t in tickets:
-        parts = [f"[{t.status}]"]
-        if t.assignee:
-            parts.append(f"assignee: {t.assignee}")
-        if t.updated_at:
-            parts.append(f"updated: {t.updated_at}")
-        lines.append(f"- {t.key} {' '.join(parts)} — {t.title}")
-    return f"""\
-TICKETS IN THIS WORKSPACE (Board menu — the source of truth for status/age, NOT the repo):
-{chr(10).join(lines)}"""
-
-
 def _app_menus_block() -> str:
-    """One-line-per-menu orientation so any role can accurately point the owner at the
-    right screen. Keep this in sync with the nav in frontend/components/header.tsx —
-    update it whenever a menu is added, renamed, or removed.
+    """One-line-per-menu orientation so the agent can accurately point the owner at the
+    right screen. Chat runs only — a ticket/routine run never talks to the owner about
+    navigation, and this block used to cost every prompt ~600 chars for nothing.
+    Keep in sync with the nav in frontend/components/header.tsx.
     """
     return """\
 App menus available to the owner (mention the relevant one by name when useful):
@@ -265,22 +279,23 @@ def _base_block(
     workspace_repo_path: str,
     team_roster: list[AgentInfo],
     sprint_creator_roles: set[str] | None = None,
+    *,
+    has_ticket: bool = True,
 ) -> str:
     roster_lines = "\n".join(
         f"- {member.name} ({member.label or member.role})" for member in team_roster
     )
     allowed_sprint_roles = sprint_creator_roles or {"pm"}
-    sprint_rule = (
-        "- Tickets are worked per sprint (a work timebox). You may ONLY work tickets that are "
-        "in the CURRENTLY active sprint — backlog tickets or tickets in an inactive sprint "
-        "must NOT be worked. If the ticket you have isn't in the active sprint, DON'T work "
-        "it: status: blocked, note that the ticket isn't in the active sprint yet."
-    )
-    if agent.role in allowed_sprint_roles:
-        sprint_rule += (
-            " EXCEPTION for you (you plan sprints): you may respond to tickets outside the "
-            "active sprint for triage/planning purposes (composing a sprint, breaking down "
-            "tickets), but do NOT implement a ticket that isn't active yet."
+    # Only sprint-planning roles can ever see a ticket outside the active sprint:
+    # `check_guardrails`'s `ticket_not_in_active_sprint` refuses to even schedule the
+    # run for everyone else, so the old "if it's not in the active sprint, block it"
+    # rule was unreachable text in every prompt. No ticket at all -> no rule.
+    sprint_rule = ""
+    if has_ticket and agent.role in allowed_sprint_roles:
+        sprint_rule = (
+            "\n- You plan sprints, so you may be handed a ticket that ISN'T in the active "
+            "sprint. Use that only for triage/planning (composing a sprint, breaking the "
+            "ticket down) — do NOT implement a ticket that isn't in the active sprint yet."
         )
     return f"""\
 You are {agent.name}, a {agent.label or agent.role} on the software team \
@@ -295,8 +310,7 @@ You work through a ticket system. Non-negotiable rules:
 - If you're stuck or missing information, use status `blocked` and explain what you need.
   Don't guess and continue.
 - Be concise. `summary` is not an essay.
-- When you're done, stop. Don't go looking for extra work.
-{sprint_rule}
+- When you're done, stop. Don't go looking for extra work.{sprint_rule}
 
 How to write your answer:
 - Always structured: short bullets/pointers and sub-headings, not long flat paragraphs. One
@@ -306,9 +320,7 @@ How to write your answer:
   concise.
 
 Team members in this workspace:
-{roster_lines}
-
-{_app_menus_block()}"""
+{roster_lines}"""
 
 
 def _ticket_context_block(
@@ -321,7 +333,7 @@ def _ticket_context_block(
 
     if recent_comments:
         comments_str = "\n".join(
-            f"- {c.author} ({c.created_at}): {c.body}" for c in recent_comments[-5:]
+            f"- {c.author} ({c.created_at}): {c.body}" for c in recent_comments
         )
     else:
         comments_str = "(no comments yet)"
@@ -361,29 +373,50 @@ Notes from your previous work (across tickets) — avoid repeating these:
 {notes_str}"""
 
 
-def _mcp_tools_block_for_opencode() -> str:
+def _mcp_tools_block() -> str:
+    """Ticket-system tools exposed over MCP. Only emitted when the run's tool actually
+    wires the map-tickets server (opencode and claude do; codex and agy do not) — the
+    block used to go into every prompt, telling agents with no MCP at all that a
+    nonexistent tool was "the only way" to reach the ticket system.
+
+    The write tools are permission-gated server-side (app/mcp_server.py), matching the
+    same role flags report.py enforces on the `map` block.
+    """
     return """\
-This MCP tool is the ONLY way an agent INTERACTS WITH THE TICKET SYSTEM.
-This tool is ONLY for opencode runs — the agent uses it to read/write ticket data.
-For change operations (status, sprint, assignee, etc.), use the ```map block's
-`updates:` — NOT the update_ticket() tool.
+MCP tools (server "map-tickets") are how you READ the ticket system. Ticket CHANGES go
+through the closing `map` block, not through tools.
 
 Available MCP tools:
 - list_tickets — list all tickets (key, status, priority, assignee, sprint, last update)
 - get_ticket(key) — ticket detail (description, comments, sub-tickets)
+- list_comments(key) — comments on a ticket
 - list_artifacts(filename=...) — search whether a filename is already published; ALWAYS call
-  this before declaring `artifacts:` in the closing ```map block to avoid publishing a
+  this before declaring `artifacts:` in the closing `map` block to avoid publishing a
   duplicate
-- post_comment(key, body) — write a follow-up comment on a ticket
-- create_ticket(title, description, priority) — create a new backlog ticket
+- read_artifact(attachment_id) — read a published artifact's contents
+- get_memory() — your own cross-ticket notes
+- post_comment(key, body) — comment on a ticket
+- create_ticket(title, description, priority, epic) — create a new backlog ticket
+- update_ticket(key, status, priority) — status/priority ONLY
 - delete_ticket(key) — PERMANENTLY delete; PM ONLY, only for duplicates/mistakes
+- create_memory(note) / update_memory(memory_id, note) — your own notes
 
-DO NOT use update_ticket() — that tool does NOT support sprint/assignee.
-To CHANGE a ticket (status, sprint, assignee, priority, duration), ALWAYS use
-`updates:` in the closing ```map block. That's the only way."""
+PREFER the closing `map` block over the write tools. Anything you declare there is recorded
+against this run, so it shows up in the run's trace; a tool call is not. Sprint, assignee and
+duration can ONLY be changed from that block — update_ticket does not support them. The write
+tools refuse calls your role isn't permitted to make, and say which permission refused."""
 
 
-def _anti_loop_block(review_round: int, previous_review_feedback: list[str]) -> str | None:
+def _anti_loop_block(
+    review_round: int,
+    previous_review_feedback: list[str],
+    loop_threshold: int = 3,
+) -> str | None:
+    """Shown to BOTH sides of a review ping-pong, not just the reviewer: the agent being
+    asked to re-fix is the one that most needs to know it's round N and to stop instead of
+    handing back again. `loop_threshold` is the workspace's actual guardrail value, so the
+    "give up now" advice fires in step with the loop detector rather than at a hardcoded 2.
+    """
     if review_round < 1:
         return None
     feedback_str = (
@@ -395,52 +428,56 @@ def _anti_loop_block(review_round: int, previous_review_feedback: list[str]) -> 
 This is review round {review_round} for this ticket. Previous reviews:
 {feedback_str}
 
-If the same problem still exists after being asked to fix it twice, DON'T ask again.
+If the same problem still exists after {loop_threshold} rounds, DON'T hand it back again.
 status: blocked, and explain why the fix isn't landing."""
 
 
-_UNIT_LABELS = {"hour": "hour(s)", "day": "day(s)"}
-
-
 def _epic_reuse_rule(existing_epics: list[str]) -> str:
-    """Reuse-guidance text for `tickets[].epic` — mirrors `groups_rule` below exactly
-
-    (docs/03-agent-design.md §3): list what already exists, mandate reusing a relevant
-    one, only allow inventing new when nothing fits. Epics are meant to be persistent
-    feature-area containers reused across many future tickets, not one-off per request.
+    """Reuse guidance for `tickets[].epic` — mirrors `_artifact_groups_rule` and
+    `_sprint_reuse_rule`: list what already exists, mandate reusing a relevant one, only
+    allow inventing new when nothing fits. Epics are persistent feature-area containers
+    reused across many future tickets, not one-off per request.
     """
+    naming_rule = (
+        "An epic's title is the general module/feature area it belongs to (e.g. "
+        "\"Module Transaksi\", \"Module Login & Auth\") — NEVER the specific bug/issue/request "
+        "that prompted it. A single bug report is not a new feature area: if a ticket becomes "
+        "a new epic, its title must be renamed to the module it belongs to before creation, "
+        "and the specific problem stays on the sub-ticket, not the epic."
+    )
     if existing_epics:
-        epics_str = "\n".join(f"    - {e}" for e in existing_epics)
+        epics_str = "\n".join(f"  - {e}" for e in existing_epics)
         return (
             f"Epics that ALREADY EXIST (top-level tickets) in this workspace:\n"
             f"{epics_str}\n"
-            f"    You MUST fill `epic:` with the relevant key if the feature area matches "
-            f"(match by purpose, not exact title). Leave `epic:` empty ONLY if this is truly "
-            f"a brand-new large feature area not in the list — this ticket itself will "
-            f"become the new epic."
+            f"You MUST fill `epic:` with the relevant key if the feature/module area matches "
+            f"(match by module/domain, not exact title — e.g. a login bug matches a \"Module "
+            f"Login\" epic even if its title says nothing about bugs). Leave `epic:` empty ONLY "
+            f"if this is truly a brand-new module not covered by any epic above — this ticket "
+            f"itself will become the new epic. {naming_rule}"
         )
-    return "There are no epics in this workspace yet — a ticket with no `epic:` will become the first epic."
+    return (
+        "There are no epics in this workspace yet — a ticket with no `epic:` will become the "
+        f"first epic. {naming_rule}"
+    )
 
 
 def _sprint_reuse_rule(existing_sprints: list[str]) -> str:
-    """Reuse-guidance text for `sprints:`/`tickets[].sprint` — same pattern as
-
-    `_epic_reuse_rule`, plus the explicit sprint-is-not-scope rule (owner request):
-    sprint is a pure timebox, never a place to put a feature/scope name — that's what
-    `epic` is for.
+    """Same pattern as `_epic_reuse_rule`, plus the explicit sprint-is-not-scope rule:
+    a sprint is a pure timebox, never a place for a feature/scope name — that's `epic`.
     """
     status_rule = (
         "`status` (optional): `active` to activate this sprint (deactivating any other "
         "active sprint, immediately running its tickets), `completed` to close it "
         "(unfinished tickets move to the next active sprint). Leave it empty if you're "
         "just creating/updating a sprint without changing its status — do NOT assume a "
-        "sprint becomes active automatically just because you declared it here."
+        "sprint becomes active automatically just because you declared it."
     )
     if existing_sprints:
-        sprints_str = "\n".join(f"    - {s}" for s in existing_sprints)
+        sprints_str = "\n".join(f"  - {s}" for s in existing_sprints)
         return (
             f"Sprints that ALREADY EXIST:\n{sprints_str}\n"
-            f"    You MUST use an existing name (exactly) if that timebox is still "
+            f"You MUST use an existing name (exactly) if that timebox is still "
             f"relevant. A sprint is ONLY a timebox — do NOT put a feature/scope name in "
             f"the sprint name (that's what `epic` is for); the suggested naming pattern "
             f"is 'Sprint 1', 'Sprint 2', etc. `goal` may hold a short target for that "
@@ -456,79 +493,144 @@ def _sprint_reuse_rule(existing_sprints: list[str]) -> str:
     )
 
 
-def _map_contract_block(
-    agent: AgentInfo,
-    team_roster: list[AgentInfo],
-    time_unit: str,
-    existing_artifact_groups: list[str],
-    sprint_creator_roles: set[str] | None = None,
-    existing_epics: list[str] | None = None,
-    existing_sprints: list[str] | None = None,
-) -> str:
-    allowed_statuses = ", ".join(sorted(STATUSES))
-    mention_names = ", ".join(m.name for m in team_roster)
-    unit_label = _UNIT_LABELS.get(time_unit, time_unit)
-    allowed_sprint_roles = sprint_creator_roles or {"pm"}
-    existing_epics = existing_epics or []
-    existing_sprints = existing_sprints or []
-
+def _artifact_groups_rule(existing_artifact_groups: list[str]) -> str:
     if existing_artifact_groups:
-        groups_str = "\n".join(f"    - {g}" for g in existing_artifact_groups)
-        groups_rule = (
+        groups_str = "\n".join(f"  - {g}" for g in existing_artifact_groups)
+        return (
             f"Groups that ALREADY EXIST in this workspace's Artifacts menu:\n"
             f"{groups_str}\n"
-            f"    You MUST use one of the groups above if it's relevant (match by purpose, "
+            f"You MUST use one of the groups above if it's relevant (match by purpose, "
             f"ignore case/spacing differences). Do NOT create a new name if a relevant one "
             f"exists — only create one if none of them fit."
         )
-    else:
-        groups_rule = (
-            "There are no groups in this workspace's Artifacts menu yet — you may create "
-            "the first one."
-        )
+    return (
+        "There are no groups in this workspace's Artifacts menu yet — you may create "
+        "the first one."
+    )
 
-    tickets_line = ""
+
+def _reuse_catalogs_block(
+    agent: AgentInfo,
+    allowed_sprint_roles: set[str],
+    existing_epics: list[str],
+    existing_sprints: list[str],
+    existing_artifact_groups: list[str],
+    *,
+    show_artifact_groups: bool,
+) -> str | None:
+    """The epic / sprint / artifact-group reuse catalogs, as prose ABOVE the fenced
+    block. They used to be interpolated into single `#` comment lines *inside* the
+    example YAML — but their bodies are multi-line lists with no `#`, so a catalog of
+    100 epics read as example list items nested under `tickets:`, i.e. data to copy.
+    """
+    sections: list[str] = []
     if agent.may_declare_tickets:
-        sprints_line = ""
+        sections.append(f"EPIC RULE — {_epic_reuse_rule(existing_epics)}")
         if agent.role in allowed_sprint_roles:
-            sprint_rule = _sprint_reuse_rule(existing_sprints)
-            sprints_line = f"""
+            sections.append(f"SPRINT RULE — {_sprint_reuse_rule(existing_sprints)}")
+    if show_artifact_groups:
+        sections.append(f"ARTIFACT GROUP RULE — {_artifact_groups_rule(existing_artifact_groups)}")
+    if not sections:
+        return None
+    return "Before you write the closing block, read these:\n\n" + "\n\n".join(sections)
+
+
+# --- shared ```map field skeletons -------------------------------------------------
+# One definition per field, used by all three contracts (ticket / routine / chat).
+
+
+def _tickets_field(time_unit: str, *, mode: str) -> str:
+    unit = _unit_label(time_unit)
+    if mode == "ticket":
+        header = "optional; a breakdown or a new bug/finding"
+        assignee = "assignee: <agent name>"
+    else:
+        header = "optional; a new ticket (status todo — auto-scheduled if it has an assignee)"
+        assignee = "assignee: <optional, agent name>"
+    return f"""
+tickets:                    # {header}
+  # the title must be tidy & readable by non-technical people: do NOT include file paths,
+  # function/variable names, code snippets, or other ticket numbers in the title — that
+  # technical detail belongs in `description`, not the title.
+  - title: <short title, plain language>
+    description: |
+      <detail>
+    {assignee}
+    priority: <low|medium|high|urgent>
+    epic: <optional, key from the EPIC RULE list above — leave empty ONLY for a new epic>
+    sprint: <optional, sprint name from the SPRINT RULE list above>
+    duration: <optional, PLAIN NUMBER in {unit}, e.g. 3 — NEVER a unit word like "3 hari"/"3 days">"""
+
+
+def _sprints_field(time_unit: str) -> str:
+    unit = _unit_label(time_unit)
+    return f"""
 sprints:                    # optional; declare/update a sprint (a timebox, NOT a feature name)
-  # SPRINT RULE: {sprint_rule}
+  # See SPRINT RULE above for which names to reuse and what `status` does.
   - name: <sprint name, e.g. "Sprint 1">
     start_date: <start date, YYYY-MM-DD>
     end_date: <end date, YYYY-MM-DD>
     goal: <short target/goal for this sprint — not a feature name>
-    duration: <sprint duration as a PLAIN NUMBER in {unit_label}, e.g. 14 — NEVER a unit word, "2 weeks"/"2 minggu" is invalid and gets silently dropped>
-    status: <optional, active|completed — see SPRINT RULE>"""
-        epic_rule = _epic_reuse_rule(existing_epics)
-        tickets_line = f"""
-tickets:                    # optional; a breakdown or a new bug/finding
-  # the title must be tidy & readable by non-technical people: do NOT include file paths,
-  # function/variable names, code snippets, or other ticket numbers in the title — that
-  # technical detail belongs in `description`, not the title.
-  # EPIC RULE: {epic_rule}
-  - title: <short title, plain language>
-    description: |
-      <detail>
-    assignee: <agent name>
-    priority: <low|medium|high|urgent>
-    epic: <optional, target epic key from the list above — leave empty ONLY for a new epic>
-    sprint: <optional, sprint name from the `sprints` list above>
-    duration: <optional, PLAIN NUMBER in {unit_label}, e.g. 3 — NEVER a unit word like "3 hari"/"3 days">
+    duration: <sprint duration as a PLAIN NUMBER in {unit}, e.g. 14 — NEVER a unit word, "2 weeks"/"2 minggu" is invalid and gets silently dropped>
+    status: <optional, active|completed>"""
+
+
+def _updates_field(time_unit: str) -> str:
+    unit = _unit_label(time_unit)
+    return f"""
 updates:                    # optional; change an existing OTHER ticket (not create a new one)
   - ticket: <KEY-123>
     status: <optional>
     priority: <optional, low|medium|high|urgent>
     assignee: <optional, agent name>
     sprint: <optional, move this ticket to a different sprint>
-    duration: <optional, PLAIN NUMBER in {unit_label} — same rule as above, no unit word>{sprints_line}"""
+    duration: <optional, PLAIN NUMBER in {unit} — same rule as above, no unit word>"""
 
-    artifact_updates_line = ""
-    if agent.may_manage_artifacts:
-        artifact_updates_line = f"""
+
+def _artifacts_field() -> str:
+    return """
+artifacts:                  # optional; IMPORTANT deliverable files only — PRDs, specs, design
+  # docs, evidence/test reports, architecture docs, and SCREENSHOTS of any visible UI change you
+  # made or verified. NOT every file you touched: do NOT declare source code you wrote/edited
+  # (e.g. app.js) — that already lives in the repo/git history, the Artifacts menu is for
+  # documentation-style deliverables (including screenshots), not a mirror of the diff.
+  # DUPLICATE CHECK: use list_artifacts(filename=...) (MCP tool) first — if a file with the
+  # SAME NAME is already published, do NOT declare it again (the backend also blocks exact
+  # re-publishes, but check first so you don't rely on that).
+  # `group` must follow the ARTIFACT GROUP RULE above.
+  - path: <file path relative to repo root, e.g. "docs/PRD.md">
+    group: <a group name from the existing list, or a clear new name>
+    description: <optional, short>"""
+
+
+def _comments_field(*, mode: str) -> str:
+    if mode == "chat":
+        return """
+comments:                   # optional; FOLLOW-UP on a ticket (two-way): comment on a
+  # ticket relevant to this chat discussion. Fill this in ONLY when there's a real
+  # follow-up that needs to be recorded on a ticket — don't force it for pure discussion.
+  - ticket: <KEY-123>
+    body: |
+      <follow-up comment for that ticket>"""
+    return """
+comments:                   # optional; comment on OTHER tickets in this workspace
+  - ticket: <KEY-123>
+    body: |
+      <comment text>"""
+
+
+def _memory_field() -> str:
+    return """
+memory:                     # optional; a short note you want to remember across tickets
+  # used for things not to repeat again (mistakes/failures), not a regular work summary —
+  # summary above already covers that. One sentence per note.
+  - <short note>"""
+
+
+def _artifact_updates_field() -> str:
+    return """
 artifact_updates:           # optional; ONLY roles with artifact-management permission — tidy up groups in the Artifacts menu
-  # Check the Artifacts list above first. The group name must match that list exactly.
+  # Group names must match the ARTIFACT GROUP RULE list above exactly.
   # op: rename | merge | move | delete
   - op: rename
     group: <old group name>
@@ -543,6 +645,73 @@ artifact_updates:           # optional; ONLY roles with artifact-management perm
   - op: delete
     group: <empty group — only allowed if it has no files in it>"""
 
+
+def _choices_field() -> str:
+    return """
+choices:                    # optional; a multiple-choice question for the owner (see IMPORTANT RULES)
+  type: single               # "single" (one answer) or "multiple" (more than one allowed)
+  options:
+    - Option A
+    - Option B"""
+
+
+def _mention_rules(team_roster: list[AgentInfo], *, has_mention_field: bool) -> str:
+    """The `@` rule, stated once per prompt. `mention:` takes bare names; `@` belongs in
+    prose text — including the text of `summary`, which IS inside the block. The old
+    "NEVER use `@` inside a `map` block" wording contradicted the base block outright.
+    """
+    names = ", ".join(m.name for m in team_roster)
+    field_rule = (
+        "- `mention:` = handoff. Bare NAME only, never `@`.\n"
+        if has_mention_field
+        else ""
+    )
+    return f"""\
+MENTION RULE:
+{field_rule}- Inside PROSE — the text of `summary`, or a `comments[].body` — write `@` right before a
+  teammate's name (e.g. "@lead-1") when they need to follow up. That's what renders as a
+  mention in the UI; a bare name in prose is just plain text.
+- Valid names: {names}"""
+
+
+def _epic_breakdown_rule() -> str:
+    """Epic-then-breakdown, for the no-ticket contracts (routine + chat). A real run had
+    the PM flatten a feature into 6 sibling tickets assigned straight to specialists; the
+    epic has no ticket key at write time, so children can't reference it in the same batch.
+    """
+    return """\
+- CREATING A NEW LARGE FEATURE AREA (epic): declare ONLY the epic ticket itself in this
+  `tickets:` batch — leave its `epic:` empty, set `assignee` to YOURSELF (the PM), not a
+  specialist, and title it per the EPIC RULE above.
+  Do NOT also declare its sub-tickets in this same batch: the epic doesn't have a ticket key
+  yet (one is only assigned once it's created), so you have no valid `epic: <key>` to put on
+  the children. Once your epic ticket is created and assigned to you, it becomes your own
+  next ticket-run — THAT'S where you break it into sub-tickets and assign EACH ONE to the
+  specialist who should do that piece of work. The epic ticket itself always stays assigned
+  to PM, never to a specialist directly."""
+
+
+def _map_contract_block(
+    agent: AgentInfo,
+    team_roster: list[AgentInfo],
+    time_unit: str,
+    sprint_creator_roles: set[str] | None = None,
+) -> str:
+    allowed_statuses = ", ".join(sorted(STATUSES))
+    mention_names = ", ".join(m.name for m in team_roster)
+    allowed_sprint_roles = sprint_creator_roles or {"pm"}
+
+    body = ""
+    if agent.may_declare_tickets:
+        body += _tickets_field(time_unit, mode="ticket")
+        body += _updates_field(time_unit)
+        if agent.role in allowed_sprint_roles:
+            body += _sprints_field(time_unit)
+    body += _artifacts_field()
+    body += _memory_field()
+    if agent.may_manage_artifacts:
+        body += _artifact_updates_field()
+
     return f"""\
 End your answer with EXACTLY ONE of the following blocks. Without this block your work is
 considered failed and the ticket will be blocked.
@@ -551,138 +720,35 @@ considered failed and the ticket will be blocked.
 status: <one of: {allowed_statuses}>
 mention: [<agent name from the team list: {mention_names}>]   # handoff: NAME ONLY, no @
 summary: |
-  <what you did, which files were touched, and proof that it works>{tickets_line}
-artifacts:                  # optional; IMPORTANT deliverable files only — PRDs, specs, design
-  # docs, evidence/test reports, architecture docs, and SCREENSHOTS of any visible UI change you
-  # made or verified. NOT every file you touched: do NOT declare source code you wrote/edited
-  # (e.g. app.js) — that already lives in the repo/git history, the Artifacts menu is for
-  # documentation-style deliverables (including screenshots), not a mirror of the diff.
-  # DUPLICATE CHECK: use list_artifacts(filename=...) (MCP tool) first — if a file with the
-  # SAME NAME is already published, do NOT declare it again (the backend also blocks exact
-  # re-publishes, but check first so you don't rely on that).
-  # GROUP RULE: check the list below first before writing `group`.
-  # {groups_rule}
-  - path: <file path relative to repo root, e.g. "docs/PRD.md">
-    group: <a group name from the existing list, or a clear new name>
-    description: <optional, short>
-memory:                     # optional; a short note you want to remember across tickets
-  # used for things not to repeat again (mistakes/failures), not a regular work summary —
-  # summary above already covers that. One sentence per note.
-  - <short note>{artifact_updates_line}
+  <what you did, which files were touched, and proof that it works>{body}
 ```
 
-MENTION RULE:
-- `mention:` in this block = handoff: write the agent's NAME only, WITHOUT an `@`.
-- Inside the TEXT of `summary` (the comment shown on the ticket), if you name a teammate who
-  needs to follow up, write `@` right before their name (e.g. "@lead-1") — that's what shows
-  up as a mention in the UI. A name without `@` in the text is just plain text."""
-
-
-def build_routine_prompt(
-    agent: AgentInfo,
-    workspace_repo_path: str,
-    team_roster: list[AgentInfo],
-    routine_prompt: str,
-    extra_instructions: str | None = None,
-    agent_memories: list[str] | None = None,
-    sprint_creator_roles: set[str] | None = None,
-    existing_epics: list[str] | None = None,
-    existing_sprints: list[str] | None = None,
-) -> str:
-    """Assemble a routine-run prompt (no ticket): BASE + role block + the routine's
-    own task prompt + workspace context + agent memory + a routine-specific ```map
-    contract (side-effect actions only — no status/mention).
-
-    The routine contract teaches `comments:` (comment on other tickets), `tickets[]`
-    (backlog, not auto-scheduled), `updates:`, `memory:`, and `artifact_updates:`
-    (PM only). `status`/`mention` are deliberately absent — the parser rejects them
-    in routine mode.
-    """
-    agent_memories = agent_memories or []
-    allowed_sprint_roles = sprint_creator_roles or {"pm"}
-    existing_epics = existing_epics or []
-    existing_sprints = existing_sprints or []
-
-    parts = [_base_block(agent, workspace_repo_path, team_roster, sprint_creator_roles)]
-
-    role_block = agent.system_prompt.strip() if agent.system_prompt else None
-    if not role_block:
-        role_block = DEFAULT_ROLE_PROMPTS.get(agent.role, "")
-    parts.append(role_block)
-
-    parts.append(f"ROUTINE TASK (not a regular ticket — there is no ticket currently being worked):\n\n{routine_prompt.strip()}")
-
-    if extra_instructions:
-        parts.append(extra_instructions)
-
-    memory_block = _agent_memory_block(agent_memories)
-    if memory_block:
-        parts.append(memory_block)
-
-    # MCP tools (ADR-011) — routine runs are exactly where the agent needs to
-    # read the Board and write follow-up comments via tools, not the repo.
-    parts.append(_mcp_tools_block_for_opencode())
-
-    parts.append(
-        _routine_contract_block(agent, team_roster, allowed_sprint_roles, existing_epics, existing_sprints)
-    )
-
-    return "\n\n".join(parts)
+{_mention_rules(team_roster, has_mention_field=True)}"""
 
 
 def _routine_contract_block(
     agent: AgentInfo,
     team_roster: list[AgentInfo],
+    time_unit: str,
     allowed_sprint_roles: set[str],
-    existing_epics: list[str] | None = None,
-    existing_sprints: list[str] | None = None,
 ) -> str:
-    existing_epics = existing_epics or []
-    existing_sprints = existing_sprints or []
-    mention_names = ", ".join(m.name for m in team_roster)
-    tickets_line = ""
+    body = _comments_field(mode="routine")
     if agent.may_declare_tickets:
-        sprints_line = ""
+        body += _updates_field(time_unit)
+        body += _tickets_field(time_unit, mode="routine")
         if agent.role in allowed_sprint_roles:
-            sprint_rule = _sprint_reuse_rule(existing_sprints)
-            sprints_line = f"""
-sprints:                    # optional; declare/update a sprint (a timebox, NOT a feature name)
-  # SPRINT RULE: {sprint_rule}
-  - name: <sprint name, e.g. "Sprint 1">
-    start_date: <start date, YYYY-MM-DD>
-    end_date: <end date, YYYY-MM-DD>
-    goal: <short target/goal for this sprint — not a feature name>
-    duration: <sprint duration as a PLAIN NUMBER, e.g. 14 — NEVER a unit word, "2 weeks"/"2 minggu" is invalid and gets silently dropped>
-    status: <optional, active|completed — see SPRINT RULE>"""
-        epic_rule = _epic_reuse_rule(existing_epics)
-        tickets_line = f"""
-tickets:                    # optional; a new ticket (status todo — auto-scheduled if it has an assignee)
-  # EPIC RULE: {epic_rule}
-  - title: <short title, plain language>
-    description: |
-      <detail>
-    assignee: <optional, agent name>
-    priority: <low|medium|high|urgent>
-    epic: <optional, target epic key from the list above — leave empty ONLY for a new epic>
-    sprint: <optional, sprint name from the `sprints` list above>
-    duration: <optional, PLAIN NUMBER, e.g. 3 — NEVER a unit word like "3 hari"/"3 days">{sprints_line}"""
-
-    artifact_updates_line = ""
+            body += _sprints_field(time_unit)
+    body += _memory_field()
     if agent.may_manage_artifacts:
-        artifact_updates_line = """
-artifact_updates:           # optional; ONLY roles with artifact-management permission — tidy up groups in the Artifacts menu
-  - op: rename
-    group: <old group name>
-    to: <new group name>
-  - op: merge
-    from: <source group>
-    into: <target group>
-  - op: move
-    group: <origin group>
-    file: <filename>
-    to: <target group>
-  - op: delete
-    group: <empty group>"""
+        body += _artifact_updates_field()
+
+    extra = ""
+    if agent.may_declare_tickets:
+        extra = (
+            "\n- Any `tickets[]` you create WITH an `assignee` start running automatically "
+            "once created — they are NOT inert backlog items, so don't over-create.\n"
+            + _epic_breakdown_rule()
+        )
 
     return f"""\
 End your answer with EXACTLY ONE of the following blocks. Without this block your work is
@@ -690,39 +756,101 @@ considered failed.
 
 ```map
 summary: |
-  <a short summary of what you did>
-comments:                   # optional; comment on OTHER tickets in this workspace
-  - ticket: <KEY-123>
-    body: |
-      <comment text>
-updates:                    # optional; change an existing OTHER ticket (not create a new one)
-  - ticket: <KEY-123>
-    status: <optional>
-    priority: <optional, low|medium|high|urgent>
-    assignee: <optional, agent name>
-    sprint: <optional, move this ticket to a different sprint>
-    duration: <optional, PLAIN NUMBER — same rule as above, no unit word>{tickets_line}
-memory:                     # optional; a short note you want to remember across tickets
-  - <short note>{artifact_updates_line}
+  <a short summary of what you did>{body}
+```
+
+IMPORTANT RULES:
+- You must NOT declare `status` or `mention` — this run has no ticket.{extra}
+- `comments:` is only for tickets that already exist in this workspace.
+
+{_mention_rules(team_roster, has_mention_field=False)}"""
+
+
+def _chat_contract_block(
+    agent: AgentInfo,
+    team_roster: list[AgentInfo],
+    time_unit: str,
+    allowed_sprint_roles: set[str],
+    has_active_sprint: bool = True,
+) -> str:
+    """The `map` contract for chat runs: no ticket, so `status`/`mention` are absent.
+
+    `summary` is the reply back to the owner in the chat; `comments:` is the two-way
+    follow-up. `has_active_sprint=False` means any `sprints:`/`tickets[]` declared here
+    is held as a proposal until the owner approves in this same chat
+    (orchestrator.py `_finish_chat_run`), so the contract tells the agent to phrase
+    `summary` as an ask, not a report.
+    """
+    body = _choices_field()
+    body += _comments_field(mode="chat")
+    if agent.may_declare_tickets:
+        body += _tickets_field(time_unit, mode="chat")
+        body += _updates_field(time_unit)
+        if agent.role in allowed_sprint_roles:
+            body += _sprints_field(time_unit)
+    body += _memory_field()
+    if agent.may_manage_artifacts:
+        body += _artifact_updates_field()
+
+    ticket_rules = ""
+    if agent.may_declare_tickets:
+        ticket_rules = (
+            "\n- If you're ASKING FOR APPROVAL of a proposal (the `sprints:`/`tickets:` you're\n"
+            "  proposing) AND there's an active sprint (the proposal executes immediately, not\n"
+            "  held as a draft), ALWAYS include `choices:` (`type: single`) with two options:\n"
+            "  1. The \"yes\" option — its text MUST START WITH one of these words (the system\n"
+            "     detects approval from the first word; these stay in Indonesian because the\n"
+            "     owner replies in Indonesian): \"Oke\", \"Lanjut\", \"Setuju\", \"Sip\", \"Gas\",\n"
+            "     \"Boleh\", or \"Silakan\". Example: \"Oke, lanjutkan eksekusi\".\n"
+            "  2. A second option for an owner who wants to change something/answer freely\n"
+            "     first — its text must NOT start with the words above. Example: \"Saya mau\n"
+            "     ubah dulu\".\n"
+            "  (If there's NO active sprint, your proposal is automatically held by the system,\n"
+            "  and the system has ALREADY added this approval choice itself — don't repeat it.)\n"
+            "  If the owner picks the second option, reply by inviting them to write their\n"
+            "  answer/change freely — don't treat it as approved yet.\n"
+            "- Any `tickets[]` you create WITH an `assignee` start running automatically once\n"
+            "  created — they are NOT inert backlog items, so don't over-create.\n"
+            + _epic_breakdown_rule()
+        )
+
+    no_active_sprint_note = ""
+    if not has_active_sprint and agent.role in allowed_sprint_roles:
+        no_active_sprint_note = (
+            "\n- NO SPRINT IS CURRENTLY ACTIVE. If you want to declare new work via "
+            "`sprints:`/`tickets:`, declare it as usual — but the system will NOT create it "
+            "immediately. The sprint and tickets are held as a proposal until the owner "
+            'replies with approval ("oke"/"lanjut") in this chat. Write `summary` as a '
+            'PROPOSAL asking for the owner\'s decision, not a report that it\'s "already done".'
+        )
+
+    return f"""\
+End your answer with EXACTLY ONE of the following blocks. Without this block your reply is
+considered failed.
+
+```map
+summary: |
+  <your reply to the owner in chat — plain language, directly answering their question>{body}
 ```
 
 IMPORTANT RULES:
 - You must NOT declare `status` or `mention` — this run has no ticket.
-- Any `tickets[]` you create WITH an `assignee` start running automatically once created —
-  they are NOT inert backlog items, so don't over-create.
-- CREATING A NEW LARGE FEATURE AREA (epic): declare ONLY the epic ticket itself in this
-  `tickets:` batch — leave its `epic:` empty, and set `assignee` to YOURSELF (the PM), not a
-  specialist. Do NOT also declare its sub-tickets in this same batch: the epic doesn't have a
-  ticket key yet (one is only assigned once it's created), so you have no valid `epic: <key>`
-  to put on the children. Once your epic ticket is created and assigned to you, it becomes
-  your own next ticket-run — THAT'S where you break it into sub-tickets and assign EACH ONE
-  to the specialist who should do that piece of work. The epic ticket itself always stays
-  assigned to PM, never to a specialist directly.
-- `comments:` is only for tickets that already exist in this workspace.
-- To mention an agent in comment TEXT, write `@` right before the agent's name (e.g.
-  "@lead-1"). `mention_names` below is the list of valid names — without `@`, a name is just
-  plain text. NEVER call an agent with `@` inside a ```map block.
-- Agent names you can mention in comments: {mention_names}"""
+- `summary` is the chat reply to the owner; `comments:` is the ticket follow-up.
+- If you need the owner to answer from a set of options (not free text), ASK ONLY ONE
+  QUESTION per reply — don't ask several things at once in a single `summary`. Declare
+  `choices:` (a normal YAML field, like `tickets:`/`sprints:` — do NOT write the options as
+  text inside `summary`, the system builds the display): `type: single` if only one option
+  may be picked, `type: multiple` if more than one is allowed, and `options:` holding the
+  list of choices. The UI will show these as pick buttons for the owner — they'll reply with
+  the option(s) they picked as a normal chat message, then you continue to the next question.
+  Don't use `choices:` for a question whose answer is free text (a name, a description, etc.)
+  — just ask it in plain `summary` instead.
+  REQUIRED: if your `summary` text mentions there are "options"/"choices" (e.g. "please pick
+  one of the options above"), `choices:` MUST actually be filled in with those options —
+  never refer to "the options above" without actually filling in this field.{ticket_rules}
+- `comments:` is only for tickets that already exist in this workspace.{no_active_sprint_note}
+
+{_mention_rules(team_roster, has_mention_field=False)}"""
 
 
 def build_prompt(
@@ -743,34 +871,21 @@ def build_prompt(
     sprint_creator_roles: set[str] | None = None,
     existing_epics: list[str] | None = None,
     existing_sprints: list[str] | None = None,
+    loop_threshold: int = 3,
+    has_mcp: bool = True,
 ) -> str:
     """Assemble a full agent prompt: BASE + role block + extra_instructions (if any) +
-    agent memory (if any) + ticket context + workspace tickets (if any) + anti-loop +
-    ```map contract.
+    MCP tools (if the run's tool has them) + agent memory + ticket context + workspace
+    tickets + anti-loop + reuse catalogs + `map` contract.
 
-    docs/02-tsd.md §4.4 assembly order. `agent.system_prompt`, if set, replaces
-    only the role block (BASE and the ```map contract are always present).
-    `extra_instructions` is an optional caller-supplied block (e.g. the
-    mention-triggered PM chat hint from orchestrator.py) inserted right after the
-    role block; omitted entirely when None so existing output is unchanged.
-    `workspace_tickets`, when non-empty, is a snapshot of the rest of the
-    workspace's tickets (orchestrator.py only supplies this for PM owner-chat
-    runs) so PM can review/fix sprint assignment across existing tickets, not
-    just the one it's currently on.
-    `existing_artifact_groups` lists the artifact group names already present in
-    the workspace's Artifacts menu; the agent must reuse a relevant one instead
-    of inventing near-duplicate group names.
-    `agent_memories` is this agent's own cross-ticket notes (```map `memory:`,
-    docs/03-agent-design.md §3) — most-recent-first callers should reverse to
-    chronological before passing in, same convention as `previous_summaries`.
-    `sprint_creator_roles` is the per-workspace set of roles allowed to declare
-    `sprints:` (Settings page pill picker); the contract only teaches the field
-    to those roles. Defaults to {"pm"}.
-    `existing_epics` lists the workspace's existing top-level tickets ("KEY — title")
-    so PM/QA/Pentester reuse a relevant epic via `tickets[].epic` instead of spawning
-    a fresh one-off epic every time (docs/03-agent-design.md §3). `existing_sprints`
-    lists existing sprint names for the same reuse treatment — sprints are pure
-    timeboxes, never a place for feature/scope names (that's what `epic` is for).
+    docs/02-tsd.md §4.4 assembly order. `agent.system_prompt`, if set, replaces only the
+    role block (BASE and the contract are always present). `extra_instructions` is an
+    optional caller-supplied block (e.g. the mention-triggered PM chat hint from
+    orchestrator.py) inserted right after the role block.
+
+    `has_mcp`: whether this run's agent tool actually wires the map-tickets MCP server
+    (opencode/claude yes, codex/agy no). `loop_threshold` is the workspace's guardrail
+    value, quoted in the anti-loop block so its advice matches enforcement.
     """
     attachments = attachments or []
     recent_comments = recent_comments or []
@@ -793,9 +908,8 @@ def build_prompt(
     if extra_instructions:
         parts.append(extra_instructions)
 
-    # MCP tools (ADR-011) — the agent can read/write tickets, artifacts, memory via
-    # tools; tell it explicitly so it doesn't try to find ticket state in the repo.
-    parts.append(_mcp_tools_block_for_opencode())
+    if has_mcp:
+        parts.append(_mcp_tools_block())
 
     memory_block = _agent_memory_block(agent_memories)
     if memory_block:
@@ -806,176 +920,95 @@ def build_prompt(
     if workspace_tickets:
         parts.append(_workspace_tickets_block(workspace_tickets))
 
-    if agent.is_reviewer:
-        anti_loop = _anti_loop_block(review_round, previous_review_feedback)
-        if anti_loop:
-            parts.append(anti_loop)
+    anti_loop = _anti_loop_block(review_round, previous_review_feedback, loop_threshold)
+    if anti_loop:
+        parts.append(anti_loop)
 
-    parts.append(
-        _map_contract_block(
-            agent,
-            team_roster,
-            time_unit,
-            existing_artifact_groups,
-            sprint_creator_roles,
-            existing_epics,
-            existing_sprints,
-        )
+    catalogs = _reuse_catalogs_block(
+        agent,
+        sprint_creator_roles,
+        existing_epics,
+        existing_sprints,
+        existing_artifact_groups,
+        show_artifact_groups=True,
     )
+    if catalogs:
+        parts.append(catalogs)
+
+    parts.append(_map_contract_block(agent, team_roster, time_unit, sprint_creator_roles))
 
     return "\n\n".join(parts)
 
 
-def _chat_contract_block(
+def build_routine_prompt(
     agent: AgentInfo,
+    workspace_repo_path: str,
     team_roster: list[AgentInfo],
-    allowed_sprint_roles: set[str],
+    routine_prompt: str,
+    extra_instructions: str | None = None,
+    agent_memories: list[str] | None = None,
+    sprint_creator_roles: set[str] | None = None,
     existing_epics: list[str] | None = None,
     existing_sprints: list[str] | None = None,
-    has_active_sprint: bool = True,
+    existing_artifact_groups: list[str] | None = None,
+    time_unit: str = "day",
+    has_mcp: bool = True,
 ) -> str:
-    """The ```map contract for chat runs: no ticket, so `status`/`mention` are absent.
-
-    `summary` is the reply back to the owner in the chat; `comments:` is the two-way
-    follow-up — comment on other existing tickets when the conversation requires
-    follow-up there. `tickets[]` (backlog, not auto-scheduled) and the rest mirror
-    the routine contract.
-
-    `has_active_sprint=False`: no sprint in the workspace is currently active
-    (the last one finished, or there was never one). Any `sprints:`/`tickets[]`
-    declared here still gets held as a proposal — nothing is created until the
-    owner approves in this same chat (orchestrator.py `_finish_chat_run`) — so
-    the contract tells the agent to phrase `summary` as an ask, not a report.
+    """Assemble a routine-run prompt (no ticket): BASE + role block + no-ticket override
+    + the routine's own task prompt + agent memory + MCP tools + reuse catalogs + a
+    routine-specific `map` contract (side-effect actions only — no status/mention).
     """
+    agent_memories = agent_memories or []
+    allowed_sprint_roles = sprint_creator_roles or {"pm"}
     existing_epics = existing_epics or []
     existing_sprints = existing_sprints or []
-    mention_names = ", ".join(m.name for m in team_roster)
-    tickets_line = ""
-    if agent.may_declare_tickets:
-        sprints_line = ""
-        if agent.role in allowed_sprint_roles:
-            sprint_rule = _sprint_reuse_rule(existing_sprints)
-            sprints_line = f"""
-sprints:                    # optional; declare/update a sprint (a timebox, NOT a feature name)
-  # SPRINT RULE: {sprint_rule}
-  - name: <sprint name, e.g. "Sprint 1">
-    start_date: <start date, YYYY-MM-DD>
-    end_date: <end date, YYYY-MM-DD>
-    goal: <short target/goal for this sprint — not a feature name>
-    duration: <sprint duration as a PLAIN NUMBER, e.g. 14 — NEVER a unit word, "2 weeks"/"2 minggu" is invalid and gets silently dropped>
-    status: <optional, active|completed — see SPRINT RULE>"""
-        epic_rule = _epic_reuse_rule(existing_epics)
-        tickets_line = f"""
-tickets:                    # optional; a new ticket (status todo — auto-scheduled if it has an assignee)
-  # EPIC RULE: {epic_rule}
-  - title: <short title, plain language>
-    description: |
-      <detail>
-    assignee: <optional, agent name>
-    priority: <low|medium|high|urgent>
-    epic: <optional, target epic key from the list above — leave empty ONLY for a new epic>
-    sprint: <optional, sprint name from the `sprints` list above>
-    duration: <optional, PLAIN NUMBER, e.g. 3 — NEVER a unit word like "3 hari"/"3 days">{sprints_line}"""
+    existing_artifact_groups = existing_artifact_groups or []
 
-    artifact_updates_line = ""
-    if agent.may_manage_artifacts:
-        artifact_updates_line = """
-artifact_updates:           # optional; ONLY roles with artifact-management permission — tidy up groups in the Artifacts menu
-  - op: rename
-    group: <old group name>
-    to: <new group name>
-  - op: merge
-    from: <source group>
-    into: <target group>
-  - op: move
-    group: <origin group>
-    file: <filename>
-    to: <target group>
-  - op: delete
-    group: <empty group>"""
-
-    no_active_sprint_note = ""
-    if not has_active_sprint and agent.role in allowed_sprint_roles:
-        no_active_sprint_note = (
-            "\n- NO SPRINT IS CURRENTLY ACTIVE. If you want to declare new work via "
-            "`sprints:`/`tickets:`, declare it as usual — but the system will NOT create it "
-            "immediately. The sprint and tickets are held as a proposal until the owner "
-            'replies with approval ("oke"/"lanjut") in this chat. Write `summary` as a '
-            'PROPOSAL asking for the owner\'s decision, not a report that it\'s "already done".'
+    parts = [
+        _base_block(
+            agent, workspace_repo_path, team_roster, sprint_creator_roles, has_ticket=False
         )
+    ]
 
-    return f"""\
-End your answer with EXACTLY ONE of the following blocks. Without this block your reply is
-considered failed.
+    role_block = agent.system_prompt.strip() if agent.system_prompt else None
+    if not role_block:
+        role_block = DEFAULT_ROLE_PROMPTS.get(agent.role, "")
+    parts.append(role_block)
+    parts.append(_NO_TICKET_ROLE_OVERRIDE)
 
-```map
-summary: |
-  <your reply to the owner in chat — plain language, directly answering their question>
-choices:                    # optional; a multiple-choice question for the owner (see IMPORTANT RULES)
-  type: single               # "single" (one answer) or "multiple" (more than one allowed)
-  options:
-    - Option A
-    - Option B
-comments:                   # optional; FOLLOW-UP on a ticket (two-way): comment on a
-  # ticket relevant to this chat discussion. Fill this in ONLY when there's a real
-  # follow-up that needs to be recorded on a ticket — don't force it for pure discussion.
-  - ticket: <KEY-123>
-    body: |
-      <follow-up comment for that ticket>{tickets_line}
-updates:                    # optional; change an existing OTHER ticket (not create a new one)
-  - ticket: <KEY-123>
-    status: <optional>
-    priority: <optional, low|medium|high|urgent>
-    assignee: <optional, agent name>
-    sprint: <optional, move this ticket to a different sprint>
-    duration: <optional, PLAIN NUMBER — same rule as above, no unit word>
-memory:                     # optional; a short note you want to remember across tickets
-  - <short note>{artifact_updates_line}
-```
+    parts.append(
+        "ROUTINE TASK (not a regular ticket — there is no ticket currently being worked):"
+        f"\n\n{routine_prompt.strip()}"
+    )
 
-IMPORTANT RULES:
-- You must NOT declare `status` or `mention` — this run has no ticket.
-- `summary` is the chat reply to the owner; `comments:` is the ticket follow-up.
-- If you need the owner to answer from a set of options (not free text), ASK ONLY ONE
-  QUESTION per reply — don't ask several things at once in a single `summary`. Declare
-  `choices:` (a normal YAML field, like `tickets:`/`sprints:` — do NOT write the options as
-  text inside `summary`, the system builds the display): `type: single` if only one option
-  may be picked, `type: multiple` if more than one is allowed, and `options:` holding the
-  list of choices. The UI will show these as pick buttons for the owner — they'll reply with
-  the option(s) they picked as a normal chat message, then you continue to the next question.
-  Don't use `choices:` for a question whose answer is free text (a name, a description, etc.)
-  — just ask it in plain `summary` instead.
-  REQUIRED: if your `summary` text mentions there are "options"/"choices" (e.g. "please pick
-  one of the options above"), `choices:` MUST actually be filled in with those options —
-  never refer to "the options above" without actually filling in this field.
-- If you're ASKING FOR APPROVAL of a proposal (the `sprints:`/`tickets:` you're proposing)
-  AND there's an active sprint (the proposal executes immediately, not held as a draft),
-  ALWAYS include `choices:` (`type: single`) with two options:
-  1. The "yes" option — its text MUST START WITH one of these words (the system detects
-     approval from the first word): "Oke", "Lanjut", "Setuju", "Sip", "Gas", "Boleh", or
-     "Silakan". Example: "Oke, lanjutkan eksekusi".
-  2. A second option for an owner who wants to change something/answer freely first — its
-     text must NOT start with the words above. Example: "Saya mau ubah dulu".
-  (If there's NO active sprint, your proposal is automatically held by the system, and the
-  system has ALREADY added this approval choice itself — you don't need to repeat it.)
-  If the owner picks the second option, reply by inviting them to write their answer/change
-  freely (e.g. "Silakan tulis apa yang mau diubah") — don't treat it as approved yet.
-- Any `tickets[]` you create WITH an `assignee` start running automatically once created —
-  they are NOT inert backlog items, so don't over-create.
-- CREATING A NEW LARGE FEATURE AREA (epic): declare ONLY the epic ticket itself in this
-  `tickets:` batch — leave its `epic:` empty, and set `assignee` to YOURSELF (the PM), not a
-  specialist. Do NOT also declare its sub-tickets in this same batch: the epic doesn't have a
-  ticket key yet (one is only assigned once it's created), so you have no valid `epic: <key>`
-  to put on the children. Once your epic ticket is created and assigned to you, it becomes
-  your own next ticket-run — THAT'S where you break it into sub-tickets and assign EACH ONE
-  to the specialist who should do that piece of work (same epic-breakdown steps as your role
-  instructions above). The epic ticket itself always stays assigned to PM, never to a
-  specialist directly.
-- `comments:` is only for tickets that already exist in this workspace.
-- To mention an agent in comment TEXT, write `@` right before the agent's name (e.g.
-  "@lead-1"). `mention_names` below is the list of valid names — without `@`, a name is just
-  plain text. NEVER call an agent with `@` inside a ```map block.
-- Agent names you can mention in comments: {mention_names}{no_active_sprint_note}"""
+    if extra_instructions:
+        parts.append(extra_instructions)
+
+    memory_block = _agent_memory_block(agent_memories)
+    if memory_block:
+        parts.append(memory_block)
+
+    # MCP tools (ADR-011) — routine runs are exactly where the agent needs to
+    # read the Board and write follow-up comments via tools, not the repo.
+    if has_mcp:
+        parts.append(_mcp_tools_block())
+
+    catalogs = _reuse_catalogs_block(
+        agent,
+        allowed_sprint_roles,
+        existing_epics,
+        existing_sprints,
+        existing_artifact_groups,
+        show_artifact_groups=agent.may_manage_artifacts,
+    )
+    if catalogs:
+        parts.append(catalogs)
+
+    parts.append(
+        _routine_contract_block(agent, team_roster, time_unit, allowed_sprint_roles)
+    )
+
+    return "\n\n".join(parts)
 
 
 def build_chat_prompt(
@@ -991,35 +1024,46 @@ def build_chat_prompt(
     sprint_creator_roles: set[str] | None = None,
     existing_epics: list[str] | None = None,
     existing_sprints: list[str] | None = None,
+    existing_artifact_groups: list[str] | None = None,
     has_active_sprint: bool = True,
+    time_unit: str = "day",
+    has_mcp: bool = True,
 ) -> str:
-    """Assemble a chat-run prompt: BASE + role block + chat context (messages,
-    attachments) + workspace tickets + agent memory + the chat ```map contract
-    (no status/mention; summary + comments[] + actions).
+    """Assemble a chat-run prompt: BASE + role block + no-ticket override + app menus +
+    chat context (messages, attachments) + workspace tickets + agent memory + MCP tools +
+    reuse catalogs + the chat `map` contract (no status/mention).
 
     Chat runs have no ticket: the conversation transcript IS the context, and the
     owner's latest message is the task. `attachments` are the owner-uploaded files
-    on this conversation, passed to the agent as context (the agent can reference
-    or copy them into a ticket comment if relevant).
+    on this conversation, passed to the agent as context.
     """
     agent_memories = agent_memories or []
     sprint_creator_roles = sprint_creator_roles or {"pm"}
     existing_epics = existing_epics or []
     existing_sprints = existing_sprints or []
+    existing_artifact_groups = existing_artifact_groups or []
     attachments = attachments or []
     messages = messages or []
 
-    parts = [_base_block(agent, workspace_repo_path, team_roster, sprint_creator_roles)]
+    parts = [
+        _base_block(
+            agent, workspace_repo_path, team_roster, sprint_creator_roles, has_ticket=False
+        )
+    ]
 
     role_block = agent.system_prompt.strip() if agent.system_prompt else None
     if not role_block:
         role_block = DEFAULT_ROLE_PROMPTS.get(agent.role, "")
     parts.append(role_block)
+    parts.append(_NO_TICKET_ROLE_OVERRIDE)
 
     parts.append(
         "YOU ARE IN A CHAT with the workspace owner (not a ticket). The owner sent you a "
         "message directly and is waiting for your reply in chat."
     )
+
+    # Only chat runs ever need to point the owner at a screen.
+    parts.append(_app_menus_block())
 
     if linked_ticket:
         parts.append(f"Context ticket the owner linked to this chat: {linked_ticket}")
@@ -1047,15 +1091,26 @@ def build_chat_prompt(
     if memory_block:
         parts.append(memory_block)
 
-    parts.append(_mcp_tools_block_for_opencode())
+    if has_mcp:
+        parts.append(_mcp_tools_block())
+
+    catalogs = _reuse_catalogs_block(
+        agent,
+        sprint_creator_roles,
+        existing_epics,
+        existing_sprints,
+        existing_artifact_groups,
+        show_artifact_groups=agent.may_manage_artifacts,
+    )
+    if catalogs:
+        parts.append(catalogs)
 
     parts.append(
         _chat_contract_block(
             agent,
             team_roster,
+            time_unit,
             sprint_creator_roles,
-            existing_epics,
-            existing_sprints,
             has_active_sprint,
         )
     )

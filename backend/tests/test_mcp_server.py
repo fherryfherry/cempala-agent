@@ -94,6 +94,42 @@ def _make_ticket(client, ws_id, title="Do the thing"):
     return resp.json()
 
 
+def test_mcp_write_tools_refuse_roles_without_the_permission(client, tmp_path):
+    """`create_ticket`/`update_ticket` used to bypass the `may_declare_tickets` gate
+    report.py enforces on `tickets:`/`updates:` — an engineer could create through the
+    tool exactly what the parser would have dropped. CLAUDE.md: role permissions are
+    enforced in the parser, not trusted to the prompt."""
+    ws = _make_workspace(client, tmp_path)
+    eng = _make_agent(client, ws["id"], "engineer", "eng-1")
+    ticket = _make_ticket(client, ws["id"], "A ticket")
+
+    import app.mcp_server as mcp_mod
+
+    mcp_mod.WORKSPACE_ID = ws["id"]
+    mcp_mod.AGENT_ID = eng["id"]
+    mcp_mod._ROLE_FLAGS.clear()
+
+    server = create_server()
+
+    async def _call(name, args):
+        result = await server.call_tool(name, args)
+        return result.content[0].text if result.content else ""
+
+    out = asyncio.run(_call("create_ticket", {"title": "Sneaky", "description": "x"}))
+    assert "may_declare_tickets" in out
+    assert "Refused" in out
+    titles = [t["title"] for t in client.get(f"/api/workspaces/{ws['id']}/tickets").json()]
+    assert "Sneaky" not in titles
+
+    out = asyncio.run(_call("update_ticket", {"key": ticket["key"], "status": "done"}))
+    assert "may_declare_tickets" in out
+    assert client.get(f"/api/tickets/{ticket['key']}").json()["status"] == "backlog"
+
+    # Read tools stay open to every role.
+    out = asyncio.run(_call("list_tickets", {}))
+    assert ticket["key"] in out
+
+
 def test_mcp_tools_end_to_end(client, tmp_path, monkeypatch):
     ws = _make_workspace(client, tmp_path)
     pm = _make_agent(client, ws["id"], "pm", "pm-1")
@@ -103,6 +139,7 @@ def test_mcp_tools_end_to_end(client, tmp_path, monkeypatch):
 
     mcp_mod.WORKSPACE_ID = ws["id"]
     mcp_mod.AGENT_ID = pm["id"]
+    mcp_mod._ROLE_FLAGS.clear()
 
     server = create_server()
 

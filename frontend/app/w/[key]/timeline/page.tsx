@@ -112,15 +112,19 @@ interface EpicGroup {
 
 /** Group a sprint's tickets into epic/standalone rows, packing them back-to-back
  * starting at `originPx`. Returns the px position right after the last ticket,
- * so callers can tell whether ticket content overflows a sprint's calendar bar. */
+ * so callers can tell whether ticket content overflows a sprint's calendar bar.
+ *
+ * `epicLookup` resolves parent epics regardless of the epic's own `sprint_id`:
+ * epics are reusable across sprints (ADR-012) and deliberately never carry a
+ * sprint_id themselves, so a child's epic must be found outside `sprintTickets`. */
 function layoutSprintTickets(
   sprintTickets: Ticket[],
   originPx: number,
+  epicLookup: Map<string, Ticket>,
 ): { epics: EpicGroup[]; standalone: PlacedTicket[]; endPx: number } {
   const sorted = [...sprintTickets].sort(
     (a, b) => a.created_at.localeCompare(b.created_at) || a.key.localeCompare(b.key),
   );
-  const ids = new Set(sorted.map((t) => t.id));
   let cursorUnits = 0;
   const placed = sorted.map((ticket) => {
     const left = originPx + cursorUnits * PX_PER_DAY;
@@ -128,12 +132,12 @@ function layoutSprintTickets(
     return { ticket, left };
   });
   const epics = placed
-    .filter((p) => p.ticket.parent_id && ids.has(p.ticket.parent_id))
+    .filter((p) => p.ticket.parent_id && epicLookup.has(p.ticket.parent_id))
     .reduce((acc, p) => {
       const epicId = p.ticket.parent_id as string;
       let group = acc.find((g) => g.epic.id === epicId);
       if (!group) {
-        const epic = placed.find((x) => x.ticket.id === epicId)?.ticket;
+        const epic = epicLookup.get(epicId);
         if (!epic) return acc;
         group = { epic, children: [] };
         acc.push(group);
@@ -147,6 +151,13 @@ function layoutSprintTickets(
     (p) => !epicIds.has(p.ticket.id) && !childIds.has(p.ticket.id),
   );
   return { epics, standalone, endPx: originPx + cursorUnits * PX_PER_DAY };
+}
+
+/** Epics are reusable across sprints and never carry their own sprint_id
+ * (ADR-012), so they're looked up by id from the full ticket list, not from
+ * whatever subset happens to share a sprint. */
+function buildEpicLookup(allTickets: Ticket[]): Map<string, Ticket> {
+  return new Map(allTickets.filter((t) => !t.parent_id).map((t) => [t.id, t]));
 }
 
 /** Grid units a sprint's bar (and the unscheduled-section cursor) advances: the
@@ -173,11 +184,12 @@ interface UnscheduledRow {
  * the pre-calendar layout, kept only as a fallback for not-yet-scheduled sprints
  * so they still render (never fabricating a fake date for them). */
 function layoutUnscheduledRows(sprints: Sprint[], allTickets: Ticket[]): UnscheduledRow[] {
+  const epicLookup = buildEpicLookup(allTickets);
   let globalCursorUnits = 0;
   return sprints.map((sprint) => {
     const sprintTickets = allTickets.filter((t) => t.sprint_id === sprint.id);
     const originPx = globalCursorUnits * PX_PER_DAY;
-    const { epics, standalone } = layoutSprintTickets(sprintTickets, originPx);
+    const { epics, standalone } = layoutSprintTickets(sprintTickets, originPx, epicLookup);
     const extent = sprintExtent(sprint, epics, standalone);
     const sprintStart = globalCursorUnits;
     globalCursorUnits = Math.max(globalCursorUnits, sprintStart + extent);
@@ -203,6 +215,7 @@ function layoutScheduledRows(
   allTickets: Ticket[],
   dateToX: (d: Date) => number,
 ): { rows: ScheduledRow[]; maxRightEdge: number } {
+  const epicLookup = buildEpicLookup(allTickets);
   let maxRightEdge = 0;
   const rows = sprints.map((sprint) => {
     const start = parseDateOnly(sprint.start_date);
@@ -224,7 +237,7 @@ function layoutScheduledRows(
       incomplete = true;
     }
     const sprintTickets = allTickets.filter((t) => t.sprint_id === sprint.id);
-    const { epics, standalone, endPx } = layoutSprintTickets(sprintTickets, barLeft);
+    const { epics, standalone, endPx } = layoutSprintTickets(sprintTickets, barLeft, epicLookup);
     // The sprint bar must cover every ticket packed below it: if the tickets'
     // total estimated duration exceeds the sprint's calendar range (or the sprint
     // has no dates at all), widen the bar to reach endPx so no ticket spills past
@@ -934,6 +947,11 @@ function TicketLeftCell({
       className="sticky left-0 z-10 flex items-center gap-2 border-b border-black/[.06] bg-card px-4 hover:bg-accent/40 dark:border-white/[.06]"
     >
       {indent && <span className="ml-5 border-l-2 border-black/10 pl-2 dark:border-white/10" />}
+      {!ticket.parent_id && (
+        <span className="rounded bg-violet-100 px-1 py-0.5 text-[9px] font-semibold text-violet-700 dark:bg-violet-900/60 dark:text-violet-300">
+          EPIC
+        </span>
+      )}
       <span className="font-mono text-xs whitespace-nowrap text-zinc-500">{ticket.key}</span>
       {assignee && (
         <span title={assignee.name} className="shrink-0">

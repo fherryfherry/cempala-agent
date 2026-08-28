@@ -577,7 +577,7 @@ def test_run_from_todo_still_auto_transitions_and_completes(client, tmp_path, mo
 # extra_instructions: PM mention-triggered runs only
 # ---------------------------------------------------------------------------
 
-_MARKER = "JANGAN pernah langsung membuat tickets[]"
+_MARKER = "NEVER create tickets[] in your first reply"
 
 
 def test_extra_instructions_marker_present_only_for_pm_mention_trigger(
@@ -687,7 +687,7 @@ def test_pm_mention_prompt_requires_five_part_final_plan(client, tmp_path, monke
     detail = client.get(f"/api/runs/{mention_run['id']}").json()
     prompt = detail["events"][0]["payload"]["prompt"]
 
-    for keyword in ("Requirement", "Goal", "Epic tujuan", "Breakdown sprint", "Estimasi durasi"):
+    for keyword in ("Requirement", "Goal", "Target epic", "Sprint breakdown", "Duration estimate"):
         assert keyword in prompt, f"missing final-plan part: {keyword}"
 
 

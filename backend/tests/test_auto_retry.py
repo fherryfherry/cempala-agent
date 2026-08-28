@@ -3,8 +3,8 @@
 When a ticket run fails in a *retryable* way (missing/malformed ```map block,
 opencode subprocess failure), the orchestrator schedules a child run with
 `parent_run_id` chained to the failed one, up to `max_auto_retries` per
-(ticket, agent). The child's prompt carries a "PERINGATAN: RUN SEBELUMNYA
-GAGAL" notice with the parent's error + output tail, and starts a fresh
+(ticket, agent). The child's prompt carries a "WARNING: YOUR PREVIOUS RUN
+FAILED" notice with the parent's error + output tail, and starts a fresh
 opencode session (`-s` is NOT passed). Only after the budget is exhausted
 does the ticket get blocked. Non-retryable failures (state-machine rejection)
 and routine runs never retry.
@@ -252,7 +252,7 @@ def test_single_retry_succeeds_and_notice_in_prompt(client, tmp_path, monkeypatc
     assert final_ticket["blocked_reason"] is None
 
     prompt = _run_prompt(client, retry_run["id"])
-    assert "PERINGATAN: RUN SEBELUMNYA GAGAL" in prompt
+    assert "WARNING: YOUR PREVIOUS RUN FAILED" in prompt
     assert "forgot the map block" in prompt
 
     # ticket never got blocked: no status_change -> blocked event on the failed run

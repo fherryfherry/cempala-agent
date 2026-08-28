@@ -54,26 +54,10 @@ def test_base_always_present():
     assert "pm-1 (Project Manager)" in prompt
 
 
-def test_base_prompt_forbids_working_non_active_sprint_tickets():
-    prompt = build_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, TICKET)
-    assert "may ONLY work tickets that are in the CURRENTLY active sprint" in prompt
-    assert "backlog tickets or tickets in an inactive sprint must NOT be worked" in prompt
-    assert "status: blocked" in prompt
-
-
-def test_sprint_creator_role_gets_triage_exemption():
-    prompt = build_prompt(
-        _agent("pm-1", "pm"),
-        "/repo",
-        ROSTER,
-        TICKET,
-        sprint_creator_roles={"pm"},
-    )
-    assert "EXCEPTION for you (you plan sprints)" in prompt
-    assert "triage/planning" in prompt
-
-
-def test_non_sprint_creator_role_gets_no_exemption():
+def test_non_sprint_creator_role_gets_no_sprint_rule():
+    """`check_guardrails`'s ticket_not_in_active_sprint already refuses to schedule an
+    out-of-sprint ticket for these roles, so telling them to self-block on one was
+    unreachable text in every prompt."""
     for role in ("lead", "engineer", "designer", "qa", "pentester"):
         prompt = build_prompt(
             _agent(f"{role}-1", role),
@@ -82,7 +66,34 @@ def test_non_sprint_creator_role_gets_no_exemption():
             TICKET,
             sprint_creator_roles={"pm"},
         )
-        assert "EXCEPTION for you" not in prompt
+        assert "active sprint" not in prompt
+
+
+def test_sprint_creator_role_gets_triage_rule():
+    """Only sprint planners are exempted by the guardrail, so only they can actually be
+    handed a ticket outside the active sprint."""
+    prompt = build_prompt(
+        _agent("pm-1", "pm"),
+        "/repo",
+        ROSTER,
+        TICKET,
+        sprint_creator_roles={"pm"},
+    )
+    assert "You plan sprints" in prompt
+    assert "triage/planning" in prompt
+
+
+def test_no_ticket_runs_get_no_sprint_rule():
+    """Routine/chat runs have no ticket at all — a sprint rule there is pure noise."""
+    from app.agents.prompts import build_chat_prompt, build_routine_prompt
+
+    for prompt in (
+        build_routine_prompt(_agent("pm-1", "pm"), "/repo", ROSTER, routine_prompt="x"),
+        build_chat_prompt(
+            _agent("pm-1", "pm"), "/repo", ROSTER, conversation_title="x", messages=[]
+        ),
+    ):
+        assert "You plan sprints" not in prompt
 
 
 def test_ticket_context_shows_active_sprint():
@@ -169,13 +180,12 @@ def test_role_prompt_fallback_via_agent_info():
 
 
 def test_custom_role_prompt_fallback_contracts_gated_by_flags():
-    """A custom role with no flags gets no tickets[]/artifact_updates/anti-loop
-    blocks even though the parser would gate those on the same flags."""
+    """A custom role with no flags gets no tickets[]/artifact_updates blocks, even
+    though the parser would gate those on the same flags."""
     agent = AgentInfo(name="scrum-1", role="scrum_master", system_prompt="x", label="Scrum Master")
     prompt = build_prompt(agent, "/repo", ROSTER, TICKET, review_round=2)
     assert "tickets:" not in prompt
     assert "artifact_updates:" not in prompt
-    assert "This is review round" not in prompt
 
 
 def test_map_contract_status_list_is_unrestricted():
@@ -251,11 +261,31 @@ def test_anti_loop_present_for_reviewer_roles_with_review_round():
         )
         assert "This is review round 2 for this ticket." in prompt
         assert "Email validation missing on the login form." in prompt
-        assert (
-            "If the same problem still exists after being asked to fix it twice, "
-            "DON'T ask again." in prompt
-        )
         assert "status: blocked, and explain why the fix isn't landing." in prompt
+
+
+def test_anti_loop_quotes_the_workspace_loop_threshold():
+    """The "give up now" advice must fire in step with the loop_threshold guardrail,
+    not at a hardcoded 2 that a workspace may have re-tuned."""
+    prompt = build_prompt(
+        _agent("lead-1", "lead"), "/repo", ROSTER, TICKET, review_round=2, loop_threshold=5
+    )
+    assert "after 5 rounds" in prompt
+
+
+def test_anti_loop_reaches_the_implementer_side_too():
+    """The ping-pong the loop detector catches is reviewer <-> implementer, and the
+    implementer being asked to re-fix is the side that most needs to stop."""
+    prompt = build_prompt(
+        _agent("eng-1", "engineer"),
+        "/repo",
+        ROSTER,
+        TICKET,
+        review_round=2,
+        previous_review_feedback=["Still no email validation."],
+    )
+    assert "This is review round 2 for this ticket." in prompt
+    assert "Still no email validation." in prompt
 
 
 def test_anti_loop_present_for_system_architect_with_review_round():
@@ -270,27 +300,15 @@ def test_anti_loop_present_for_system_architect_with_review_round():
     assert "This is review round 2 for this ticket." in prompt
 
 
-def test_anti_loop_absent_for_business_analyst_even_with_review_round():
-    prompt = build_prompt(
-        _agent("ba-1", "business_analyst"),
-        "/repo",
-        ROSTER,
-        TICKET,
-        review_round=2,
-        previous_review_feedback=["x"],
-    )
-    assert "This is review round" not in prompt
-
-
-def test_anti_loop_absent_for_non_reviewer_roles_even_with_review_round():
-    for role in ("pm", "engineer", "designer"):
+def test_anti_loop_absent_for_every_role_when_no_reviews_yet():
+    for role in ("pm", "engineer", "designer", "business_analyst"):
         prompt = build_prompt(
             _agent(f"{role}-x", role),
             "/repo",
             ROSTER,
             TICKET,
-            review_round=2,
-            previous_review_feedback=["some feedback"],
+            review_round=0,
+            previous_review_feedback=[],
         )
         assert "This is review round" not in prompt
 
@@ -431,7 +449,7 @@ def test_existing_epics_listed_in_contract_for_pm():
     assert "AUTH-001 — Authentication" in prompt
     assert "BILLING-002 — Billing" in prompt
     assert "You MUST fill `epic:`" in prompt
-    assert "epic: <optional, target epic key from the list above" in prompt
+    assert "epic: <optional, key from the EPIC RULE list above" in prompt
 
 
 def test_no_existing_epics_tells_agent_first_one_becomes_epic():
@@ -473,10 +491,19 @@ def test_no_existing_sprints_tells_agent_pure_timebox_naming():
     assert "Sprints that ALREADY EXIST" not in prompt
 
 
-def test_base_block_lists_terminal_menu():
-    prompt = build_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, TICKET)
-    assert "App menus available to the owner" in prompt
-    assert "Terminal: interactive shell in the repo" in prompt
+def test_app_menus_listed_in_chat_prompts_only():
+    """Only a chat run ever points the owner at a screen; ticket/routine runs paid ~600
+    chars for it in every prompt."""
+    from app.agents.prompts import build_chat_prompt
+
+    chat = build_chat_prompt(
+        _agent("pm-1", "pm"), "/repo", ROSTER, conversation_title="x", messages=[]
+    )
+    assert "App menus available to the owner" in chat
+    assert "Terminal: interactive shell in the repo" in chat
+
+    ticket_prompt = build_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, TICKET)
+    assert "App menus available to the owner" not in ticket_prompt
 
 
 def test_artifacts_contract_mentions_screenshots():
@@ -526,7 +553,6 @@ def test_mcp_tools_block_in_normal_prompt():
     assert "list_tickets" in prompt
     assert "post_comment" in prompt
     assert "update_ticket" in prompt
-    assert "updates:" in prompt
 
 
 def test_mcp_tools_block_in_routine_prompt():
@@ -540,6 +566,97 @@ def test_mcp_tools_block_in_routine_prompt():
     assert "updates:" in prompt
 
 
+def test_mcp_tools_block_omitted_when_the_run_has_no_mcp():
+    """codex and agy wire no MCP server (see MCP_TOOL_KINDS); their prompts used to
+    claim a nonexistent tool was the only way to reach the ticket system."""
+    from app.agents.prompts import build_chat_prompt, build_routine_prompt
+
+    prompts = [
+        build_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, TICKET, has_mcp=False),
+        build_routine_prompt(
+            _agent("pm-1", "pm"), "/repo", ROSTER, routine_prompt="x", has_mcp=False
+        ),
+        build_chat_prompt(
+            _agent("pm-1", "pm"), "/repo", ROSTER, conversation_title="x", messages=[],
+            has_mcp=False,
+        ),
+    ]
+    for prompt in prompts:
+        assert "Available MCP tools" not in prompt
+        assert "list_tickets" not in prompt
+
+
+def test_duration_unit_taught_in_every_run_mode():
+    """The three contracts used to be hand-copied and drifted: only the ticket one
+    interpolated the workspace time unit, so a chat/routine agent was never told
+    whether `duration: 3` meant 3 hours or 3 days."""
+    from app.agents.prompts import build_chat_prompt, build_routine_prompt
+
+    prompts = [
+        build_prompt(_agent("pm-1", "pm"), "/repo", ROSTER, TICKET, time_unit="hour"),
+        build_routine_prompt(
+            _agent("pm-1", "pm"), "/repo", ROSTER, routine_prompt="x", time_unit="hour"
+        ),
+        build_chat_prompt(
+            _agent("pm-1", "pm"), "/repo", ROSTER, conversation_title="x", messages=[],
+            time_unit="hour",
+        ),
+    ]
+    for prompt in prompts:
+        assert "PLAIN NUMBER in hour(s)" in prompt
+        assert "PLAIN NUMBER in day(s)" not in prompt
+
+
+def test_no_ticket_contracts_override_the_role_blocks_status_instruction():
+    """Every builtin role prompt ends with "status: X, mention Y"; the no-ticket
+    contracts forbid both and report.py FAILS the run for declaring them, which
+    auto-retried straight back into the same contradiction."""
+    from app.agents.prompts import build_chat_prompt, build_routine_prompt
+
+    for prompt in (
+        build_routine_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, routine_prompt="x"),
+        build_chat_prompt(
+            _agent("eng-1", "engineer"), "/repo", ROSTER, conversation_title="x", messages=[]
+        ),
+    ):
+        # The role block still says it...
+        assert "status: review, mention the Lead Engineer" in prompt
+        # ...so the override must appear after it and before the contract.
+        assert "OVERRIDE FOR THIS RUN" in prompt
+        assert prompt.index("status: review, mention the Lead Engineer") < prompt.index(
+            "OVERRIDE FOR THIS RUN"
+        )
+
+
+def test_prompt_code_fences_are_balanced():
+    """Six emitted lines used to carry a mid-line ```map outside any real fence, which
+    opens an inline code span and scrambles the prompt's own markdown structure."""
+    from app.agents.prompts import build_chat_prompt, build_routine_prompt
+
+    prompts = [
+        build_prompt(_agent("pm-1", "pm"), "/repo", ROSTER, TICKET),
+        build_routine_prompt(_agent("pm-1", "pm"), "/repo", ROSTER, routine_prompt="x"),
+        build_chat_prompt(
+            _agent("pm-1", "pm"), "/repo", ROSTER, conversation_title="x", messages=[]
+        ),
+    ]
+    for prompt in prompts:
+        assert prompt.count("```") % 2 == 0
+        # every fence must start its own line
+        assert "```" not in prompt.replace("\n```", "\n")
+
+
+def test_fixed_scaffolding_stays_small():
+    """Tripwire against bloat creeping back. Measured before this cleanup: engineer
+    ticket 6455 chars, PM ticket 12291. These are ceilings on the FIXED scaffolding
+    (empty ticket, no comments/summaries/catalogs) — if a new always-on block pushes
+    past them, it needs to earn its place or be gated to the run mode that needs it."""
+    eng = build_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, TICKET)
+    assert len(eng) < 6000, f"engineer ticket prompt grew to {len(eng)} chars"
+    pm = build_prompt(_agent("pm-1", "pm"), "/repo", ROSTER, TICKET)
+    assert len(pm) < 11800, f"PM ticket prompt grew to {len(pm)} chars"
+
+
 def test_routine_prompt_teaches_at_mention_syntax_in_comments():
     from app.agents.prompts import build_routine_prompt
 
@@ -547,7 +664,7 @@ def test_routine_prompt_teaches_at_mention_syntax_in_comments():
         _agent("pm-1", "pm"), "/repo", ROSTER, routine_prompt="check stuck tickets"
     )
     assert '"@lead-1"' in prompt
-    assert "NEVER call an agent with `@` inside a" in prompt
+    assert "write `@` right before a" in prompt
 
 
 def test_agent_memory_block_absent_by_default():
@@ -590,7 +707,24 @@ def test_chat_prompt_teaches_at_mention_syntax_in_comments():
         messages=[],
     )
     assert '"@lead-1"' in prompt
-    assert "NEVER call an agent with `@` inside a" in prompt
+    assert "write `@` right before a" in prompt
+
+
+def test_at_mention_rule_does_not_contradict_itself():
+    """The base block requires `@` inside `summary` text; the contracts used to say
+    "NEVER use `@` inside a map block" — and `summary` is inside that block."""
+    from app.agents.prompts import build_chat_prompt, build_routine_prompt
+
+    prompts = [
+        build_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, TICKET),
+        build_routine_prompt(_agent("pm-1", "pm"), "/repo", ROSTER, routine_prompt="x"),
+        build_chat_prompt(
+            _agent("pm-1", "pm"), "/repo", ROSTER, conversation_title="x", messages=[]
+        ),
+    ]
+    for prompt in prompts:
+        assert "NEVER call an agent with `@` inside a" not in prompt
+        assert "write `@` right before a" in prompt
 
 
 def test_chat_prompt_teaches_choices_block_syntax():
@@ -691,4 +825,4 @@ def test_map_contract_clarifies_no_at_in_mention_field():
     prompt = build_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, TICKET)
     assert "mention: [<agent name from the team list:" in prompt
     assert "NAME ONLY, no @" in prompt
-    assert "WITHOUT an `@`" in prompt
+    assert "Bare NAME only, never `@`." in prompt

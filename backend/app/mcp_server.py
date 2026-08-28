@@ -93,6 +93,50 @@ def _api_raw(path: str) -> bytes:
     return _http.get(f"{API_BASE}{path}").content
 
 
+# Role permission flags, fetched once per run (this process is spawned per run, so they
+# can't change under us). Keyed by agent id so tests that rebind AGENT_ID re-resolve
+# instead of inheriting the previous agent's permissions.
+_ROLE_FLAGS: dict[str, dict[str, bool]] = {}
+
+
+async def _may(flag: str) -> bool:
+    """Whether this run's agent holds a role permission flag (`may_declare_tickets`,
+    `may_manage_artifacts`, `is_reviewer`).
+
+    The `map` block parser (app/core/report.py) enforces these same flags on
+    `tickets:`/`updates:`/`artifact_updates:`; without the check here the equivalent MCP
+    write tools were a way around it — CLAUDE.md's rule is that role permissions are
+    enforced in the parser, not trusted to the prompt. Both sides read the same source:
+    the `role` table, via the API.
+
+    Fails CLOSED: if the role can't be resolved, the write is refused.
+    """
+    if AGENT_ID not in _ROLE_FLAGS:
+        flags: dict[str, bool] = {}
+        if AGENT_ID:
+            agents = await _api(f"/workspaces/{WORKSPACE_ID}/agents")
+            roles = await _api("/roles")
+            if isinstance(agents, list) and isinstance(roles, list):
+                me = next((a for a in agents if a.get("id") == AGENT_ID), None)
+                if me is not None:
+                    role = next((r for r in roles if r.get("key") == me.get("role")), None)
+                    if role is not None:
+                        flags = {
+                            k: bool(role.get(k))
+                            for k in ("may_declare_tickets", "may_manage_artifacts", "is_reviewer")
+                        }
+        _ROLE_FLAGS[AGENT_ID] = flags
+    return _ROLE_FLAGS[AGENT_ID].get(flag, False)
+
+
+def _refused(flag: str, what: str) -> str:
+    return (
+        f"Refused to {what}: your role does not have the '{flag}' permission. "
+        f"The same gate applies to the closing `map` block, so declaring it there won't "
+        f"work either — hand off to a role that may do this instead."
+    )
+
+
 def create_server() -> MCPServer:
     server = MCPServer(
         name="map-tickets",
@@ -199,6 +243,12 @@ def create_server() -> MCPServer:
     async def create_ticket(
         title: str, description: str = "", priority: str = "medium", epic: str | None = None
     ) -> str:
+        # ponytail: role gate only. The PM owner-approval gate report.py applies to
+        # `tickets:` in chat runs can't be checked here — the MCP config passes no run id,
+        # so this server can't tell it's inside an unapproved chat. Pass the run id in
+        # mcp_config.py if that gap matters.
+        if not await _may("may_declare_tickets"):
+            return _refused("may_declare_tickets", "create a ticket")
         body: dict = {"title": title, "description": description, "priority": priority}
         if epic:
             epic_detail = await _api(f"/tickets/{epic}")
@@ -219,6 +269,9 @@ def create_server() -> MCPServer:
 
     @server.tool(description="Change a ticket's status/priority. Legal statuses: backlog, todo, in_progress, review, qa, security, done, blocked. The backend enforces the state machine.")
     async def update_ticket(key: str, status: str | None = None, priority: str | None = None) -> str:
+        # Same gate report.py puts on `updates:` — see `_may`.
+        if not await _may("may_declare_tickets"):
+            return _refused("may_declare_tickets", "update a ticket")
         body: dict = {}
         if status:
             body["status"] = status

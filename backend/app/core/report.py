@@ -180,8 +180,8 @@ def _not_a_list_reason(field_name: str, raw: object) -> str:
     # of parsing them, so this happens a lot — name it so the agent's next
     # attempt (or whoever's debugging) doesn't have to guess.
     hint = (
-        f" — kemungkinan kamu menulis '{field_name}: |' (literal block), padahal harus "
-        f"'{field_name}:' langsung diikuti item list ('- ...') TANPA tanda '|'"
+        f" — you probably wrote '{field_name}: |' (a literal block) when it must be "
+        f"'{field_name}:' followed directly by list items ('- ...') with NO '|'"
         if isinstance(raw, str)
         else ""
     )
@@ -237,13 +237,13 @@ def parse_report(
         # routine/chat that declares status is a prompt bug.
         if data.get("status") is not None:
             return _invalid(
-                "run tanpa tiket tidak boleh mendeklarasikan 'status' — hanya boleh "
-                "berisi aksi (comments/tickets/updates/memory/artifacts)"
+                "a run with no ticket must not declare 'status' — it may only carry "
+                "actions (comments/tickets/updates/memory/artifacts)"
             )
         if data.get("mention") is not None:
             return _invalid(
-                "run tanpa tiket tidak boleh mendeklarasikan 'mention' — hanya boleh "
-                "berisi aksi (comments/tickets/updates/memory/artifacts)"
+                "a run with no ticket must not declare 'mention' — it may only carry "
+                "actions (comments/tickets/updates/memory/artifacts)"
             )
     else:
         status = data.get("status")
@@ -320,8 +320,8 @@ def parse_report(
             # refine the plan — but the breakdown is dropped until approval.
             tickets_dropped = True
             tickets_dropped_reason = (
-                "user belum menyetujui plan PM; tickets[] diabaikan sampai user "
-                "menyetujui (balas dengan kata setuju di chat)"
+                "the owner has not approved the PM's plan yet; tickets[] ignored until "
+                "they approve (reply with an approval word in the chat)"
             )
         elif not isinstance(tickets_raw, list):
             tickets_dropped = True
@@ -364,8 +364,8 @@ def parse_report(
         elif is_pm and not ticket_approved:
             sprints_dropped = True
             sprints_dropped_reason = (
-                "user belum menyetujui plan PM; sprints[] diabaikan sampai user "
-                "menyetujui (balas dengan kata setuju di chat)"
+                "the owner has not approved the PM's plan yet; sprints[] ignored until "
+                "they approve (reply with an approval word in the chat)"
             )
         elif not isinstance(sprints_raw, list):
             sprints_dropped = True
@@ -390,9 +390,9 @@ def parse_report(
             if malformed_entries:
                 sprints_dropped = True
                 sprints_dropped_reason = (
-                    f"beberapa entri sprints[] malformed/dropped: {malformed_entries}; "
-                    "setiap entri sprints[] WAJIB berupa objek dengan field 'name' (string), "
-                    "contoh: sprints: - name: \"Sprint 1\""
+                    f"some sprints[] entries were malformed/dropped: {malformed_entries}; "
+                    "every sprints[] entry MUST be a mapping with a 'name' field (string), "
+                    "e.g. sprints: - name: \"Sprint 1\""
                 )
 
     updates: list[TicketUpdateDraft] = []
@@ -500,7 +500,7 @@ def parse_report(
         if not no_ticket_mode:
             comments_dropped = True
             comments_dropped_reason = (
-                "'comments' hanya valid di run tanpa tiket (rutinitas/chat); dropped"
+                "'comments' is only valid on runs with no ticket (routine/chat); dropped"
             )
         elif not isinstance(comments_raw, list):
             comments_dropped = True

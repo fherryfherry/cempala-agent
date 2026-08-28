@@ -46,7 +46,7 @@ def test_tickets_dropped_for_pm_without_approval():
     assert result.ok is True
     assert result.tickets == []
     assert result.tickets_dropped is True
-    assert "menyetujui" in result.tickets_dropped_reason
+    assert "not approved" in result.tickets_dropped_reason
 
 
 def test_pm_tickets_allowed_with_approval():
@@ -566,7 +566,7 @@ def test_sprints_dropped_for_pm_without_approval():
     assert result.ok is True
     assert result.sprints == []
     assert result.sprints_dropped is True
-    assert "menyetujui" in result.sprints_dropped_reason
+    assert "not approved" in result.sprints_dropped_reason
 
 
 def test_sprints_from_unauthorized_role_dropped():
@@ -924,7 +924,7 @@ def test_comments_rejected_in_normal_ticket_run():
     assert result.ok is True
     assert result.comments == []
     assert result.comments_dropped is True
-    assert "rutinitas" in result.comments_dropped_reason
+    assert "routine/chat" in result.comments_dropped_reason
 
 
 def test_memory_parsed_for_any_role():
