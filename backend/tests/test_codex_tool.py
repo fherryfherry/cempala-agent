@@ -202,3 +202,92 @@ def test_num_handles_bad_values():
     assert _num("abc") == 0.0
     assert _num(None) == 0.0
     assert _num("3.5") == 3.5
+
+
+def test_nonzero_exit_truncates_huge_stderr(tmp_path, monkeypatch):
+    script = _write_script(
+        tmp_path / "codex",
+        r"""
+python3 -c "print('x' * 5000)" 1>&2
+exit 1
+""",
+    )
+    monkeypatch.setattr(settings, "CODEX_BIN", script)
+
+    events = asyncio.run(_collect(_ctx(tmp_path)))
+
+    final = events[-1]
+    assert final.payload["status"] == "failed"
+    error = final.payload["error"]
+    assert len(error) < 5000
+    assert error.startswith("x" * 100)
+    assert "truncated" in error
+
+
+def test_non_dict_json_line_skipped(tmp_path, monkeypatch):
+    script = _write_script(
+        tmp_path / "codex",
+        r"""
+printf '[1, 2, 3]\n'
+printf '{"type": "thread.started", "thread_id": "sess-abc"}\n'
+printf '{"type": "turn.completed", "usage": {}}\n'
+""",
+    )
+    monkeypatch.setattr(settings, "CODEX_BIN", script)
+
+    events = asyncio.run(_collect(_ctx(tmp_path)))
+
+    assert events[-1].payload["status"] == "done"
+
+
+def test_terminate_noop_when_process_already_exited(tmp_path):
+    async def _run():
+        proc = await asyncio.create_subprocess_exec("true")
+        await proc.wait()
+        await CodexTool._terminate(proc)  # must return immediately, no terminate()/kill()
+
+    asyncio.run(_run())
+
+
+def test_cancel_kills_process_that_ignores_sigterm(tmp_path, monkeypatch):
+    import app.agents.codex_tool as codex_tool_mod
+
+    monkeypatch.setattr(codex_tool_mod, "_TERMINATE_GRACE_SECONDS", 0.2)
+    sleep_marker = f"sleep {__import__('random').randint(100000, 999999)}"
+    script = _write_script(
+        tmp_path / "codex", f"trap '' TERM\nexec {sleep_marker}\n"
+    )
+    monkeypatch.setattr(settings, "CODEX_BIN", script)
+
+    async def _run_and_cancel():
+        ctx = _ctx(tmp_path)
+
+        async def _consume():
+            return [ev async for ev in CodexTool().run(ctx)]
+
+        consume_task = asyncio.create_task(_consume())
+
+        deadline = time.monotonic() + 5
+        pids: list[int] = []
+        while time.monotonic() < deadline and not pids:
+            found = subprocess.run(
+                ["pgrep", "-f", sleep_marker], capture_output=True, text=True
+            ).stdout.split()
+            pids = [int(p) for p in found]
+            if not pids:
+                await asyncio.sleep(0.05)
+
+        ctx.cancel_event.set()
+        events = await consume_task
+        return events, pids
+
+    events, pids = asyncio.run(_run_and_cancel())
+
+    assert events[-1].payload["status"] == "cancelled"
+    for pid in pids:
+        deadline = time.monotonic() + 5
+        alive = True
+        while time.monotonic() < deadline and alive:
+            result = subprocess.run(["ps", "-p", str(pid)], capture_output=True, text=True)
+            alive = result.returncode == 0
+        assert not alive, f"pid {pid} survived SIGKILL after ignoring SIGTERM"

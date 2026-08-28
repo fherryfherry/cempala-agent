@@ -14,7 +14,17 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.orchestrator import recover_interrupted_runs
 from app.db import session as db_session
-from app.db.models import Agent, Base, Comment, Run, Ticket, Workspace
+from app.db.models import (
+    Agent,
+    Base,
+    Comment,
+    Conversation,
+    ConversationMessage,
+    Routine,
+    Run,
+    Ticket,
+    Workspace,
+)
 
 
 @pytest.fixture
@@ -184,3 +194,98 @@ async def test_real_app_startup_recovers(monkeypatch, maker):
         agent = await session.get(Agent, agent_id)
         assert run.status == "interrupted"
         assert agent.status == "idle"
+
+
+async def test_interrupted_chat_run_writes_conversation_system_message(maker):
+    async with maker() as session:
+        ws = Workspace(name="W", key="MAPCHAT", repo_path="/tmp")
+        session.add(ws)
+        await session.flush()
+
+        agent = Agent(
+            workspace_id=ws.id, name="pm", role="pm", model="m", tool_kind="opencode", status="working"
+        )
+        session.add(agent)
+        await session.flush()
+
+        conversation = Conversation(workspace_id=ws.id, title="Diskusi")
+        session.add(conversation)
+        await session.flush()
+
+        run = Run(
+            conversation_id=conversation.id,
+            agent_id=agent.id,
+            status="running",
+            trigger="chat",
+            tool_kind="opencode",
+            model="m",
+        )
+        session.add(run)
+        await session.commit()
+        conversation_id, agent_id, run_id = conversation.id, agent.id, run.id
+
+    count = await recover_interrupted_runs(maker)
+    assert count == 1
+
+    async with maker() as session:
+        run = await session.get(Run, run_id)
+        agent = await session.get(Agent, agent_id)
+        assert run.status == "interrupted"
+        assert agent.status == "idle"
+
+        messages = (
+            await session.execute(
+                select(ConversationMessage).where(ConversationMessage.conversation_id == conversation_id)
+            )
+        ).scalars().all()
+        assert len(messages) == 1
+        assert messages[0].is_system is True
+        assert "interrupted" in messages[0].body
+
+
+async def test_interrupted_routine_run_marked_idle(maker):
+    async with maker() as session:
+        ws = Workspace(name="W", key="MAPROUT", repo_path="/tmp")
+        session.add(ws)
+        await session.flush()
+
+        agent = Agent(
+            workspace_id=ws.id, name="pm", role="pm", model="m", tool_kind="opencode", status="working"
+        )
+        session.add(agent)
+        await session.flush()
+
+        routine = Routine(
+            workspace_id=ws.id,
+            name="R",
+            prompt="p",
+            interval_minutes=5,
+            mode="idle_only",
+            agent_id=agent.id,
+            status="running",
+        )
+        session.add(routine)
+        await session.flush()
+
+        run = Run(
+            routine_id=routine.id,
+            agent_id=agent.id,
+            status="running",
+            trigger="routine",
+            tool_kind="opencode",
+            model="m",
+        )
+        session.add(run)
+        await session.commit()
+        routine_id, agent_id, run_id = routine.id, agent.id, run.id
+
+    count = await recover_interrupted_runs(maker)
+    assert count == 1
+
+    async with maker() as session:
+        run = await session.get(Run, run_id)
+        agent = await session.get(Agent, agent_id)
+        routine = await session.get(Routine, routine_id)
+        assert run.status == "interrupted"
+        assert agent.status == "idle"
+        assert routine.status == "idle"

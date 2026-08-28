@@ -525,3 +525,83 @@ def test_num_handles_bad_values(tmp_path, monkeypatch):
     assert _num("abc") == 0.0
     assert _num(None) == 0.0
     assert _num("3.5") == 3.5
+
+
+def test_blank_stdout_line_skipped(tmp_path, monkeypatch):
+    script = _write_script(
+        tmp_path / "opencode",
+        r"""
+printf '\n'
+printf '{"type": "assistant_text", "text": "hi", "session_id": "sess-abc"}\n'
+""",
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    events = asyncio.run(_collect(_ctx(tmp_path)))
+    assert events[-1].payload["status"] == "done"
+
+
+def test_mcp_unlink_error_swallowed_on_binary_not_found(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "OPENCODE_BIN", str(tmp_path / "no-such-binary"))
+    monkeypatch.setattr("os.unlink", lambda *a, **k: (_ for _ in ()).throw(OSError("gone")))
+
+    events = asyncio.run(_collect(_ctx(tmp_path)))
+    assert events[-1].payload["status"] == "failed"
+
+
+def test_mcp_unlink_error_swallowed_in_finally(tmp_path, monkeypatch):
+    script = _write_script(
+        tmp_path / "opencode",
+        r"""
+printf '{"type": "assistant_text", "text": "hi", "session_id": "sess-abc"}\n'
+""",
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+    monkeypatch.setattr("os.unlink", lambda *a, **k: (_ for _ in ()).throw(OSError("gone")))
+
+    events = asyncio.run(_collect(_ctx(tmp_path)))
+    assert events[-1].payload["status"] == "done"
+
+
+def test_cancel_kills_process_that_ignores_sigterm(tmp_path, monkeypatch):
+    import app.agents.opencode_tool as opencode_tool_mod
+
+    monkeypatch.setattr(opencode_tool_mod, "_TERMINATE_GRACE_SECONDS", 0.2)
+    sleep_marker = f"sleep {random.randint(100000, 999999)}"
+    script = _write_script(
+        tmp_path / "opencode", f"trap '' TERM\nexec {sleep_marker}\n"
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    async def _run_and_cancel():
+        ctx = _ctx(tmp_path)
+
+        async def _consume():
+            return [ev async for ev in OpenCodeTool().run(ctx)]
+
+        consume_task = asyncio.create_task(_consume())
+
+        deadline = time.monotonic() + 5
+        pids: list[int] = []
+        while time.monotonic() < deadline and not pids:
+            found = subprocess.run(
+                ["pgrep", "-f", sleep_marker], capture_output=True, text=True
+            ).stdout.split()
+            pids = [int(p) for p in found]
+            if not pids:
+                await asyncio.sleep(0.05)
+
+        ctx.cancel_event.set()
+        events = await consume_task
+        return events, pids
+
+    events, pids = asyncio.run(_run_and_cancel())
+
+    assert events[-1].payload["status"] == "cancelled"
+    for pid in pids:
+        deadline = time.monotonic() + 5
+        alive = True
+        while time.monotonic() < deadline and alive:
+            result = subprocess.run(["ps", "-p", str(pid)], capture_output=True, text=True)
+            alive = result.returncode == 0
+        assert not alive, f"pid {pid} survived SIGKILL after ignoring SIGTERM"

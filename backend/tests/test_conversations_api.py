@@ -812,3 +812,78 @@ def test_proposal_execution_failure_writes_system_message(client, tmp_path, monk
     messages = client.get(f"/api/conversations/{conv['id']}/messages").json()
     system_messages = [m for m in messages if m["is_system"]]
     assert any("gagal dieksekusi" in m["body"] for m in system_messages)
+
+
+def _wait_for_conversation_runs(client, ws_id, conv_id, expected_count, timeout=20.0):
+    """Wait until the conversation has `expected_count` chat runs, all terminal —
+    the auto-retry chain executes child runs asynchronously, one after another."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        runs = [
+            r
+            for r in client.get(f"/api/workspaces/{ws_id}/runs").json()
+            if r["conversation_id"] == conv_id
+        ]
+        if len(runs) == expected_count and all(
+            r["status"] not in ("queued", "running") for r in runs
+        ):
+            return runs
+        time.sleep(0.03)
+    raise TimeoutError(f"conversation {conv_id} did not reach {expected_count} terminal runs")
+
+
+def test_chat_run_nonzero_exit_auto_retries_then_exhausts(client, tmp_path, monkeypatch):
+    from app.schemas.workspace import DEFAULT_GUARDRAILS
+
+    ws_id = _make_workspace(client, tmp_path)
+    patch = client.patch(
+        f"/api/workspaces/{ws_id}",
+        json={"guardrails": {**DEFAULT_GUARDRAILS, "max_auto_retries": 1}},
+    )
+    assert patch.status_code == 200, patch.text
+    _make_agent(client, ws_id, "pm", "pm-1")
+    conv = client.post(f"/api/workspaces/{ws_id}/conversations", json={"title": "Diskusi"}).json()
+
+    script = _write_python_binary(
+        tmp_path / "opencode", "import sys\nprint('boom', file=sys.stderr)\nsys.exit(1)\n"
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    client.post(f"/api/conversations/{conv['id']}/messages", json={"body": "tolong dong"})
+    runs = _wait_for_conversation_runs(client, ws_id, conv["id"], 2)  # 1 original + 1 retry
+    assert all(r["status"] == "failed" for r in runs)
+
+    messages = client.get(f"/api/conversations/{conv['id']}/messages").json()
+    system_messages = [m for m in messages if m["is_system"]]
+    assert any("Auto-retry 1/1 dijalankan" in m["body"] for m in system_messages)
+    assert any("Auto-retry habis" in m["body"] and "PM tidak membalas" in m["body"] for m in system_messages)
+
+
+def test_chat_run_missing_map_block_writes_failure_message(client, tmp_path, monkeypatch):
+    from app.schemas.workspace import DEFAULT_GUARDRAILS
+
+    ws_id = _make_workspace(client, tmp_path)
+    patch = client.patch(
+        f"/api/workspaces/{ws_id}",
+        json={"guardrails": {**DEFAULT_GUARDRAILS, "max_auto_retries": 0}},
+    )
+    assert patch.status_code == 200, patch.text
+    _make_agent(client, ws_id, "pm", "pm-1")
+    conv = client.post(f"/api/workspaces/{ws_id}/conversations", json={"title": "Diskusi"}).json()
+
+    script = _write_python_binary(
+        tmp_path / "opencode",
+        'import json\nprint(json.dumps({"type": "assistant_text", "text": "no map block here"}))\n',
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    client.post(f"/api/conversations/{conv['id']}/messages", json={"body": "tolong dong"})
+    chat_run = next(
+        r for r in client.get(f"/api/workspaces/{ws_id}/runs").json() if r["trigger"] == "chat"
+    )
+    final = _wait_for_run(client, chat_run["id"])
+    assert final["status"] == "failed", final
+
+    messages = client.get(f"/api/conversations/{conv['id']}/messages").json()
+    system_messages = [m for m in messages if m["is_system"]]
+    assert any("Blok ```map hilang/rusak" in m["body"] for m in system_messages)

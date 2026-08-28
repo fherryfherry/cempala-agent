@@ -554,3 +554,45 @@ def test_guardrail_cancelled_run_not_retried(client, tmp_path, monkeypatch):
 
     runs = client.get(f"/api/workspaces/{ws_id}/runs").json()
     assert len(runs) == 1, runs
+
+
+def test_auto_retry_itself_hits_guardrail_surfaces_reason_on_failed_run(client, tmp_path, monkeypatch):
+    """If the auto-retry's own schedule() call trips a guardrail (e.g. the
+    concurrency limit got exhausted between the failed attempt and the retry),
+    the GuardrailBlocked reason is surfaced on run.error instead of propagating
+    -- the ticket stays unblocked (schedule() already wrote its own comment)."""
+    from app.core import orchestrator
+    from app.core.guardrails import GuardrailBlocked
+
+    ws_id = _make_workspace(
+        client, tmp_path, guardrails={**DEFAULT_GUARDRAILS, "max_auto_retries": 1}
+    )
+    eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+    ticket = _make_ticket(client, ws_id)
+    _set_status(client, ticket["key"], "todo")
+
+    script = _write_python_binary(tmp_path / "opencode", _garbage_script())
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    real_schedule = orchestrator.schedule
+    call_count = {"n": 0}
+
+    async def _schedule_second_call_blocked(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 2:  # the auto-retry's own schedule() call
+            raise GuardrailBlocked("max_concurrent_runs", "simulated concurrency limit")
+        return await real_schedule(*args, **kwargs)
+
+    monkeypatch.setattr(orchestrator, "schedule", _schedule_second_call_blocked)
+
+    run1 = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": eng_id}).json()
+    final1 = _wait_for_run(client, run1["id"])
+    assert final1["status"] == "failed"
+    assert "simulated concurrency limit" in final1["error"]
+
+    # No retry child run was created, and the ticket was NOT blocked by this
+    # (schedule() already handles its own guardrail comment/exceptions).
+    runs = client.get(f"/api/workspaces/{ws_id}/runs").json()
+    assert len(runs) == 1, runs
+    detail = client.get(f"/api/tickets/{ticket['key']}").json()
+    assert detail["status"] != "blocked"

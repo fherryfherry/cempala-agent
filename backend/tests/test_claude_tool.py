@@ -230,3 +230,123 @@ printf '{{"type": "result", "subtype": "success"}}\\n'
     assert len(errors) == 1
     assert "exceeds stream limit" in errors[0].payload["error"]
     assert events[-1].payload["status"] == "done"
+
+
+def test_non_dict_json_line_skipped(tmp_path, monkeypatch):
+    script = _write_script(
+        tmp_path / "claude",
+        r"""
+printf '[1, 2, 3]\n'
+printf '{"type": "result", "subtype": "success", "session_id": "sess-abc"}\n'
+""",
+    )
+    monkeypatch.setattr(settings, "CLAUDE_BIN", script)
+
+    events = asyncio.run(_collect(_ctx(tmp_path)))
+    assert events[-1].payload["status"] == "done"
+
+
+def test_blank_stdout_line_skipped(tmp_path, monkeypatch):
+    script = _write_script(
+        tmp_path / "claude",
+        r"""
+printf '\n'
+printf '{"type": "result", "subtype": "success", "session_id": "sess-abc"}\n'
+""",
+    )
+    monkeypatch.setattr(settings, "CLAUDE_BIN", script)
+
+    events = asyncio.run(_collect(_ctx(tmp_path)))
+    assert events[-1].payload["status"] == "done"
+
+
+def test_assistant_message_level_session_id_and_non_dict_block_skipped(tmp_path, monkeypatch):
+    """session_id can arrive nested in message.session_id (not just the top-level
+    "system" event), and a non-dict entry in message.content[] must be skipped."""
+    script = _write_script(
+        tmp_path / "claude",
+        r"""
+printf '{"type": "assistant", "message": {"session_id": "sess-nested", "content": ["not-a-dict", {"type": "text", "text": "hi"}]}}\n'
+printf '{"type": "result", "subtype": "success"}\n'
+""",
+    )
+    monkeypatch.setattr(settings, "CLAUDE_BIN", script)
+
+    events = asyncio.run(_collect(_ctx(tmp_path)))
+    assert events[-1].payload["status"] == "done"
+    assert events[-1].payload["session_id"] == "sess-nested"
+
+
+def test_mcp_unlink_error_swallowed_on_binary_not_found(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "CLAUDE_BIN", str(tmp_path / "no-such-binary"))
+    monkeypatch.setattr("os.unlink", lambda *a, **k: (_ for _ in ()).throw(OSError("gone")))
+
+    events = asyncio.run(_collect(_ctx(tmp_path)))
+    assert events[-1].payload["status"] == "failed"
+
+
+def test_mcp_unlink_error_swallowed_in_finally(tmp_path, monkeypatch):
+    script = _write_script(
+        tmp_path / "claude",
+        r"""
+printf '{"type": "result", "subtype": "success", "session_id": "sess-abc"}\n'
+""",
+    )
+    monkeypatch.setattr(settings, "CLAUDE_BIN", script)
+    monkeypatch.setattr("os.unlink", lambda *a, **k: (_ for _ in ()).throw(OSError("gone")))
+
+    events = asyncio.run(_collect(_ctx(tmp_path)))
+    assert events[-1].payload["status"] == "done"
+
+
+def test_terminate_noop_when_process_already_exited(tmp_path):
+    async def _run():
+        proc = await asyncio.create_subprocess_exec("true")
+        await proc.wait()
+        await ClaudeTool._terminate(proc)  # must return immediately, no terminate()/kill()
+
+    asyncio.run(_run())
+
+
+def test_cancel_kills_process_that_ignores_sigterm(tmp_path, monkeypatch):
+    import app.agents.claude_tool as claude_tool_mod
+
+    monkeypatch.setattr(claude_tool_mod, "_TERMINATE_GRACE_SECONDS", 0.2)
+    sleep_marker = f"sleep {__import__('random').randint(100000, 999999)}"
+    script = _write_script(
+        tmp_path / "claude", f"trap '' TERM\nexec {sleep_marker}\n"
+    )
+    monkeypatch.setattr(settings, "CLAUDE_BIN", script)
+
+    async def _run_and_cancel():
+        ctx = _ctx(tmp_path)
+
+        async def _consume():
+            return [ev async for ev in ClaudeTool().run(ctx)]
+
+        consume_task = asyncio.create_task(_consume())
+
+        deadline = time.monotonic() + 5
+        pids: list[int] = []
+        while time.monotonic() < deadline and not pids:
+            found = subprocess.run(
+                ["pgrep", "-f", sleep_marker], capture_output=True, text=True
+            ).stdout.split()
+            pids = [int(p) for p in found]
+            if not pids:
+                await asyncio.sleep(0.05)
+
+        ctx.cancel_event.set()
+        events = await consume_task
+        return events, pids
+
+    events, pids = asyncio.run(_run_and_cancel())
+
+    assert events[-1].payload["status"] == "cancelled"
+    for pid in pids:
+        deadline = time.monotonic() + 5
+        alive = True
+        while time.monotonic() < deadline and alive:
+            result = subprocess.run(["ps", "-p", str(pid)], capture_output=True, text=True)
+            alive = result.returncode == 0
+        assert not alive, f"pid {pid} survived SIGKILL after ignoring SIGTERM"

@@ -485,6 +485,10 @@ def test_ticket_in_planned_sprint_blocks_scheduling_for_non_exempt_role(client, 
     bodies = _system_comment_bodies(client, ticket["key"])
     assert any("Sprint 2" in b and "planned" in b and "active sprint" in b for b in bodies)
 
+    # Same MAP-047 contract as the backlog case: refuse the run, never touch status.
+    detail = client.get(f"/api/tickets/{ticket['key']}").json()
+    assert detail["status"] == "backlog"
+
 
 def test_ticket_in_active_sprint_allows_scheduling_for_non_exempt_role(client, tmp_path, monkeypatch):
     ws_id = _make_workspace(client, tmp_path)

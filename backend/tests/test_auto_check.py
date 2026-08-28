@@ -20,6 +20,12 @@ from app.db.models import Base, Ticket, TicketAutoCheck
 from app.db.session import get_session
 from app.main import app
 
+# conftest.py's autouse `_disable_background_schedulers` fixture monkeypatches the
+# `run_auto_check` module attribute to a no-op for every test. Capture the real
+# function here at collection time (before any per-test monkeypatch runs) so the
+# loop-body test below can call the actual implementation.
+_REAL_RUN_AUTO_CHECK = auto_check.run_auto_check
+
 
 @pytest.fixture
 def client_maker(tmp_path, monkeypatch):
@@ -430,3 +436,98 @@ def test_auto_check_loop_stops_on_event(client_maker):
     stop_event = asyncio.Event()
     stop_event.set()
     asyncio.run(auto_check.run_auto_check(db_session.async_session, stop_event))
+
+
+def test_auto_check_nudge_swallows_guardrail_blocked(client_maker, tmp_path, monkeypatch):
+    from app.core.guardrails import GuardrailBlocked
+
+    client, maker = client_maker
+    ws = _make_workspace(client, tmp_path)
+    eng = _make_agent(client, ws["id"], "engineer", "eng-1")
+    sprint = client.post(f"/api/workspaces/{ws['id']}/sprints", json={"name": "Sprint 1"}).json()
+    ticket = _make_ticket(client, ws["id"], sprint["id"], "Stale ticket", assignee_id=eng["id"])
+    client.patch(f"/api/tickets/{ticket['key']}", json={"status": "in_progress"})
+    _age_ticket(maker, ticket["id"], minutes=10)
+
+    async def _blocked(*args, **kwargs):
+        raise GuardrailBlocked("max_concurrent_runs", "too many runs")
+
+    monkeypatch.setattr(orchestrator, "schedule", _blocked)
+
+    _run_tick(client_maker)  # must not raise
+    runs = client.get(f"/api/workspaces/{ws['id']}/runs").json()
+    assert runs == []
+
+
+def test_auto_check_nudge_swallows_runtime_error(client_maker, tmp_path, monkeypatch):
+    client, maker = client_maker
+    ws = _make_workspace(client, tmp_path)
+    eng = _make_agent(client, ws["id"], "engineer", "eng-1")
+    sprint = client.post(f"/api/workspaces/{ws['id']}/sprints", json={"name": "Sprint 1"}).json()
+    ticket = _make_ticket(client, ws["id"], sprint["id"], "Stale ticket", assignee_id=eng["id"])
+    client.patch(f"/api/tickets/{ticket['key']}", json={"status": "in_progress"})
+    _age_ticket(maker, ticket["id"], minutes=10)
+
+    async def _paused(*args, **kwargs):
+        raise RuntimeError("workspace paused")
+
+    monkeypatch.setattr(orchestrator, "schedule", _paused)
+
+    _run_tick(client_maker)  # must not raise
+    runs = client.get(f"/api/workspaces/{ws['id']}/runs").json()
+    assert runs == []
+
+
+def test_auto_check_normalizes_naive_last_nudge_at(client_maker, tmp_path, monkeypatch):
+    """A naive last_nudge_at (e.g. left on an unexpired in-session object) must
+    be normalized to UTC-aware before the backoff comparison, not raise."""
+    client, maker = client_maker
+    script = _write_python_binary(tmp_path / "opencode", _NOOP_SCRIPT)
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    ws = _make_workspace(client, tmp_path)
+    _make_agent(client, ws["id"], "pm", "pm-1")  # unassigned ticket -> PM gets nudged
+    sprint = client.post(f"/api/workspaces/{ws['id']}/sprints", json={"name": "Sprint 1"}).json()
+    ticket = _make_ticket(client, ws["id"], sprint["id"], "Stale ticket")
+    client.patch(f"/api/tickets/{ticket['key']}", json={"status": "in_progress"})
+    _age_ticket(maker, ticket["id"], minutes=10)
+    _tick_and_run_auto(client_maker)  # first nudge, no TicketAutoCheck row yet
+    _age_ticket(maker, ticket["id"], minutes=10)
+    _tick_and_run_auto(client_maker)  # second (duplicate) nudge creates the row
+    assert _auto_check_state(maker, ticket["id"]) is not None
+    _age_ticket(maker, ticket["id"], minutes=10)  # keep it actionable for the next tick
+
+    async def _tick_with_naive_last_nudge_at():
+        async with maker() as s:
+            state = await s.get(TicketAutoCheck, ticket["id"])
+            state.last_nudge_at = datetime.now()  # naive, no tzinfo
+            # Same session/identity map: _tick's select() reuses this in-memory
+            # object rather than re-fetching (which would re-apply the
+            # UTCDateTime type decorator and mask the naive value).
+            await auto_check._tick(s, maker)
+
+    asyncio.run(_tick_with_naive_last_nudge_at())  # must not raise TypeError
+
+
+def test_auto_check_loop_runs_one_tick_then_stops(client_maker, tmp_path, monkeypatch):
+    monkeypatch.setattr(auto_check, "_TICK_SECONDS", 0.01)
+    client, maker = client_maker
+    monkeypatch.setattr(settings, "OPENCODE_BIN", "/nonexistent/opencode-for-tests")
+
+    ws = _make_workspace(client, tmp_path)
+    eng = _make_agent(client, ws["id"], "engineer", "eng-1")
+    sprint = client.post(f"/api/workspaces/{ws['id']}/sprints", json={"name": "Sprint 1"}).json()
+    ticket = _make_ticket(client, ws["id"], sprint["id"], "Stale ticket", assignee_id=eng["id"])
+    client.patch(f"/api/tickets/{ticket['key']}", json={"status": "in_progress"})
+    _age_ticket(maker, ticket["id"], minutes=10)
+
+    async def _run_loop():
+        stop_event = asyncio.Event()
+        task = asyncio.create_task(_REAL_RUN_AUTO_CHECK(maker, stop_event))
+        await asyncio.sleep(0.3)  # let at least one real tick fire
+        stop_event.set()
+        await asyncio.wait_for(task, timeout=5)
+
+    asyncio.run(_run_loop())
+    runs = client.get(f"/api/workspaces/{ws['id']}/runs").json()
+    assert any(r["trigger"] == "auto" for r in runs)

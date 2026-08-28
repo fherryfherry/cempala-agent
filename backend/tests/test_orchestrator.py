@@ -1815,6 +1815,121 @@ def test_artifact_updates_errors_skipped_with_notes(client, tmp_path, monkeypatc
     assert "Tidak Ada" in diag
 
 
+async def _make_group_with_attachment(session, ws_id, ticket_id, group_name, filename="f.txt"):
+    from app.db.models import ArtifactGroup, Attachment
+
+    group = ArtifactGroup(workspace_id=ws_id, name=group_name)
+    session.add(group)
+    await session.flush()
+    session.add(
+        Attachment(
+            ticket_id=ticket_id,
+            filename=filename,
+            content_type="text/plain",
+            size_bytes=1,
+            path="/tmp/x",
+            origin="agent",
+            group_id=group.id,
+        )
+    )
+    await session.commit()
+    return group.id
+
+
+def test_apply_artifact_updates_rename_onto_existing_group_merges(client, tmp_path):
+    import asyncio
+
+    from app.core.orchestrator import _apply_artifact_updates
+    from app.core.report import ArtifactUpdateDraft
+    from app.db.models import Attachment
+
+    ws_id = _make_workspace(client, tmp_path)
+    ticket = _make_ticket(client, ws_id)
+
+    async def _run():
+        async with db_session.async_session() as session:
+            await _make_group_with_attachment(session, ws_id, ticket["id"], "Source", "a.txt")
+            await _make_group_with_attachment(session, ws_id, ticket["id"], "Target", "b.txt")
+
+            report, notes = await _apply_artifact_updates(
+                session, ws_id, [ArtifactUpdateDraft(op="rename", group="Source", to="Target")]
+            )
+            await session.commit()
+            assert notes == []
+            assert report == [{"op": "merge", "from": "Source", "into": "Target"}]
+
+            attachments = (await session.scalars(select(Attachment))).all()
+            assert {a.filename for a in attachments} == {"a.txt", "b.txt"}
+
+    from sqlalchemy import select
+
+    asyncio.run(_run())
+
+
+def test_apply_artifact_updates_skip_notes_for_missing_groups_and_file(client, tmp_path):
+    import asyncio
+
+    from app.core.orchestrator import _apply_artifact_updates
+    from app.core.report import ArtifactUpdateDraft
+
+    ws_id = _make_workspace(client, tmp_path)
+    ticket = _make_ticket(client, ws_id)
+
+    async def _run():
+        async with db_session.async_session() as session:
+            await _make_group_with_attachment(session, ws_id, ticket["id"], "Real Group", "a.txt")
+
+            _report, notes = await _apply_artifact_updates(
+                session,
+                ws_id,
+                [
+                    ArtifactUpdateDraft(op="merge", from_group="Nope", into="X"),
+                    ArtifactUpdateDraft(op="move", group="Nope", file="a.txt", to="X"),
+                    ArtifactUpdateDraft(op="move", group="Real Group", file="nope.txt", to="X"),
+                    ArtifactUpdateDraft(op="frobnicate"),
+                ],
+            )
+            assert len(notes) == 4
+            assert "kelompok 'Nope' tidak ditemukan" in notes[0]
+            assert "kelompok 'Nope' tidak ditemukan" in notes[1]
+            assert "nope.txt" in notes[2] and "tidak ditemukan" in notes[2]
+            assert "frobnicate" in notes[3]
+
+    asyncio.run(_run())
+
+
+def test_apply_artifact_updates_delete_succeeds_when_empty(client, tmp_path):
+    import asyncio
+
+    from app.core.orchestrator import _apply_artifact_updates
+    from app.core.report import ArtifactUpdateDraft
+    from app.db.models import ArtifactGroup
+
+    ws_id = _make_workspace(client, tmp_path)
+
+    async def _run():
+        async with db_session.async_session() as session:
+            group = ArtifactGroup(workspace_id=ws_id, name="Empty")
+            session.add(group)
+            await session.commit()
+
+            report, notes = await _apply_artifact_updates(
+                session, ws_id, [ArtifactUpdateDraft(op="delete", group="Empty")]
+            )
+            await session.commit()
+            assert notes == []
+            assert report == [{"op": "delete", "group": "Empty"}]
+
+            from sqlalchemy import select as sa_select
+
+            remaining = (
+                await session.scalars(sa_select(ArtifactGroup).where(ArtifactGroup.id == group.id))
+            ).first()
+            assert remaining is None
+
+    asyncio.run(_run())
+
+
 # ---------------------------------------------------------------------------
 # Owner chat notifications (System messages on the epic chat)
 # ---------------------------------------------------------------------------
@@ -1934,3 +2049,60 @@ def test_top_level_blocked_no_duplicate_epic_notice(client, tmp_path, monkeypatc
     system_bodies = [c["body"] for c in detail["comments"] if c["is_system"]]
     block_bodies = [b for b in system_bodies if "hilang/rusak" in b]
     assert len(block_bodies) == 1, system_bodies
+
+
+def test_maybe_wake_parent_pm_no_active_pm_writes_comment(client, tmp_path):
+    import asyncio
+
+    from app.core.orchestrator import _maybe_wake_parent_pm
+    from app.db.models import Ticket as TicketModel
+
+    ws_id = _make_workspace(client, tmp_path)
+    epic = _make_ticket(client, ws_id, "Epic")
+    child = _make_ticket(client, ws_id, "Child", parent_id=epic["id"])
+
+    async def _run():
+        async with db_session.async_session() as session:
+            child_row = await session.get(TicketModel, child["id"])
+            child_row.status = "done"
+            await session.commit()
+            await _maybe_wake_parent_pm(session, db_session.async_session, child_row, run_id=None)
+            await session.commit()
+
+    asyncio.run(_run())
+
+    detail = client.get(f"/api/tickets/{epic['key']}").json()
+    system_bodies = [c["body"] for c in detail["comments"] if c["is_system"]]
+    assert any("tidak ada agent PM aktif" in b for b in system_bodies)
+
+
+def test_maybe_wake_parent_pm_swallows_guardrail_blocked(client, tmp_path, monkeypatch):
+    import asyncio
+
+    from app.core import orchestrator
+    from app.core.guardrails import GuardrailBlocked
+    from app.core.orchestrator import _maybe_wake_parent_pm
+    from app.db.models import Ticket as TicketModel
+
+    ws_id = _make_workspace(client, tmp_path)
+    _make_agent(client, ws_id, "pm", "pm-1")
+    epic = _make_ticket(client, ws_id, "Epic")
+    child = _make_ticket(client, ws_id, "Child", parent_id=epic["id"])
+
+    async def _blocked(*args, **kwargs):
+        raise GuardrailBlocked("max_handoff_depth", "simulated depth limit")
+
+    monkeypatch.setattr(orchestrator, "schedule", _blocked)
+
+    async def _run():
+        async with db_session.async_session() as session:
+            child_row = await session.get(TicketModel, child["id"])
+            child_row.status = "done"
+            await session.commit()
+            await _maybe_wake_parent_pm(session, db_session.async_session, child_row, run_id=None)
+            await session.commit()
+
+    asyncio.run(_run())  # must not raise
+
+    epic_after = client.get(f"/api/tickets/{epic['key']}").json()
+    assert epic_after["handoff_depth"] == 1

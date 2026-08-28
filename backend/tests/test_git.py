@@ -442,3 +442,236 @@ class TestPrepareWorktreeReuse:
         reattached = prepare_worktree(str(repo), "MAP-123", base_branch="main")
         assert reattached == path
         assert os.path.isdir(reattached)
+
+
+# ---------------------------------------------------------------------------
+# Additional unit coverage: _run/_run_mutation error paths, run_git fallback,
+# decorations, root commit, file statuses, merge/cleanup worktree functions.
+# ---------------------------------------------------------------------------
+
+class TestRunErrorPaths:
+    def test_run_git_binary_not_found(self, tmp_path, monkeypatch):
+        from app.core.git import GitError, run_git
+
+        repo = _init_repo(tmp_path)
+
+        def fake_run(*args, **kwargs):
+            raise FileNotFoundError("no git")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(GitError) as exc_info:
+            run_git(str(repo), "log")
+        assert "git binary not found" in str(exc_info.value)
+
+    def test_run_mutation_binary_not_found(self, tmp_path, monkeypatch):
+        from app.core.git import GitError, run_mutation
+
+        repo = _init_repo(tmp_path)
+
+        def fake_run(*args, **kwargs):
+            raise FileNotFoundError("no git")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(GitError) as exc_info:
+            run_mutation(str(repo), "branch", "x", "main")
+        assert "git binary not found" in str(exc_info.value)
+
+    def test_run_git_timeout(self, tmp_path, monkeypatch):
+        from app.core.git import GitError, run_git
+
+        repo = _init_repo(tmp_path)
+
+        def fake_run(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd="git log", timeout=15.0)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(GitError) as exc_info:
+            run_git(str(repo), "log")
+        assert "timed out" in str(exc_info.value)
+
+    def test_run_mutation_timeout(self, tmp_path, monkeypatch):
+        from app.core.git import GitError, run_mutation
+
+        repo = _init_repo(tmp_path)
+
+        def fake_run(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd="git branch", timeout=15.0)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(GitError) as exc_info:
+            run_mutation(str(repo), "branch", "x", "main")
+        assert "timed out" in str(exc_info.value)
+
+    def test_run_mutation_no_args(self, tmp_path):
+        from app.core.git import GitError, run_mutation
+
+        repo = _init_repo(tmp_path)
+        with pytest.raises(GitError) as exc_info:
+            run_mutation(str(repo))
+        assert "no git command given" in str(exc_info.value)
+
+    def test_run_mutation_disallowed_subcommand(self, tmp_path):
+        from app.core.git import GitError, run_mutation
+
+        repo = _init_repo(tmp_path)
+        with pytest.raises(GitError) as exc_info:
+            run_mutation(str(repo), "push", "origin", "main")
+        assert "disallowed mutation subcommand" in str(exc_info.value)
+
+    def test_run_git_generic_failure_raises_git_failed(self, tmp_path):
+        from app.core.git import GitError, run_git
+
+        repo = _init_repo(tmp_path)
+        # `git diff` with a garbage flag: not "not a git repository" nor "bad
+        # object"/"ambiguous argument" -> falls through to the generic branch.
+        with pytest.raises(GitError) as exc_info:
+            run_git(str(repo), "diff", "--not-a-real-flag")
+        assert exc_info.value.args[0] == "git_failed"
+
+
+class TestGraphAndCommitsDecorationsAndRefs:
+    def test_list_commits_invalid_ref_starting_with_dash(self, tmp_path):
+        from app.core.git import GitError, list_commits
+
+        repo = _init_repo(tmp_path)
+        with pytest.raises(GitError) as exc_info:
+            list_commits(str(repo), ref="--evil-flag")
+        assert exc_info.value.args[0] == "invalid_ref"
+
+    def test_list_commits_all_ref(self, tmp_path):
+        from app.core.git import list_commits
+
+        repo = _init_repo(tmp_path)
+        commits, _total, _has_more = list_commits(str(repo), ref="--all")
+        assert len(commits) == 1
+
+
+class TestGetCommitDetail:
+    def test_root_commit_has_no_parents(self, tmp_path):
+        from app.core.git import get_commit
+
+        repo = _init_repo(tmp_path)
+        sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        detail = get_commit(str(repo), sha)
+        assert detail.parents == []
+        assert detail.is_merge is False
+
+    def test_file_statuses_add_modify_delete_rename(self, tmp_path):
+        from app.core.git import get_commit
+
+        repo = _init_repo(tmp_path)
+
+        (repo / "new.txt").write_text("new file with enough content to be detected\n" * 5)
+        _git(repo, "add", "new.txt")
+        _git(repo, "commit", "-m", "add new.txt", "-q")
+        add_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        (repo / "new.txt").write_text("modified content\n")
+        _git(repo, "add", "new.txt")
+        _git(repo, "commit", "-m", "modify new.txt", "-q")
+        modify_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        (repo / "new.txt").rename(repo / "renamed.txt")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-m", "rename new.txt", "-q")
+        rename_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        (repo / "renamed.txt").unlink()
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-m", "delete renamed.txt", "-q")
+        delete_sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        add_detail = get_commit(str(repo), add_sha)
+        assert any(f.status == "A" for f in add_detail.files)
+
+        modify_detail = get_commit(str(repo), modify_sha)
+        assert any(f.status == "M" for f in modify_detail.files)
+
+        # Rename detection needs an explicit -M threshold that get_commit's
+        # diff-tree call doesn't pass, so git reports it as delete+add, not "R" —
+        # not exercised here (see git.py's dead "R"/"C" status branches).
+        get_commit(str(repo), rename_sha)
+
+        delete_detail = get_commit(str(repo), delete_sha)
+        assert any(f.status == "D" for f in delete_detail.files)
+
+
+class TestMergeAndCleanupWorktree:
+    def test_merge_and_cleanup_worktree_success(self, tmp_path):
+        from app.core.git import merge_and_cleanup_worktree
+
+        repo = _init_repo(tmp_path)
+        path = prepare_worktree(str(repo), "MAP-999", base_branch="main")
+        with open(os.path.join(path, "feature.txt"), "w") as f:
+            f.write("x")
+        _git(path, "add", "feature.txt")
+        _git(path, "commit", "-m", "feat work", "-q")
+
+        merge_and_cleanup_worktree(str(repo), path, "MAP-999", merge_into="main")
+
+        assert not os.path.isdir(path)
+        assert (repo / "feature.txt").exists()  # merged into main
+        branches = _git(repo, "branch", "--list", "feat/MAP-999").stdout
+        assert branches.strip() == ""  # branch deleted
+
+    def test_cleanup_abandoned_worktree_removes_worktree(self, tmp_path):
+        from app.core.git import cleanup_abandoned_worktree
+
+        repo = _init_repo(tmp_path)
+        path = prepare_worktree(str(repo), "MAP-888", base_branch="main")
+        assert os.path.isdir(path)
+
+        cleanup_abandoned_worktree(str(repo), "MAP-888")
+
+        assert not os.path.isdir(path)
+        # Branch is NOT deleted by cleanup.
+        branches = _git(repo, "branch", "--list", "feat/MAP-888").stdout
+        assert "feat/MAP-888" in branches
+
+    def test_cleanup_abandoned_worktree_noop_when_missing(self, tmp_path):
+        from app.core.git import cleanup_abandoned_worktree
+
+        repo = _init_repo(tmp_path)
+        # No worktree was ever created for this ticket -> GitError swallowed.
+        cleanup_abandoned_worktree(str(repo), "MAP-777")
+
+    def test_prepare_worktree_creates_epic_branch_when_missing(self, tmp_path):
+        from app.core.git import _epic_branch_name, prepare_worktree
+
+        repo = _init_repo(tmp_path)
+        epic_branch = _epic_branch_name("Some Epic Title!")
+        assert epic_branch == "epic/some-epic-title-epic"
+
+        path = prepare_worktree(str(repo), "MAP-321", epic_branch=epic_branch, base_branch="main")
+
+        assert os.path.isdir(path)
+        branches = _git(repo, "branch", "--list", epic_branch).stdout
+        assert epic_branch in branches
+
+    def test_prepare_worktree_reuses_existing_epic_branch(self, tmp_path):
+        from app.core.git import _epic_branch_name, prepare_worktree
+
+        repo = _init_repo(tmp_path)
+        epic_branch = _epic_branch_name("Reused Epic")
+
+        first = prepare_worktree(str(repo), "MAP-401", epic_branch=epic_branch, base_branch="main")
+        # A second ticket under the SAME epic must reuse the epic branch, not
+        # try (and fail) to recreate it.
+        second = prepare_worktree(str(repo), "MAP-402", epic_branch=epic_branch, base_branch="main")
+
+        assert os.path.isdir(first)
+        assert os.path.isdir(second)
+        assert first != second
+
+
+class TestSlugify:
+    def test_slugify_strips_punctuation_and_lowercases(self):
+        from app.core.git import _slugify
+
+        assert _slugify("Fix Bug #123!!") == "fix-bug-123"
+
+    def test_slugify_empty_input_falls_back_to_untitled(self):
+        from app.core.git import _slugify
+
+        assert _slugify("   ###   ") == "untitled"

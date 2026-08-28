@@ -357,3 +357,48 @@ def test_activating_sprint_skips_disabled_assignee(client, tmp_path, monkeypatch
     resp = client.patch(f"/api/sprints/{s2['id']}", json={"status": "active"})
     assert resp.status_code == 200, resp.text
     assert client.get(f"/api/workspaces/{ws_id}/runs").json() == []
+
+
+def test_activating_sprint_skips_unassigned_ticket(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "OPENCODE_BIN", "/nonexistent/opencode-for-tests")
+    ws_id = _make_workspace(client, tmp_path)
+
+    s1 = client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "Sprint 1"}).json()
+    s2 = client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "Sprint 2"}).json()
+    client.post(
+        f"/api/workspaces/{ws_id}/tickets",
+        json={"title": "No assignee", "is_new_epic": True, "sprint_id": s2["id"]},
+    )
+
+    resp = client.patch(f"/api/sprints/{s2['id']}", json={"status": "active"})
+    assert resp.status_code == 200, resp.text
+    assert client.get(f"/api/workspaces/{ws_id}/runs").json() == []
+
+
+def test_resaving_active_sprint_does_not_retrigger_runs(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "OPENCODE_BIN", "/nonexistent/opencode-for-tests")
+    ws_id = _make_workspace(client, tmp_path)
+    eng = client.post(
+        f"/api/workspaces/{ws_id}/agents",
+        json={"name": "eng-1", "role": "engineer", "model": "m", "tool_kind": "opencode"},
+    ).json()
+
+    s1 = client.post(f"/api/workspaces/{ws_id}/sprints", json={"name": "Sprint 1"}).json()
+    assert s1["status"] == "active"  # first sprint bootstraps active
+    client.post(
+        f"/api/workspaces/{ws_id}/tickets",
+        json={"title": "A", "is_new_epic": True, "assignee_id": eng["id"], "sprint_id": s1["id"]},
+    )
+    # Drain the run kicked off by the ticket's own creation-time scheduling (if
+    # any) before asserting on re-save behavior below.
+    client.get(f"/api/workspaces/{ws_id}/runs").json()
+
+    # Re-saving an already-active sprint with other fields must NOT kick off
+    # runs -- only the transition INTO active does (MAP-046).
+    resp = client.patch(f"/api/sprints/{s1['id']}", json={"goal": "updated goal"})
+    assert resp.status_code == 200, resp.text
+    assert client.get(f"/api/workspaces/{ws_id}/runs").json() == []
+
+    resp = client.patch(f"/api/sprints/{s1['id']}", json={"status": "active"})
+    assert resp.status_code == 200, resp.text
+    assert client.get(f"/api/workspaces/{ws_id}/runs").json() == []

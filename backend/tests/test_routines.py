@@ -18,6 +18,12 @@ from app.db.models import Base
 from app.db.session import get_session
 from app.main import app
 
+# conftest.py's autouse `_disable_background_schedulers` fixture monkeypatches the
+# `run_scheduler` module attribute to a no-op for every test. Capture the real
+# function here at collection time (before any per-test monkeypatch runs) so the
+# loop-body test below can call the actual implementation.
+_REAL_RUN_SCHEDULER = routine_scheduler.run_scheduler
+
 
 @pytest.fixture
 async def client(tmp_path, monkeypatch):
@@ -789,3 +795,227 @@ def test_routine_run_guardrail_blocked_409(client, tmp_path, monkeypatch):
     resp = client.post(f"/api/routines/{rid}/run")
     assert resp.status_code == 409
     assert resp.json()["error"]["code"] == "guardrail_blocked"
+
+
+def test_routine_run_nonzero_exit_marks_failed_idle(client, tmp_path, monkeypatch):
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    rid = client.post(
+        f"/api/workspaces/{ws_id}/routines",
+        json={
+            "name": "R",
+            "prompt": "p",
+            "interval_minutes": 5,
+            "mode": "idle_only",
+            "agent_id": pm_id,
+        },
+    ).json()["id"]
+
+    script = _write_python_binary(
+        tmp_path / "opencode", "import sys\nprint('boom', file=sys.stderr)\nsys.exit(1)\n"
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.post(f"/api/routines/{rid}/run")
+    assert resp.status_code == 200, resp.text
+    run = next(r for r in client.get(f"/api/workspaces/{ws_id}/runs").json() if r["trigger"] == "routine")
+    final = _wait_for_run(client, run["id"])
+    assert final["status"] == "failed", final
+    assert "boom" in final["error"]
+
+    routine = client.get(f"/api/workspaces/{ws_id}/routines").json()[0]
+    assert routine["status"] == "idle"
+    agent = client.get(f"/api/workspaces/{ws_id}/agents").json()[0]
+    assert agent["status"] == "idle"
+
+
+def test_routine_run_malformed_map_marks_failed(client, tmp_path, monkeypatch):
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    rid = client.post(
+        f"/api/workspaces/{ws_id}/routines",
+        json={
+            "name": "R",
+            "prompt": "p",
+            "interval_minutes": 5,
+            "mode": "idle_only",
+            "agent_id": pm_id,
+        },
+    ).json()["id"]
+
+    script = _write_python_binary(
+        tmp_path / "opencode",
+        '''
+import json
+print(json.dumps({"type": "assistant_text", "text": "no map block here at all"}))
+''',
+    )
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.post(f"/api/routines/{rid}/run")
+    assert resp.status_code == 200, resp.text
+    run = next(r for r in client.get(f"/api/workspaces/{ws_id}/runs").json() if r["trigger"] == "routine")
+    final = _wait_for_run(client, run["id"])
+    assert final["status"] == "failed", final
+
+    routine = client.get(f"/api/workspaces/{ws_id}/routines").json()[0]
+    assert routine["status"] == "idle"
+
+
+def test_scheduler_tick_fires_due_routine_for_idle_agent(client, tmp_path, monkeypatch):
+    """The `_tick` try body (schedule_routine_run success) is otherwise only
+    exercised indirectly through the HTTP `/routines/{id}/run` endpoint, never
+    through the scheduler's own due-routine loop."""
+    import asyncio
+
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    client.post(
+        f"/api/workspaces/{ws_id}/routines",
+        json={
+            "name": "R",
+            "prompt": "p",
+            "interval_minutes": 1,
+            "mode": "idle_only",
+            "agent_id": pm_id,
+        },
+    )
+
+    script = _write_python_binary(tmp_path / "opencode", _SIMPLE_ROUTINE_SCRIPT)
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    async def _run_tick():
+        async with db_session.async_session() as session:
+            await routine_scheduler._tick(session, db_session.async_session)
+
+    asyncio.run(_run_tick())
+    runs = client.get(f"/api/workspaces/{ws_id}/runs").json()
+    assert any(r["trigger"] == "routine" for r in runs)
+
+
+def test_scheduler_tick_swallows_guardrail_blocked(client, tmp_path, monkeypatch):
+    import asyncio
+
+    from app.core import orchestrator
+    from app.core.guardrails import GuardrailBlocked
+
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    client.post(
+        f"/api/workspaces/{ws_id}/routines",
+        json={
+            "name": "R",
+            "prompt": "p",
+            "interval_minutes": 1,
+            "mode": "idle_only",
+            "agent_id": pm_id,
+        },
+    )
+
+    async def _blocked(*args, **kwargs):
+        raise GuardrailBlocked("max_concurrent_runs", "too many runs")
+
+    monkeypatch.setattr(orchestrator, "schedule_routine_run", _blocked)
+
+    async def _run_tick():
+        async with db_session.async_session() as session:
+            await routine_scheduler._tick(session, db_session.async_session)
+
+    asyncio.run(_run_tick())  # must not raise
+    assert client.get(f"/api/workspaces/{ws_id}/runs").json() == []
+
+
+def test_scheduler_tick_swallows_runtime_error_paused(client, tmp_path, monkeypatch):
+    import asyncio
+
+    from app.core import orchestrator
+
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    client.post(
+        f"/api/workspaces/{ws_id}/routines",
+        json={
+            "name": "R",
+            "prompt": "p",
+            "interval_minutes": 1,
+            "mode": "idle_only",
+            "agent_id": pm_id,
+        },
+    )
+
+    async def _paused(*args, **kwargs):
+        raise RuntimeError("workspace paused")
+
+    monkeypatch.setattr(orchestrator, "schedule_routine_run", _paused)
+
+    async def _run_tick():
+        async with db_session.async_session() as session:
+            await routine_scheduler._tick(session, db_session.async_session)
+
+    asyncio.run(_run_tick())  # must not raise
+    assert client.get(f"/api/workspaces/{ws_id}/runs").json() == []
+
+
+def test_scheduler_normalizes_naive_last_run_at(client, tmp_path, monkeypatch):
+    """SQLite/expire_on_commit=False can leave a naive last_run_at on an
+    already-loaded ORM object; `_tick` must normalize it to UTC-aware before
+    comparing, not raise a naive/aware TypeError."""
+    import asyncio
+
+    from app.db.models import Routine as RoutineModel
+
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    rid = client.post(
+        f"/api/workspaces/{ws_id}/routines",
+        json={
+            "name": "R",
+            "prompt": "p",
+            "interval_minutes": 1,
+            "mode": "idle_only",
+            "agent_id": pm_id,
+        },
+    ).json()["id"]
+
+    async def _run_tick_with_naive_last_run_at():
+        async with db_session.async_session() as session:
+            routine = await session.get(RoutineModel, rid)
+            routine.last_run_at = datetime.now()  # naive, no tzinfo
+            # Same session/identity map: _tick's select() will reuse this
+            # in-memory object rather than re-fetching (which would re-apply
+            # the UTCDateTime type decorator and mask the naive value).
+            await routine_scheduler._tick(session, db_session.async_session)
+
+    asyncio.run(_run_tick_with_naive_last_run_at())  # must not raise TypeError
+
+
+def test_scheduler_loop_runs_one_tick_then_stops(client, tmp_path, monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(routine_scheduler, "_TICK_SECONDS", 0.01)
+
+    ws_id = _make_workspace(client, tmp_path)
+    pm_id = _make_agent(client, ws_id, "pm", "pm-1")
+    client.post(
+        f"/api/workspaces/{ws_id}/routines",
+        json={
+            "name": "R",
+            "prompt": "p",
+            "interval_minutes": 1,
+            "mode": "idle_only",
+            "agent_id": pm_id,
+        },
+    )
+    script = _write_python_binary(tmp_path / "opencode", _SIMPLE_ROUTINE_SCRIPT)
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    async def _run_loop():
+        stop_event = asyncio.Event()
+        task = asyncio.create_task(_REAL_RUN_SCHEDULER(db_session.async_session, stop_event))
+        await asyncio.sleep(0.3)  # let at least one real tick fire
+        stop_event.set()
+        await asyncio.wait_for(task, timeout=5)
+
+    asyncio.run(_run_loop())
+    runs = client.get(f"/api/workspaces/{ws_id}/runs").json()
+    assert any(r["trigger"] == "routine" for r in runs)

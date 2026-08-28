@@ -567,6 +567,53 @@ def test_mention_to_disabled_agent_blocks_with_comment(client, tmp_path, monkeyp
     assert any("lead-1" in b and "nonaktif" in b for b in bodies)
 
 
+def test_role_mention_with_no_agent_of_that_role_blocks_with_comment(client, tmp_path, monkeypatch):
+    """The mentioned role is a real role key (registered), but no agent in the
+    workspace has it -> `_resolve_role_agent` returns None."""
+    ws_id = _make_workspace(client, tmp_path)
+    eng = _make_agent(client, ws_id, "engineer", "eng-1")
+    _make_agent(client, ws_id, "pm", "pm-1")  # no "qa" agent exists
+    ticket = _make_ticket(client, ws_id)
+    _set_status(client, ticket["key"], "todo")
+    _set_status(client, ticket["key"], "in_progress")
+
+    script = _write_python_binary(tmp_path / "opencode", _script("review", "qa"))
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": eng["id"]})
+    assert resp.status_code == 201, resp.text
+    _wait_for_run(client, resp.json()["id"])
+
+    detail = client.get(f"/api/tickets/{ticket['key']}").json()
+    assert detail["status"] == "blocked"
+    bodies = _system_comment_bodies(client, ticket["key"])
+    assert any("tidak ada agent dengan role 'qa'" in b for b in bodies)
+
+
+def test_role_mention_to_own_role_is_dropped_as_self_mention(client, tmp_path, monkeypatch):
+    """MAP-052 regression: a report mentioning its OWN role (the only agent with
+    that role is itself) must not hand off to itself and loop forever."""
+    ws_id = _make_workspace(client, tmp_path)
+    lead = _make_agent(client, ws_id, "lead", "lead-1")
+    ticket = _make_ticket(client, ws_id)
+    _set_status(client, ticket["key"], "todo")
+    _set_status(client, ticket["key"], "in_progress")
+
+    script = _write_python_binary(tmp_path / "opencode", _script("review", "lead"))
+    monkeypatch.setattr(settings, "OPENCODE_BIN", script)
+
+    resp = client.post(f"/api/tickets/{ticket['key']}/run", json={"agent_id": lead["id"]})
+    assert resp.status_code == 201, resp.text
+    _wait_for_run(client, resp.json()["id"])
+
+    time.sleep(0.3)  # give any (incorrect) auto-scheduling a moment to show up
+    runs = [r for r in client.get(f"/api/workspaces/{ws_id}/runs").json() if r["ticket_id"] == ticket["id"]]
+    assert len(runs) == 1, runs  # no self-handoff run was scheduled
+
+    bodies = _system_comment_bodies(client, ticket["key"])
+    assert any("menunjuk ke diri sendiri" in b for b in bodies)
+
+
 # ---------------------------------------------------------------------------
 # (g) owner comment @mention triggers trigger="mention" run, no handoff_depth change
 # ---------------------------------------------------------------------------
