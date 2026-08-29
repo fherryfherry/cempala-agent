@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-29
+
 ### Added
 
 - One-shot dev script `./run.sh` — setup (venv + node_modules) + migrate + backend/frontend together.
@@ -73,5 +75,6 @@ MVP: a Jira-like portal where AI agents work tickets autonomously inside a local
 - opencode adapter JSON schema didn't match real CLI output (found via MAP-033 dogfood).
 - Test fixtures depended on an ambient, pre-migrated `backend/map.db`.
 
-[Unreleased]: https://github.com/fherryfherry/cempala-agent/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/fherryfherry/cempala-agent/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/fherryfherry/cempala-agent/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/fherryfherry/cempala-agent/releases/tag/v0.1.0

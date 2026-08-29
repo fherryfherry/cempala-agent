@@ -164,6 +164,15 @@ stored by this portal; each CLI manages its own auth.
 - `agy` (Google Antigravity CLI) — see [antigravity.google](https://antigravity.google) / Google's
   own setup docs for install and auth on each OS; no official brew formula at time of writing.
 
+## Quick install
+
+```
+curl -fsSL https://raw.githubusercontent.com/fherryfherry/cempala-agent/main/install.sh | bash
+```
+
+Checks prerequisites, clones the repo into `./cempala`, and prints the next steps (agent CLI auth
++ `./run.sh`). Equivalent to steps 1–3 of [Setup from scratch](#setup-from-scratch) below.
+
 ## Setup from scratch
 
 1. Make sure Git, Python 3.11+, Node.js 20+, and `make` are installed (see
