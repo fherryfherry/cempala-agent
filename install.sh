@@ -37,22 +37,34 @@ install_pkg() {
   esac
 }
 
-has_python311() {
-  command -v python3 >/dev/null 2>&1 && [ "$(python3 -c 'import sys; print(sys.version_info[1])')" -ge 11 ]
+has_node20() {
+  command -v node >/dev/null 2>&1 && [ "$(node -e 'console.log(process.versions.node.split(".")[0])')" -ge 20 ]
+}
+
+# Distro-packaged nodejs is often years out of date (e.g. Ubuntu 22.04 ships v12).
+# Use NodeSource's setup script so apt/dnf install a current major version instead.
+install_node() {
+  case "$PKG_MANAGER" in
+    brew) brew install node ;;
+    apt) curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs ;;
+    dnf) curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo -E bash - && sudo dnf install -y nodejs ;;
+    *) echo "No supported package manager found — install Node.js 20+ manually" >&2; return 1 ;;
+  esac
 }
 
 command -v git >/dev/null 2>&1 || { echo "==> Installing git"; install_pkg git git make; }
 command -v make >/dev/null 2>&1 || { echo "==> Installing make"; install_pkg make make make; }
-has_python311 || { echo "==> Installing Python 3.12"; install_pkg python@3.12 "python3.12 python3.12-venv" python3.12; }
-command -v node >/dev/null 2>&1 || { echo "==> Installing Node.js"; install_pkg node nodejs "nodejs npm"; }
+has_node20 || { echo "==> Installing Node.js 20"; install_node; }
 command -v uv >/dev/null 2>&1 || { echo "==> Installing uv"; curl -LsSf https://astral.sh/uv/install.sh | sh; export PATH="$HOME/.local/bin:$PATH"; }
 command -v opencode >/dev/null 2>&1 || { echo "==> Installing opencode"; curl -fsSL https://opencode.ai/install | bash; export PATH="$HOME/.opencode/bin:$PATH"; }
 
+# uv manages its own Python interpreters (run.sh uses `uv venv --python 3.12`), so a
+# system Python 3.11+ isn't required as long as uv is present.
 missing=()
 command -v git >/dev/null 2>&1 || missing+=("git")
-command -v node >/dev/null 2>&1 || missing+=("node (v20+)")
+has_node20 || missing+=("node (v20+)")
 command -v make >/dev/null 2>&1 || missing+=("make")
-has_python311 || missing+=("python3.11+")
+command -v uv >/dev/null 2>&1 || missing+=("uv")
 
 if [ "${#missing[@]}" -gt 0 ]; then
   echo "Still missing (auto-install failed or unsupported package manager):" >&2
@@ -71,7 +83,7 @@ fi
 
 cat <<EOF
 
-==> Prerequisites OK, repo ready at ./$DEST
+==> Prerequisites OK, repo ready at $DEST
 
 Next steps:
   1. Authenticate opencode (already installed by this script): opencode auth login

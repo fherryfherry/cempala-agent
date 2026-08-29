@@ -58,10 +58,12 @@ See [`docs/00-overview.md`](docs/00-overview.md) for the full pitch and
 curl -fsSL https://raw.githubusercontent.com/fherryfherry/cempala-agent/main/install.sh | bash
 ```
 
-Installs missing prerequisites (git, Python 3.11+, Node.js, make, `uv`, `opencode`) via your OS
-package manager (brew on macOS, apt/dnf on Linux), clones the repo into `./cempala`, and prints
-the next steps (`opencode auth login` + `./run.sh`). Falls back to printing manual install links
-(see [Prerequisites](#prerequisites)) if your platform/package manager isn't supported.
+Installs missing prerequisites — git, Node.js 20+ (via NodeSource, not your distro's often-ancient
+package), make, `uv`, `opencode` — via your OS package manager (brew on macOS, apt/dnf on Linux),
+clones the repo into `./cempala`, and prints the next steps (`opencode auth login` + `./run.sh`).
+No system Python install needed: `uv` manages its own Python 3.12 interpreter. Falls back to
+printing manual install links (see [Prerequisites](#prerequisites)) if your platform/package
+manager isn't supported.
 
 ## Setup from scratch
 

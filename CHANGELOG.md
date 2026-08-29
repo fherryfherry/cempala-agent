@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-08-29
+
+### Fixed
+
+- `install.sh` no longer tries to apt-install a Python version that doesn't exist in Ubuntu
+  22.04's default repos (`python3.12`); `uv` manages its own Python interpreter, so no system
+  Python install is attempted at all now.
+- `install.sh` no longer installs the distro-packaged `nodejs` (Ubuntu 22.04 ships v12, need
+  v20+) — uses NodeSource's setup script on apt/dnf instead, and verifies the installed version
+  is actually ≥20 before proceeding.
+- Fixed a cosmetic double-slash (`.//home/...`) in the installer's final message when given an
+  absolute destination path.
+
+Verified end-to-end (fresh install, re-run/idempotency, and `uv`'s Python auto-download) in a
+clean Ubuntu 22.04 Docker container.
+
 ## [0.2.2] - 2026-08-29
 
 ### Added
@@ -97,7 +113,8 @@ MVP: a Jira-like portal where AI agents work tickets autonomously inside a local
 - opencode adapter JSON schema didn't match real CLI output (found via MAP-033 dogfood).
 - Test fixtures depended on an ambient, pre-migrated `backend/map.db`.
 
-[Unreleased]: https://github.com/fherryfherry/cempala-agent/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/fherryfherry/cempala-agent/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/fherryfherry/cempala-agent/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/fherryfherry/cempala-agent/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/fherryfherry/cempala-agent/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/fherryfherry/cempala-agent/compare/v0.1.0...v0.2.0
