@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-08-29
+
+### Fixed
+
+- Agent prompts now state the team roster is exhaustive, so agents (esp. PM in chat) stop
+  narrating handoffs to generic SDLC roles (QA, Security) that have no agent in the workspace
+  and promising follow-through that could never fire.
+- Removed a stale "typing" label left on rendered chat messages after they finish streaming.
+
 ## [0.2.3] - 2026-08-29
 
 ### Fixed
