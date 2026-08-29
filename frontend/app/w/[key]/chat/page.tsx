@@ -915,7 +915,7 @@ function ChatMessages({
           <div className="max-w-[75%] rounded-lg bg-zinc-100 px-3 py-2 text-sm text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100">
             <p className="mb-0.5 flex items-center gap-1.5 text-[10px] font-medium opacity-70">
               <AgentAvatar name={pmName} {...pmAvatar} size={14} />
-              <span>{pmLabel} · typing</span>
+              <span>{pmLabel}</span>
               <span className="font-normal">{formatShortTime(ev.created_at, timezone)}</span>
             </p>
             <Markdown>{ev.payload.text as string}</Markdown>
