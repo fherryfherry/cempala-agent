@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-08-29
+
+### Added
+
+- `install.sh` now auto-installs missing prerequisites (git, Python 3.11+, Node.js, make, `uv`,
+  `opencode`) via brew/apt/dnf instead of only checking for them.
+
+### Changed
+
+- README reordered: Features → Quick install → Setup from scratch → Running → Layout → Settings
+  storage → Prerequisites → Security warning (+ Tailscale remote-access section) → Contributing.
+- README intro trimmed to a single paragraph (moved the "no coding agent of its own" note and the
+  *cempala* name origin story out).
+
 ## [0.2.1] - 2026-08-29
 
 ### Added
@@ -83,7 +97,8 @@ MVP: a Jira-like portal where AI agents work tickets autonomously inside a local
 - opencode adapter JSON schema didn't match real CLI output (found via MAP-033 dogfood).
 - Test fixtures depended on an ambient, pre-migrated `backend/map.db`.
 
-[Unreleased]: https://github.com/fherryfherry/cempala-agent/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/fherryfherry/cempala-agent/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/fherryfherry/cempala-agent/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/fherryfherry/cempala-agent/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/fherryfherry/cempala-agent/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/fherryfherry/cempala-agent/releases/tag/v0.1.0

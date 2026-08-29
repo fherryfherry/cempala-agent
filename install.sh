@@ -1,34 +1,63 @@
 #!/usr/bin/env bash
-# One-shot installer: clone CEMPALA and check prerequisites.
+# One-shot installer: install prerequisites, clone CEMPALA, print next steps.
 # Usage: curl -fsSL https://raw.githubusercontent.com/fherryfherry/cempala-agent/main/install.sh | bash
 set -euo pipefail
 
 REPO_URL="https://github.com/fherryfherry/cempala-agent.git"
 DEST="${1:-cempala}"
 
-case "$(uname -s)" in
-  Linux*|Darwin*) ;;
+OS="$(uname -s)"
+case "$OS" in
+  Linux|Darwin) ;;
   *)
     echo "Unsupported OS. On Windows, run this script inside WSL." >&2
     exit 1
     ;;
 esac
 
+PKG_MANAGER=""
+if [ "$OS" = "Darwin" ]; then
+  command -v brew >/dev/null 2>&1 && PKG_MANAGER="brew"
+elif command -v apt-get >/dev/null 2>&1; then
+  PKG_MANAGER="apt"
+elif command -v dnf >/dev/null 2>&1; then
+  PKG_MANAGER="dnf"
+fi
+
+install_pkg() {
+  # $1: brew formula, $2: apt package(s), $3: dnf package(s)
+  case "$PKG_MANAGER" in
+    brew) brew install "$1" ;;
+    apt) sudo apt-get update -qq && sudo apt-get install -y $2 ;;
+    dnf) sudo dnf install -y $3 ;;
+    *)
+      echo "No supported package manager found (brew/apt/dnf) — install manually: $1" >&2
+      return 1
+      ;;
+  esac
+}
+
+has_python311() {
+  command -v python3 >/dev/null 2>&1 && [ "$(python3 -c 'import sys; print(sys.version_info[1])')" -ge 11 ]
+}
+
+command -v git >/dev/null 2>&1 || { echo "==> Installing git"; install_pkg git git make; }
+command -v make >/dev/null 2>&1 || { echo "==> Installing make"; install_pkg make make make; }
+has_python311 || { echo "==> Installing Python 3.12"; install_pkg python@3.12 "python3.12 python3.12-venv" python3.12; }
+command -v node >/dev/null 2>&1 || { echo "==> Installing Node.js"; install_pkg node nodejs "nodejs npm"; }
+command -v uv >/dev/null 2>&1 || { echo "==> Installing uv"; curl -LsSf https://astral.sh/uv/install.sh | sh; export PATH="$HOME/.local/bin:$PATH"; }
+command -v opencode >/dev/null 2>&1 || { echo "==> Installing opencode"; curl -fsSL https://opencode.ai/install | bash; export PATH="$HOME/.opencode/bin:$PATH"; }
+
 missing=()
 command -v git >/dev/null 2>&1 || missing+=("git")
 command -v node >/dev/null 2>&1 || missing+=("node (v20+)")
 command -v make >/dev/null 2>&1 || missing+=("make")
-if command -v python3 >/dev/null 2>&1; then
-  py_minor=$(python3 -c 'import sys; print(sys.version_info[1])')
-  [ "$py_minor" -ge 11 ] || missing+=("python3.11+ (found $(python3 --version))")
-else
-  missing+=("python3.11+")
-fi
+has_python311 || missing+=("python3.11+")
 
 if [ "${#missing[@]}" -gt 0 ]; then
-  echo "Missing prerequisites:" >&2
+  echo "Still missing (auto-install failed or unsupported package manager):" >&2
   printf '  - %s\n' "${missing[@]}" >&2
-  echo "See https://github.com/fherryfherry/cempala-agent#prerequisites for install links." >&2
+  echo "See https://github.com/fherryfherry/cempala-agent#prerequisites for manual install links." >&2
   exit 1
 fi
 
@@ -45,8 +74,7 @@ cat <<EOF
 ==> Prerequisites OK, repo ready at ./$DEST
 
 Next steps:
-  1. Install & authenticate at least one agent CLI (opencode is simplest):
-       curl -fsSL https://opencode.ai/install | bash && opencode auth login
+  1. Authenticate opencode (already installed by this script): opencode auth login
   2. cd $DEST && ./run.sh
   3. Open http://localhost:3000
 EOF
