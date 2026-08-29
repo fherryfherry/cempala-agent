@@ -320,7 +320,9 @@ How to write your answer:
   concise.
 
 Team members in this workspace:
-{roster_lines}"""
+{roster_lines}
+
+EXHAUSTIVE — don't promise handoff to a role not listed here."""
 
 
 def _ticket_context_block(
