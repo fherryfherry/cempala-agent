@@ -205,6 +205,10 @@ make test      # pytest
 `run.sh` kills anything already listening on the backend/frontend ports before starting, so a
 stale dev server won't hold the ports.
 
+`make dev HOST_BACKEND=0.0.0.0` overrides the backend bind address (default `127.0.0.1`) if you
+really need it — see the [security warning](#️-security-warning--read-before-running) first;
+prefer `tailscale serve` over rebinding.
+
 ## Layout
 
 ```
