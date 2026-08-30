@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-08-30
+
+### Added
+
+- Workspace list now groups cards into "Active"/"Inactive" sections (by whether any enabled
+  agent is `working`), each card showing a running/idle status dot and a stacked avatar row of
+  its agents.
+- Global "PM wants your approval" modal, mounted once per workspace so a pending approval shows
+  up no matter what page you're on, not just the chat surfaces — shares detection with the
+  floating chat via a new `usePmApproval` hook so both agree on what counts as pending and never
+  double-submit the same answer.
+- New `list_sprints` MCP tool so agents can check sprint names/status/dates directly instead of
+  only through prompt-injected ticket context.
+
+### Fixed
+
+- PM's "other tickets in this workspace" prompt context (owner-chat mentions) now shows each
+  ticket's sprint as ACTIVE/NOT ACTIVE, matching what the single-ticket prompt already showed —
+  previously the PM could only see the sprint name and had no way to tell which sprint was active.
+
 ## [0.2.5] - 2026-08-30
 
 ### Added

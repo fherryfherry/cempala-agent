@@ -214,6 +214,7 @@ class WorkspaceTicketSummary:
     status: str
     priority: str
     sprint_name: str | None = None
+    sprint_active: bool | None = None
     assignee: str | None = None
     updated_at: str | None = None
 
@@ -246,9 +247,14 @@ your role instructions still applies."""
 
 
 def _workspace_tickets_block(tickets: list[WorkspaceTicketSummary]) -> str:
+    def _sprint_label(t: WorkspaceTicketSummary) -> str:
+        if not t.sprint_name:
+            return "no sprint"
+        state = "ACTIVE" if t.sprint_active else "NOT ACTIVE"
+        return f"{t.sprint_name} ({state})"
+
     lines = [
-        f"- {t.key} [{t.status}] (sprint: {t.sprint_name or 'no sprint'}) — {t.title}"
-        for t in tickets
+        f"- {t.key} [{t.status}] (sprint: {_sprint_label(t)}) — {t.title}" for t in tickets
     ]
     return "Other tickets in this workspace (for context/review):\n" + "\n".join(lines)
 
@@ -390,6 +396,7 @@ through the closing `map` block, not through tools.
 
 Available MCP tools:
 - list_tickets — list all tickets (key, status, priority, assignee, sprint, last update)
+- list_sprints — list all sprints (name, status, dates)
 - get_ticket(key) — ticket detail (description, comments, sub-tickets)
 - list_comments(key) — comments on a ticket
 - list_artifacts(filename=...) — search whether a filename is already published; ALWAYS call

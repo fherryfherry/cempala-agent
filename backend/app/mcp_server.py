@@ -80,6 +80,14 @@ def _ticket_row(t: dict) -> str:
     )
 
 
+def _sprint_row(s: dict) -> str:
+    state = "ACTIVE" if s.get("status") == "active" else s.get("status")
+    dates = ""
+    if s.get("start_date") or s.get("end_date"):
+        dates = f" ({s.get('start_date') or '?'} to {s.get('end_date') or '?'})"
+    return f"{s['name']} [{state}]{dates}"
+
+
 def _error(res: dict, what: str) -> str:
     return f"Failed to {what}: {res['error']['message']}"
 
@@ -152,6 +160,15 @@ def create_server() -> MCPServer:
         if not tickets:
             return "No tickets in this workspace."
         return "Ticket list (most recent first):\n" + "\n".join(f"- {_ticket_row(t)}" for t in tickets)
+
+    @server.tool(description="List all sprints in the workspace (Timeline menu), in order. Each entry: name, status (planned/active/completed — only one sprint is ever active), and start/end dates if set. Use this to find which sprint is currently active before assigning a ticket to a sprint, or to check a ticket's sprint status.")
+    async def list_sprints() -> str:
+        sprints = await _api(f"/workspaces/{WORKSPACE_ID}/sprints")
+        if _is_error(sprints):
+            return _error(sprints, "fetch sprints")
+        if not sprints:
+            return "No sprints in this workspace."
+        return "Sprint list:\n" + "\n".join(f"- {_sprint_row(s)}" for s in sprints)
 
     @server.tool(description="Detail of one ticket: description, comments (including system), status, assignee, sub-tickets. key = ticket code like MAP-002.")
     async def get_ticket(key: str) -> str:

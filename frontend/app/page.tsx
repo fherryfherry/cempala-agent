@@ -1,11 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useQuery } from "@tanstack/react-query";
-import { getHealth, listWorkspaces, type Workspace } from "@/lib/api";
+import { useRouter } from "next/navigation";
+import { useQueries, useQuery } from "@tanstack/react-query";
+import { getHealth, listAgents, listWorkspaces, type Workspace } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { LogoBanner } from "@/components/logo";
+import { AgentAvatars } from "@/components/agent-avatars";
+import { AgentStatusDot } from "@/components/agent-status";
 
 export default function Home() {
   const health = useQuery({ queryKey: ["health"], queryFn: getHealth });
@@ -61,26 +64,84 @@ function WorkspaceList({
   workspaces: Workspace[] | undefined;
   isLoading: boolean;
 }) {
+  const agentQueries = useQueries({
+    queries: (workspaces ?? []).map((ws) => ({
+      queryKey: ["agents", ws.id],
+      queryFn: () => listAgents(ws.id),
+    })),
+  });
+
   if (isLoading) return <p className="text-sm text-zinc-500">Loading workspaces…</p>;
   if (!workspaces || workspaces.length === 0) {
     return <p className="text-sm text-zinc-500">No workspaces yet — create one below.</p>;
   }
 
+  const runningIds = new Set(
+    workspaces
+      .filter((ws, i) => agentQueries[i].data?.some((a) => a.enabled && a.status === "working"))
+      .map((ws) => ws.id),
+  );
+  const active = workspaces.filter((ws) => runningIds.has(ws.id));
+  const inactive = workspaces.filter((ws) => !runningIds.has(ws.id));
+
   return (
-    <div className="flex flex-col gap-3">
-      {workspaces.map((ws) => (
-        <Link key={ws.id} href={`/w/${ws.key}/dashboard`}>
-          <Card className="transition-colors hover:bg-muted/50">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <span>{ws.name}</span>
-                <span className="text-xs font-normal text-zinc-500">{ws.key}</span>
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="text-xs text-zinc-500">{ws.repo_path}</CardContent>
-          </Card>
-        </Link>
-      ))}
+    <div className="flex flex-col gap-6">
+      <WorkspaceGroup title="Active" workspaces={active} />
+      <WorkspaceGroup title="Inactive" workspaces={inactive} />
     </div>
+  );
+}
+
+function WorkspaceGroup({ title, workspaces }: { title: string; workspaces: Workspace[] }) {
+  if (workspaces.length === 0) return null;
+  return (
+    <section className="flex flex-col gap-2">
+      <h2 className="text-sm font-medium text-zinc-500">
+        {title} <span className="text-zinc-400">({workspaces.length})</span>
+      </h2>
+      <div className="flex flex-col gap-3">
+        {workspaces.map((ws) => (
+          <WorkspaceCard key={ws.id} workspace={ws} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function WorkspaceCard({ workspace: ws }: { workspace: Workspace }) {
+  const router = useRouter();
+  const agents = useQuery({
+    queryKey: ["agents", ws.id],
+    queryFn: () => listAgents(ws.id),
+  });
+  const enabledAgents = agents.data?.filter((a) => a.enabled) ?? [];
+  const isRunning = enabledAgents.some((a) => a.status === "working");
+
+  return (
+    <Card
+      onClick={() => router.push(`/w/${ws.key}/dashboard`)}
+      className="cursor-pointer transition-colors hover:bg-muted/50"
+    >
+      <CardHeader>
+        <CardTitle className="flex items-center justify-between gap-2">
+          <span className="flex items-center gap-2">
+            <span>{ws.name}</span>
+            <span className="text-xs font-normal text-zinc-500">{ws.key}</span>
+          </span>
+          <span className="flex items-center gap-1.5 text-xs font-normal text-zinc-500">
+            <AgentStatusDot status={isRunning ? "working" : "idle"} />
+            {isRunning ? "Running" : "Idle"}
+          </span>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="flex items-center justify-between gap-2">
+        <span className="text-xs text-zinc-500">{ws.repo_path}</span>
+        {enabledAgents.length > 0 && (
+          <div onClick={(e) => e.stopPropagation()}>
+            <AgentAvatars agents={enabledAgents} workspaceId={ws.id} workspaceKey={ws.key} />
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }

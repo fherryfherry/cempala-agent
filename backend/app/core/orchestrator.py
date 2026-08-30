@@ -2224,6 +2224,7 @@ async def _workspace_ticket_summaries(
         await session.scalars(select(Sprint).where(Sprint.workspace_id == workspace_id))
     ).all()
     sprint_names = {s.id: s.name for s in sprints}
+    sprint_active = {s.id: s.status == "active" for s in sprints}
 
     tickets = (
         await session.scalars(
@@ -2240,6 +2241,7 @@ async def _workspace_ticket_summaries(
             status=t.status,
             priority=t.priority,
             sprint_name=sprint_names.get(t.sprint_id),
+            sprint_active=sprint_active.get(t.sprint_id),
         )
         for t in tickets
     ]

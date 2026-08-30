@@ -1,6 +1,6 @@
 [project]
 name = "map-backend"
-version = "0.2.5"
+version = "0.2.6"
 description = "Multi-Agent Portal backend (FastAPI). Never talks to an LLM directly — shells out to the opencode binary."
 license = { text = "MIT" }
 authors = [{ name = "Ferry", email = "ferdevelop15@gmail.com" }]

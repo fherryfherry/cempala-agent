@@ -377,10 +377,14 @@ def test_workspace_tickets_block_included_when_given():
     tickets = [
         WorkspaceTicketSummary(
             key="MAP-002", title="Article feature", status="done", priority="medium",
-            sprint_name="Sprint 1",
+            sprint_name="Sprint 1", sprint_active=True,
         ),
         WorkspaceTicketSummary(
             key="MAP-003", title="Fix bug login", status="blocked", priority="high",
+            sprint_name="Sprint 0", sprint_active=False,
+        ),
+        WorkspaceTicketSummary(
+            key="MAP-004", title="No sprint yet", status="open", priority="low",
             sprint_name=None,
         ),
     ]
@@ -388,8 +392,9 @@ def test_workspace_tickets_block_included_when_given():
         _agent("pm-1", "pm"), "/repo", ROSTER, TICKET, workspace_tickets=tickets,
     )
     assert "Other tickets in this workspace" in prompt
-    assert "MAP-002 [done] (sprint: Sprint 1) — Article feature" in prompt
-    assert "MAP-003 [blocked] (sprint: no sprint) — Fix bug login" in prompt
+    assert "MAP-002 [done] (sprint: Sprint 1 (ACTIVE)) — Article feature" in prompt
+    assert "MAP-003 [blocked] (sprint: Sprint 0 (NOT ACTIVE)) — Fix bug login" in prompt
+    assert "MAP-004 [open] (sprint: no sprint) — No sprint yet" in prompt
 
 
 def test_updates_example_has_sprint_and_duration_fields_for_pm_qa_pentester():
@@ -650,9 +655,11 @@ def test_fixed_scaffolding_stays_small():
     """Tripwire against bloat creeping back. Measured before this cleanup: engineer
     ticket 6455 chars, PM ticket 12291. These are ceilings on the FIXED scaffolding
     (empty ticket, no comments/summaries/catalogs) — if a new always-on block pushes
-    past them, it needs to earn its place or be gated to the run mode that needs it."""
+    past them, it needs to earn its place or be gated to the run mode that needs it.
+    Ceiling bumped to 6100 for the list_sprints MCP tool line (earns its place: agents
+    had no way to see which sprint is active without it)."""
     eng = build_prompt(_agent("eng-1", "engineer"), "/repo", ROSTER, TICKET)
-    assert len(eng) < 6000, f"engineer ticket prompt grew to {len(eng)} chars"
+    assert len(eng) < 6100, f"engineer ticket prompt grew to {len(eng)} chars"
     pm = build_prompt(_agent("pm-1", "pm"), "/repo", ROSTER, TICKET)
     assert len(pm) < 11800, f"PM ticket prompt grew to {len(pm)} chars"
 

@@ -154,6 +154,15 @@ def test_mcp_tools_end_to_end(client, tmp_path, monkeypatch):
     out = asyncio.run(_call("list_tickets", {"limit": 1, "offset": 0}))
     assert ticket["key"] in out
 
+    # list_sprints shows the active flag (MAP owner-chat reported it missing entirely)
+    resp = client.post(f"/api/workspaces/{ws['id']}/sprints", json={"name": "Sprint 1"})
+    assert resp.status_code == 201, resp.text
+    sprint = resp.json()
+    resp = client.patch(f"/api/sprints/{sprint['id']}", json={"status": "active"})
+    assert resp.status_code == 200, resp.text
+    out = asyncio.run(_call("list_sprints", {}))
+    assert "Sprint 1 [ACTIVE]" in out
+
     # get_ticket detail includes the key and status
     out = asyncio.run(_call("get_ticket", {"key": ticket["key"]}))
     assert ticket["key"] in out

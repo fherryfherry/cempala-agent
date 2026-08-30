@@ -3,26 +3,14 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
 import { ArrowUpIcon, ChevronRightIcon, XIcon } from "lucide-react";
-import {
-  ApiError,
-  createConversation,
-  formatAgentName,
-  listAgents,
-  listConversationMessages,
-  listConversations,
-  listRuns,
-  postConversationMessage,
-  type Agent,
-  type ConversationMessage,
-} from "@/lib/api";
+import { formatAgentName, type Agent, type ConversationMessage } from "@/lib/api";
 import {
   readUnreadChatCount,
   useWorkspaceEvents,
   type WorkspaceEvent,
 } from "@/components/events-context";
+import { usePmApproval } from "@/lib/use-pm-approval";
 import { AgentAvatar } from "@/components/agent-avatar";
 import { Markdown } from "@/components/markdown";
 import { Input } from "@/components/ui/input";
@@ -38,16 +26,6 @@ const BUBBLE_TEXT_STYLE = {
   fontFamily: "inherit",
 };
 
-/** Derive a short title from the opening message, same as the full /chat page. */
-function deriveTitle(message: string): string {
-  const trimmed = message.trim();
-  if (trimmed.length <= 50) return trimmed;
-  const cut = trimmed.slice(0, 50);
-  const lastSpace = cut.lastIndexOf(" ");
-  const base = (lastSpace > 0 ? cut.slice(0, lastSpace) : cut).trimEnd();
-  return `${base}…`;
-}
-
 /** Floating PM-chat entry point, mounted once in the workspace layout so its
  * open/closed state survives page navigation. Trigger button shows the PM's
  * avatar bottom-right; the panel reuses the same conversation data as the full
@@ -56,20 +34,18 @@ function deriveTitle(message: string): string {
 export function FloatingChat({
   workspaceId,
   workspaceKey,
+  open,
+  onOpenChange,
 }: {
   workspaceId: string | undefined;
   workspaceKey: string | undefined;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
 }) {
   const pathname = usePathname();
-  const [open, setOpen] = useState(false);
   const [unread, setUnread] = useState(0);
 
-  const agents = useQuery({
-    queryKey: ["agents", workspaceId],
-    queryFn: () => listAgents(workspaceId!),
-    enabled: !!workspaceId,
-  });
-  const pm = agents.data?.find((a) => a.role === "pm" && a.enabled);
+  const { pm } = usePmApproval(workspaceId);
 
   // Mirrors header.tsx's badge computation exactly, including its zero-count
   // fallback dot (unreadChatCount reset to 0 but a new agent message arrived after
@@ -141,14 +117,14 @@ export function FloatingChat({
           workspaceId={workspaceId}
           workspaceKey={workspaceKey!}
           pm={pm}
-          onClose={() => setOpen(false)}
+          onClose={() => onOpenChange(false)}
         />
       )}
       <button
         type="button"
         onClick={() => {
           const next = !open;
-          setOpen(next);
+          onOpenChange(next);
           if (next) markRead();
         }}
         aria-label={open ? "Tutup chat" : "Buka chat dengan PM"}
@@ -190,43 +166,18 @@ function FloatingChatPanel({
   pm: Agent;
   onClose: () => void;
 }) {
-  const queryClient = useQueryClient();
   const bottomRef = useRef<HTMLDivElement>(null);
   const [text, setText] = useState("");
 
-  const conversations = useQuery({
-    queryKey: ["conversations", workspaceId],
-    queryFn: () => listConversations(workspaceId),
-  });
-  const active = [...(conversations.data ?? [])].sort((a, b) =>
-    (b.last_message_at ?? b.created_at).localeCompare(
-      a.last_message_at ?? a.created_at,
-    ),
-  )[0];
-
-  const messages = useQuery({
-    queryKey: ["conversation", active?.id],
-    queryFn: () => listConversationMessages(active!.id),
-    enabled: !!active,
-    refetchInterval: active ? 2000 : false,
-  });
-  const allMessages = messages.data ?? [];
+  const {
+    allMessages,
+    pmIsTyping,
+    activeRunId,
+    activeChoices,
+    sendMutation,
+  } = usePmApproval(workspaceId);
 
   const { events: liveEvents } = useWorkspaceEvents();
-  const runs = useQuery({
-    queryKey: ["runs", workspaceId],
-    queryFn: () => listRuns(workspaceId),
-    refetchInterval: 2000,
-  });
-  const chatRuns = (runs.data ?? []).filter(
-    (r) => r.conversation_id === active?.id,
-  );
-  const pmIsTyping = chatRuns.some(
-    (r) => r.status === "running" || r.status === "queued",
-  );
-  const activeRunId = chatRuns.find(
-    (r) => r.status === "running" || r.status === "queued",
-  )?.id;
 
   const transcriptEvents = useMemo(() => {
     if (!activeRunId) return [];
@@ -239,15 +190,6 @@ function FloatingChatPanel({
       )
       .sort((a, b) => (a.created_at ?? "").localeCompare(b.created_at ?? ""));
   }, [liveEvents, activeRunId]);
-
-  const lastMessage =
-    allMessages.length > 0 ? allMessages[allMessages.length - 1] : null;
-  const lastIsPm =
-    !!lastMessage &&
-    !lastMessage.is_system &&
-    lastMessage.author_agent_id !== null;
-  const activeChoices =
-    lastIsPm && !pmIsTyping ? parseChoices(lastMessage!.body).group : null;
 
   // First time content shows up in a freshly-opened panel, jump straight to the
   // bottom (no visible scroll animation) — only later updates (a live reply
@@ -262,34 +204,6 @@ function FloatingChatPanel({
     });
     if (allMessages.length > 0 || pmIsTyping) scrolledOnceRef.current = true;
   }, [allMessages.length, transcriptEvents.length, pmIsTyping]);
-
-  const sendMutation = useMutation({
-    mutationFn: async (message: string) => {
-      let convId = active?.id;
-      if (!convId) {
-        const created = await createConversation(workspaceId, {
-          title: deriveTitle(message),
-        });
-        convId = created.id;
-      }
-      return {
-        convId,
-        message: await postConversationMessage(convId, message),
-      };
-    },
-    onSuccess: ({ convId }) => {
-      setText("");
-      queryClient.invalidateQueries({ queryKey: ["conversation", convId] });
-      queryClient.invalidateQueries({
-        queryKey: ["conversations", workspaceId],
-      });
-    },
-    onError: (err: unknown) => {
-      toast.error(
-        err instanceof ApiError ? err.message : "Gagal mengirim pesan",
-      );
-    },
-  });
 
   const pmLabel = formatAgentName(pm.name, pm.role);
 
@@ -369,7 +283,7 @@ function FloatingChatPanel({
           onSubmit={(e) => {
             e.preventDefault();
             if (!text.trim() || sendMutation.isPending) return;
-            sendMutation.mutate(text.trim());
+            sendMutation.mutate(text.trim(), { onSuccess: () => setText("") });
           }}
         >
           <Input
