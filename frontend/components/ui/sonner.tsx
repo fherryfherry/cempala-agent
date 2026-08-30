@@ -14,7 +14,9 @@ const Toaster = ({ ...props }: ToasterProps) => {
       offset={{ top: "4.5rem" }}
       closeButton
       gap={10}
-      duration={4500}
+      duration={7000}
+      expand
+      visibleToasts={20}
       className="toaster group"
       icons={{
         success: (

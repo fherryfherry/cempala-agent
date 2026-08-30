@@ -4,7 +4,7 @@ import { Badge } from "@/components/ui/badge";
 /** Shared status → visual treatment map, used by header, board, and agents page (MAP-025). */
 const STATUS_COLOR: Record<string, string> = {
   idle: "bg-zinc-400",
-  working: "bg-blue-500 animate-pulse",
+  working: "bg-blue-500",
   error: "bg-red-500",
   disabled: "bg-zinc-300 dark:bg-zinc-700",
 };

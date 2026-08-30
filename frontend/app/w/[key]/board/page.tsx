@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -11,6 +11,7 @@ import {
   createTicket,
   formatAgentName,
   listAgents,
+  listRuns,
   listSprints,
   listTickets,
   listWorkspaces,
@@ -92,6 +93,24 @@ export default function BoardPage() {
     queryFn: () => listSprints(workspace!.id),
     enabled: !!workspace,
   });
+
+  const runs = useQuery({
+    queryKey: ["runs", workspace?.id],
+    queryFn: () => listRuns(workspace!.id),
+    enabled: !!workspace,
+  });
+  // Tickets with a run actually in flight (status "running" only — queued means
+  // nothing is working on it yet). Feeds the "running" pill on kanban cards and
+  // list rows; stays live via SSE-driven invalidation of ["runs", workspaceId].
+  const runningTicketIds = useMemo(
+    () =>
+      new Set(
+        (runs.data ?? [])
+          .filter((r) => r.status === "running" && r.ticket_id !== null)
+          .map((r) => r.ticket_id as string),
+      ),
+    [runs.data],
+  );
 
   const [draggedKey, setDraggedKey] = useState<string | null>(null);
   // `null` = no explicit user choice yet -> default to the active sprint (falling back
@@ -200,11 +219,21 @@ export default function BoardPage() {
         )}
         <Badge variant={PRIORITY_VARIANT[t.priority]}>{t.priority}</Badge>
       </span>
-      {sprintName(t.sprint_id) && (
-        <Badge variant="outline" className="w-fit px-1.5 py-0 text-[10px]">
-          {sprintName(t.sprint_id)}
-        </Badge>
-      )}
+      <span className="flex items-center gap-1.5">
+        {sprintName(t.sprint_id) && (
+          <Badge variant="outline" className="w-fit px-1.5 py-0 text-[10px]">
+            {sprintName(t.sprint_id)}
+          </Badge>
+        )}
+        {runningTicketIds.has(t.id) && (
+          <Badge
+            variant="outline"
+            className="animate-fade-pulse w-fit px-1.5 py-0 text-[10px]"
+          >
+            running
+          </Badge>
+        )}
+      </span>
       {agentDisplay(t.assignee_id) && (
         <span className="flex items-center gap-1.5 text-xs text-zinc-500">
           {agentOf(t.assignee_id) && (
@@ -340,7 +369,7 @@ export default function BoardPage() {
 
       {viewMode === "kanban" ? (
       <div className="flex flex-1 gap-4 overflow-x-auto pb-4">
-        {COLUMNS.map((col) => {
+        {COLUMNS.filter((col) => col.status !== "backlog" || selectedSprintId === ALL_SPRINTS).map((col) => {
           const colTickets = visibleTickets.filter((t) => t.status === col.status);
           return (
             <div
@@ -391,11 +420,18 @@ export default function BoardPage() {
                       </CardHeader>
                       <CardContent className="flex flex-col gap-1 px-3 text-sm">
                         <span>{t.title}</span>
-                        {sprintName(t.sprint_id) && (
-                          <Badge variant="outline" className="w-fit px-1.5 py-0 text-[10px]">
-                            {sprintName(t.sprint_id)}
-                          </Badge>
-                        )}
+                        <span className="flex items-center gap-1.5">
+                          {sprintName(t.sprint_id) && (
+                            <Badge variant="outline" className="w-fit px-1.5 py-0 text-[10px]">
+                              {sprintName(t.sprint_id)}
+                            </Badge>
+                          )}
+                          {runningTicketIds.has(t.id) && (
+                            <Badge className="animate-fade-pulse w-fit bg-blue-500 px-1.5 py-0 text-[10px] text-white">
+                              running
+                            </Badge>
+                          )}
+                        </span>
                         {agentDisplay(t.assignee_id) && (
                           <span className="flex items-center gap-1.5 text-xs text-zinc-500">
                             {agentOf(t.assignee_id) && (
@@ -405,9 +441,6 @@ export default function BoardPage() {
                                 color={agentOf(t.assignee_id)!.avatar_color}
                                 size={16}
                               />
-                            )}
-                            {agentStatus(t.assignee_id) && (
-                              <AgentStatusDot status={agentStatus(t.assignee_id)!} />
                             )}
                             {agentDisplay(t.assignee_id)}
                           </span>

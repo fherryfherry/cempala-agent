@@ -159,6 +159,11 @@ export default function TicketDetailPage() {
             {sprintOf(t.sprint_id) && (
               <Badge variant="outline">{sprintOf(t.sprint_id)!.name}</Badge>
             )}
+            {t.runs.some((r) => r.status === "running") && (
+              <Badge variant="outline" className="animate-fade-pulse">
+                running
+              </Badge>
+            )}
             {t.duration_estimate != null && (
               <span className="text-xs text-zinc-500">
                 {t.duration_estimate} {UNIT_LABEL[workspace.time_unit] ?? workspace.time_unit}

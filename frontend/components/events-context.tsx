@@ -5,6 +5,9 @@ import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { XIcon } from "lucide-react";
+import { formatDistanceToNowStrict } from "date-fns";
+import { AgentAvatar } from "@/components/agent-avatar";
+import type { Agent } from "@/lib/api";
 
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api";
@@ -94,6 +97,21 @@ export function buildActivityToastMessage(ev: WorkspaceEvent): string | null {
       : `${p.ticket_key} moved from ${p.from} to ${p.to}`;
   }
   return null;
+}
+
+/** Resolves the display name of whoever caused a comment/status_change event — the same
+ * fallback logic buildActivityToastMessage uses inline, extracted so the activity-toast
+ * card can key/group by this name (one card per agent) and look up their avatar. */
+function resolveActivityActor(ev: WorkspaceEvent): string {
+  if (ev.type === "comment") {
+    const p = ev.payload as { is_system?: boolean; author?: string | null };
+    return p.is_system ? "System" : (p.author ?? "Agent");
+  }
+  if (ev.type === "status_change") {
+    const p = ev.payload as { actor?: string | null };
+    return p.actor ?? "System";
+  }
+  return "System";
 }
 
 /** Second line for a notification dropdown item: comment snippet, or the ticket's title
@@ -235,12 +253,24 @@ export function EventsProvider({
               notifTicketKey && workspaceKey
                 ? () => router.push(`/w/${workspaceKey}/ticket/${notifTicketKey}`)
                 : undefined;
+            const who = resolveActivityActor(ev);
+            const agent = workspaceId
+              ? queryClient
+                  .getQueryData<Agent[]>(["agents", workspaceId])
+                  ?.find((a) => a.name === who)
+              : undefined;
+            const timeAgo = formatDistanceToNowStrict(new Date(createdAt), { addSuffix: true });
             // toast.custom (not plain toast()) — sonner's ToastT has no whole-toast
             // onClick, only a separate action-button onClick, so a click-anywhere
             // notification needs its own rendered content. Sonner only applies its
             // fixed toast width (var(--width)) and default close button to
             // "data-styled" (non-custom) toasts, so both are re-added by hand here
             // to match the look of every other toast.
+            //
+            // id is keyed by agent (not event) — calling toast.custom again with the
+            // same id replaces that card's content and resets its dismiss timer in
+            // place, which is what gives "one card per agent, updates instead of
+            // stacking" for free from sonner, no extra state needed.
             toast.custom(
               (toastId) => (
                 <div
@@ -252,7 +282,7 @@ export function EventsProvider({
                         }
                       : undefined
                   }
-                  className={`relative flex w-[var(--width)] items-center rounded-md border p-4 pr-8 text-sm shadow-lg ${
+                  className={`relative flex w-[var(--width)] items-start gap-3 rounded-md border p-4 pr-8 text-sm shadow-lg ${
                     goToTicket ? "cursor-pointer hover:opacity-90" : ""
                   }`}
                   style={{
@@ -261,7 +291,17 @@ export function EventsProvider({
                     borderColor: "var(--normal-border)",
                   }}
                 >
-                  {message}
+                  <AgentAvatar
+                    name={who}
+                    template={agent?.avatar_template}
+                    color={agent?.avatar_color}
+                    size={32}
+                    className="mt-0.5"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <p>{message}</p>
+                    <p className="mt-0.5 text-xs opacity-60">{timeAgo}</p>
+                  </div>
                   <button
                     type="button"
                     aria-label="Close toast"
@@ -275,7 +315,7 @@ export function EventsProvider({
                   </button>
                 </div>
               ),
-              { id: `activity-${ev.id}` },
+              { id: `agent-activity-${workspaceId}-${who}` },
             );
             lastSeenRef.current[workspaceId] = createdAt;
             try {
@@ -320,6 +360,10 @@ export function EventsProvider({
         scheduleInvalidate(queryClient, ["tickets", workspaceId]);
         scheduleInvalidate(queryClient, ["agents", workspaceId]);
         scheduleInvalidate(queryClient, ["runs", workspaceId]);
+        // Run payloads carry no ticket_key, so invalidate every open ticket detail
+        // (["ticket", key] queries) — the detail page's "running" pill reads runs
+        // embedded in TicketDetail and would otherwise go stale mid-run.
+        scheduleInvalidate(queryClient, ["ticket"]);
       }
       if (ev.run_id) {
         scheduleInvalidate(queryClient, ["run", ev.run_id]);

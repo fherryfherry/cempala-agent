@@ -7,7 +7,7 @@ setup needed; the interval and staleness thresholds are tunable in Settings
 
 What it does on each tick, per workspace:
 - Find tickets in the workspace's ACTIVE sprint whose status still needs work
-  (in_progress/review/qa/security/blocked) and whose `updated_at` is older than
+  (todo/in_progress/review/qa/security/blocked) and whose `updated_at` is older than
   `auto_check_stale_minutes` — the assigned agent hasn't made progress for a while.
 - If the assigned agent exists and is idle -> schedule a follow-up run for them.
 - Otherwise (no assignee, busy/disabled agent) -> the PM gets the nudge instead:
@@ -38,8 +38,11 @@ from app.db.models import Agent, Sprint, Ticket, TicketAutoCheck, Workspace
 # auto_check_interval_minutes (settings); this is just the scan granularity.
 _TICK_SECONDS = 30
 
-# Statuses that still need work — a ticket in any of these can be nudged.
-_ACTIONABLE_STATUSES = {"in_progress", "review", "qa", "security", "blocked"}
+# Statuses that still need work — a ticket in any of these can be nudged. Includes
+# "todo": an assigned ticket that never actually started (its one-shot schedule from
+# _auto_schedule_assignee never fired or errored out) would otherwise sit invisible to
+# this loop forever, since nothing else ever retries a "todo" ticket.
+_ACTIONABLE_STATUSES = {"todo", "in_progress", "review", "qa", "security", "blocked"}
 
 # Exponential backoff cap for repeated no-op nudges (MAP-050 anti-spam): a ticket
 # that keeps getting a near-duplicate "nothing new" report (orchestrator.py's

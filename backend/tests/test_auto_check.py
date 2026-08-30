@@ -195,6 +195,28 @@ def test_auto_check_nudges_stale_ticket_for_idle_agent(client_maker, tmp_path, m
     assert auto_runs[0]["agent_id"] == eng["id"]
 
 
+def test_auto_check_nudges_stale_todo_ticket(client_maker, tmp_path, monkeypatch):
+    """A ticket assigned but never started (still "todo") must also get nudged —
+    not just "in_progress" — since nothing else ever retries a stuck "todo" ticket."""
+    client, maker = client_maker
+    monkeypatch.setattr(settings, "OPENCODE_BIN", "/nonexistent/opencode-for-tests")
+
+    ws = _make_workspace(client, tmp_path)
+    eng = _make_agent(client, ws["id"], "engineer", "eng-1")
+    sprint = client.post(f"/api/workspaces/{ws['id']}/sprints", json={"name": "Sprint 1"}).json()
+    ticket = _make_ticket(client, ws["id"], sprint["id"], "Stuck todo", assignee_id=eng["id"])
+    client.patch(f"/api/tickets/{ticket['key']}", json={"status": "todo"})
+    _age_ticket(maker, ticket["id"], minutes=10)
+
+    _run_tick(client_maker)
+
+    runs = client.get(f"/api/workspaces/{ws['id']}/runs").json()
+    auto_runs = [r for r in runs if r["trigger"] == "auto"]
+    assert len(auto_runs) == 1
+    assert auto_runs[0]["ticket_id"] == ticket["id"]
+    assert auto_runs[0]["agent_id"] == eng["id"]
+
+
 def test_auto_check_skips_fresh_ticket(client_maker, tmp_path):
     client, maker = client_maker
     ws = _make_workspace(client, tmp_path)

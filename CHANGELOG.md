@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-08-30
+
+### Added
+
+- Floating chat: a PM-avatar trigger button, bottom-right on every workspace page, opens a
+  floating conversation panel styled after the onboarding wizard's chat bubbles — sharing the
+  same conversation data as the full Chat page, so nothing is duplicated between them.
+- Notification toasts now show one card per agent (avatar, activity text, relative time), which
+  updates in place on that agent's next activity instead of stacking a new card per event; cards
+  stay fully visible (no collapsing) and dismiss a bit later than before.
+- Kanban board's Backlog column is now hidden while a specific sprint is selected (backlog
+  tickets have no sprint, so they only ever showed empty there) — only visible under "All sprints".
+- Ticket detail page shows a pulsing "running" badge while any of its runs are in flight.
+
+### Fixed
+
+- Auto-check's stale-ticket nudge now also covers tickets still stuck at `todo` (previously only
+  in_progress/review/qa/security/blocked were revisited, so an assigned ticket whose first
+  schedule silently failed could sit invisible to the nudge loop forever).
+
 ## [0.2.4] - 2026-08-29
 
 ### Fixed

@@ -4,6 +4,7 @@ import { useParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { listWorkspaces } from "@/lib/api";
 import { TerminalSession } from "@/components/terminal-session";
+import { FloatingChat } from "@/components/floating-chat";
 
 // The SSE connection (EventsProvider) lives one level up, in EventsShell (root
 // layout) — Header needs it too, and there's only ever one workspace "active" at a
@@ -25,6 +26,7 @@ export default function WorkspaceLayout({ children }: LayoutProps<"/w/[key]">) {
       )}
       {children}
       <TerminalSession workspaceId={workspace?.id} workspaceKey={params.key} />
+      <FloatingChat workspaceId={workspace?.id} workspaceKey={params.key} />
     </>
   );
 }
