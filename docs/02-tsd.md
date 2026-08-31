@@ -576,7 +576,8 @@ Per workspace, in `workspace.guardrails` (JSON), editable on the settings page.
   "max_handoff_depth": 12,
   "loop_threshold": 3,
   "max_concurrent_runs": 3,
-  "max_auto_retries": 3
+  "max_auto_retries": 3,
+  "max_tickets_per_report": 5
 }
 ```
 
@@ -591,6 +592,11 @@ Per workspace, in `workspace.guardrails` (JSON), editable on the settings page.
   comment recording the cycle.
 - **max_concurrent_runs** — per-workspace semaphore. Default is low (3) because each run is a
   full opencode process, not just an HTTP call.
+- **max_tickets_per_report** — caps how many `tickets[]` entries one agent report may create in
+  one shot. Enforced in the report parser (`app/core/report.py`), not schedule-time: the report
+  is still accepted and its first N tickets are still created, but excess entries are dropped
+  with a system comment naming the guardrail — it bounds a single run's ticket-fan-out blast
+  radius, it doesn't fail the run.
 - **max_auto_retries** — how many times a *retryable* failed run is retried automatically per
   (ticket, agent) before the ticket gets `blocked`. A run is retryable when the failure is one
   the agent can adapt to: a missing/malformed ```map block or an opencode subprocess failure

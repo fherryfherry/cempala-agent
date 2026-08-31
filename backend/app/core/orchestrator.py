@@ -605,6 +605,14 @@ def _ws_settings(workspace: Workspace | None) -> WorkspaceSettings | None:
     return load_workspace_settings(workspace.repo_path) if workspace is not None else None
 
 
+def _max_tickets_per_report(workspace: Workspace | None) -> int:
+    """Effective `max_tickets_per_report` guardrail for `workspace` (parse_report's
+    report-time ticket-fan-out cap) — factored out since every `parse_report()` call
+    site below needs it."""
+    guardrails = (_ws_settings(workspace).guardrails if workspace else None) or {}
+    return int(guardrail_limit(guardrails, "max_tickets_per_report"))
+
+
 async def _role_map(session: AsyncSession) -> dict[str, Role]:
     """Load every role row keyed by its immutable key — the single source for
     role labels/flags (dynamic roles spec). Callers fetch once per run and pass
@@ -2323,6 +2331,7 @@ async def _finish_routine_run(
         may_declare_tickets=actor_role.may_declare_tickets if actor_role else False,
         may_manage_artifacts=actor_role.may_manage_artifacts if actor_role else False,
         is_pm=agent.role == "pm",
+        max_tickets_per_report=_max_tickets_per_report(workspace),
     )
 
     if not parsed.ok:
@@ -2643,6 +2652,7 @@ async def _finish_chat_run(
         may_declare_tickets=actor_role.may_declare_tickets if actor_role else False,
         may_manage_artifacts=actor_role.may_manage_artifacts if actor_role else False,
         is_pm=agent.role == "pm",
+        max_tickets_per_report=_max_tickets_per_report(workspace),
     )
 
     if not parsed.ok:
@@ -3172,6 +3182,7 @@ async def _finish_run(
         may_declare_tickets=actor_role.may_declare_tickets if actor_role else False,
         may_manage_artifacts=actor_role.may_manage_artifacts if actor_role else False,
         is_pm=agent.role == "pm",
+        max_tickets_per_report=_max_tickets_per_report(workspace),
     )
 
     if not parsed.ok:

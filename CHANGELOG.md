@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-08-31
+
+### Changed
+
+- PM/QA/Pentester/Business Analyst prompts no longer mandate a floor on `tickets[]` fan-out
+  (e.g. PM's old "break it into 3-8 sub-tickets" is now "as many as the work genuinely needs,
+  often just 1") — simple requests were being over-decomposed into far more tickets than the
+  work warranted. QA/Pentester may now batch several trivial/low-severity issues into one
+  ticket instead of always filing one per issue.
+
+### Added
+
+- New `max_tickets_per_report` guardrail (default 5): caps how many `tickets[]` entries a
+  single agent report may create. The report is still accepted and its first N tickets are
+  still created — excess entries are dropped with a system comment naming the guardrail.
+
 ## [0.2.6] - 2026-08-30
 
 ### Added

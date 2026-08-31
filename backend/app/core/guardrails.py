@@ -13,6 +13,11 @@ Two call sites:
   streaming loop while a run is in flight, to enforce `run_timeout_sec` and
   `max_cost_per_run`. These don't raise; they return a reason string (or None) that the
   caller uses both to set `cancel_event` and to word the eventual system comment.
+- `max_tickets_per_report` is a third shape, enforced in `app/core/report.py` (not this
+  module, since it's report-parse-time, not schedule-time): it doesn't raise or block the
+  run, it truncates `tickets[]` to the limit and surfaces the drop via
+  `ParseResult.tickets_dropped_reason` (same "named guardrail in a system comment"
+  contract as the two shapes above).
 
 Every trip must be traceable to a specific guardrail name in its comment — see
 CLAUDE.md "Guardrails are the only brakes left".

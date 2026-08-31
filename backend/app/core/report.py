@@ -215,6 +215,7 @@ def parse_report(
     may_declare_tickets: bool = False,
     may_manage_artifacts: bool = False,
     is_pm: bool = False,
+    max_tickets_per_report: int | None = None,
 ) -> ParseResult:
     matches = _MAP_BLOCK_RE.findall(text or "")
     if not matches:
@@ -343,6 +344,22 @@ def parse_report(
                         epic=str(item["epic"]) if item.get("epic") else None,
                     )
                 )
+
+    # Guardrail `max_tickets_per_report` (CLAUDE.md "Guardrails are the only brakes
+    # left"): a report is still accepted and its first N tickets still created — the
+    # guardrail bounds one runaway report's blast radius, it doesn't fail the whole
+    # run — but excess entries are dropped with a named reason so it's never silent.
+    if (
+        max_tickets_per_report is not None
+        and not tickets_dropped
+        and len(tickets) > max_tickets_per_report
+    ):
+        dropped_count = len(tickets) - max_tickets_per_report
+        tickets = tickets[:max_tickets_per_report]
+        tickets_dropped_reason = (
+            f"Guardrail max_tickets_per_report exceeded: {dropped_count} extra "
+            f"ticket(s) beyond the limit ({max_tickets_per_report}) were dropped"
+        )
 
     # `sprints:` is a top-level companion to `tickets[]` (docs/03-agent-design.md §4):
     # declares sprint focus/timeline alongside the breakdown. Which roles may declare it

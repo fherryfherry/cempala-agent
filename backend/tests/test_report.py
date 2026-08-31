@@ -64,6 +64,33 @@ def test_pm_tickets_allowed_with_approval():
     assert len(result.tickets) == 1
 
 
+def test_tickets_capped_by_max_tickets_per_report():
+    body = "status: in_progress\nsummary: |\n  big breakdown\ntickets:\n"
+    for i in range(10):
+        body += f"  - title: sub-task {i}\n    assignee: eng-1\n"
+    text = _wrap(body)
+    result = _parse(text, "pm", VALID_AGENTS, ticket_approved=True, max_tickets_per_report=5)
+    assert result.ok is True
+    assert len(result.tickets) == 5
+    assert result.tickets_dropped_reason is not None
+    assert "max_tickets_per_report" in result.tickets_dropped_reason
+
+
+def test_tickets_not_capped_when_within_limit():
+    text = _wrap(
+        "status: in_progress\n"
+        "summary: |\n"
+        "  small breakdown\n"
+        "tickets:\n"
+        "  - title: sub-task\n"
+        "    assignee: eng-1\n"
+    )
+    result = _parse(text, "pm", VALID_AGENTS, ticket_approved=True, max_tickets_per_report=5)
+    assert result.ok is True
+    assert len(result.tickets) == 1
+    assert result.tickets_dropped_reason is None
+
+
 def test_qa_tickets_unaffected_by_approval_gate():
     # Approval gate is PM-only; QA tickets[] still work without approval.
     text = _wrap(

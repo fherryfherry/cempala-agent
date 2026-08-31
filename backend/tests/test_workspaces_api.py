@@ -69,6 +69,7 @@ def test_create_workspace_success(client, tmp_path):
         "max_auto_retries": 3,
         "auto_check_interval_minutes": 3,
         "auto_check_stale_minutes": 3,
+        "max_tickets_per_report": 5,
     }
     assert body["workflow_prompt"] == DEFAULT_WORKFLOW_PROMPT
     assert body["description"] is None

@@ -242,8 +242,10 @@ If this ticket is an epic (has no sub-tickets yet) and is approved:
    per request.
 3. Write a short PRD as a markdown file in the repo: goal, scope, acceptance criteria per
    sub-ticket. Declare this file via `artifacts:` (group e.g. "Technical Documents").
-4. Break the work down into 3-8 sub-tickets via `tickets[]`. Each sub-ticket must be
-   completable by a single agent in one work session and have checkable acceptance criteria.
+4. Break the work down into as many sub-tickets as it genuinely needs — often just 1,
+   sometimes more for a real epic. Never split for the sake of splitting: a small, simple
+   request stays one ticket. Each sub-ticket must be completable by a single agent in one
+   work session and have checkable acceptance criteria.
 5. Assign each sub-ticket to the most suitable agent based on their role.
 6. status: in_progress. Stop — sub-tickets will be worked on by the agents you assign.
 
@@ -313,7 +315,9 @@ job is to clarify the NEED, not the solution.
    measurable acceptance criteria, and edge cases/constraints to watch for.
 2. If there's a business need that has no ticket yet at all (e.g. from a discussion/chat),
    capture it as a new ticket via `tickets[]` (backlog) — one ticket per standalone need,
-   title and description in plain human language, not technical language.
+   title and description in plain human language, not technical language. If the need is
+   trivial enough to resolve right here in the current conversation/ticket, don't file a new
+   one for it.
 3. Requirement is clear and ready for technical breakdown → status: in_progress, mention
    Lead Engineer.
 4. Requirement is still ambiguous after you've dug in (the business goal itself is unclear)
@@ -412,7 +416,9 @@ You are QA. You verify, you don't fix. You may only add/modify test files.
 
 ALL PASS  → status: security, mention Pentester, summary includes the test results.
 FAILURES  → status: in_progress, mention the engineer who wrote it, and fill `tickets[]`
-            with one bug ticket per issue (repro steps + expected vs actual results).
+            with one bug ticket per issue (repro steps + expected vs actual results) —
+            unless several failures are trivial/low-impact, in which case batch them into
+            a single ticket.
 
 Don't fix production code yourself.
 ```
@@ -432,7 +438,9 @@ For each finding: severity (low/medium/high), file:line, concrete impact, sugges
 
 CLEAN (no high/medium)   → status: done, mention PM, summary includes the audit results.
 FINDINGS                 → status: in_progress, mention the engineer, send one `tickets[]`
-                           per high/medium finding. Low findings just go in the summary.
+                           per high/medium finding, unless several are low-severity or
+                           clearly related, in which case batch them into a single ticket.
+                           Low findings just go in the summary.
 ```
 
 ## 5. State machine & transition permissions

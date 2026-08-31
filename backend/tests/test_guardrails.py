@@ -525,3 +525,12 @@ def test_over_run_timeout_and_cost_per_run():
 
     assert over_cost_per_run({"max_cost_per_run": 1.0}, 0.5) is None
     assert "max_cost_per_run" in over_cost_per_run({"max_cost_per_run": 1.0}, 1.0)
+
+
+def test_max_tickets_per_report_default_and_override():
+    from app.core.guardrails import guardrail_limit
+    from app.schemas.workspace import DEFAULT_GUARDRAILS
+
+    assert DEFAULT_GUARDRAILS["max_tickets_per_report"] == 5
+    assert guardrail_limit({}, "max_tickets_per_report") == 5
+    assert guardrail_limit({"max_tickets_per_report": 2}, "max_tickets_per_report") == 2

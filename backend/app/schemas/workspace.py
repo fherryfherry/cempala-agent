@@ -12,6 +12,10 @@ DEFAULT_GUARDRAILS = {
     "max_cost_per_ticket": 20.0,
     "max_handoff_depth": 1000,
     "loop_threshold": 3,
+    # Caps how many `tickets[]` entries a single report may create (MAP-0xx: agents
+    # were over-decomposing simple requests into many sub-tickets). Excess entries
+    # are dropped with a named system comment, not silently created.
+    "max_tickets_per_report": 5,
     "max_concurrent_runs": 3,
     "max_auto_retries": 3,
     # Auto-check (MAP-050): how often the built-in scheduler scans for stale
