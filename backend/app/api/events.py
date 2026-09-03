@@ -19,6 +19,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import WorkspaceRole, require_workspace_role
 from app.core.events import OVERFLOW_MARKER, event_bus
 from app.db.models import Event
 from app.db.session import get_session
@@ -94,6 +95,7 @@ async def stream_events(
     request: Request,
     since_event_id: str | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
+    _=Depends(require_workspace_role(WorkspaceRole.viewer)),
 ):
     since = since_event_id or request.headers.get("last-event-id")
     return StreamingResponse(

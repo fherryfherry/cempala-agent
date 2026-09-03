@@ -8,10 +8,12 @@ import os
 import subprocess
 import time
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from app.api.errors import AppError
 from app.config import settings
+from app.core.auth import get_current_user
+from app.db.models import User
 
 router = APIRouter(tags=["models"])
 
@@ -45,7 +47,7 @@ def _fetch_models() -> list[str]:
 
 
 @router.get("/models", response_model=list[str])
-async def list_models():
+async def list_models(_: User = Depends(get_current_user)):
     global _cache
     now = time.monotonic()
     if _cache is not None and now - _cache[0] < _CACHE_TTL_SECONDS:
@@ -76,7 +78,7 @@ def _read_default_model() -> str | None:
 
 
 @router.get("/models/default")
-async def get_default_model():
+async def get_default_model(_: User = Depends(get_current_user)):
     """Suggested default model for new agents — the host's own `opencode` CLI
     default, so the onboarding wizard doesn't have to guess (e.g. picking
     whatever happens to sort first in `opencode models`)."""

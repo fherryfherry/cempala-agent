@@ -18,6 +18,7 @@ export async function apiFetch<T>(
 ): Promise<T> {
   const res = await fetch(`${API_BASE_URL}${path}`, {
     headers: { "Content-Type": "application/json", ...init?.headers },
+    credentials: "include", // session cookie (ADR-016)
     ...init,
   });
 
@@ -28,6 +29,17 @@ export async function apiFetch<T>(
       message = body?.error?.message ?? message;
     } catch {
       // response wasn't JSON; keep statusText
+    }
+    // A stale/expired session cookie: bounce to login rather than let every
+    // caller handle it. The login page itself calls the auth endpoints
+    // directly against this same wrapper, so a 401 there is a real "wrong
+    // password" and must NOT redirect — only bounce once already elsewhere.
+    if (
+      res.status === 401 &&
+      typeof window !== "undefined" &&
+      !window.location.pathname.startsWith("/login")
+    ) {
+      window.location.href = `/login?next=${encodeURIComponent(window.location.pathname)}`;
     }
     throw new ApiError(message, res.status);
   }
@@ -886,4 +898,103 @@ export function getGitCommit(
   return apiFetch<GitCommitDetail>(
     `/workspaces/${workspaceId}/git/commits/${sha}`,
   );
+}
+
+// --- Auth + user management (ADR-016) ---
+
+export interface User {
+  id: string;
+  email: string;
+  is_superadmin: boolean;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface WorkspaceMembership {
+  workspace_id: string;
+  role: WorkspaceMemberRole;
+}
+
+export interface MeResponse {
+  user: User;
+  memberships: WorkspaceMembership[];
+}
+
+export function login(email: string, password: string): Promise<User> {
+  return apiFetch<User>("/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  });
+}
+
+export function logout(): Promise<void> {
+  return apiFetch<void>("/auth/logout", { method: "POST" });
+}
+
+export function getMe(): Promise<MeResponse> {
+  return apiFetch<MeResponse>("/auth/me");
+}
+
+export function listUsers(): Promise<User[]> {
+  return apiFetch<User[]>("/users");
+}
+
+export function createUser(body: {
+  email: string;
+  password: string;
+  is_superadmin?: boolean;
+}): Promise<User> {
+  return apiFetch<User>("/users", { method: "POST", body: JSON.stringify(body) });
+}
+
+export function updateUser(
+  userId: string,
+  body: { is_active?: boolean; is_superadmin?: boolean; password?: string },
+): Promise<User> {
+  return apiFetch<User>(`/users/${userId}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+export type WorkspaceMemberRole = "viewer" | "editor" | "admin";
+
+export interface WorkspaceMember {
+  id: string;
+  workspace_id: string;
+  user_id: string;
+  email: string;
+  role: WorkspaceMemberRole;
+  created_at: string;
+}
+
+export function listWorkspaceMembers(workspaceId: string): Promise<WorkspaceMember[]> {
+  return apiFetch<WorkspaceMember[]>(`/workspaces/${workspaceId}/members`);
+}
+
+export function addWorkspaceMember(
+  workspaceId: string,
+  body: { user_id: string; role: WorkspaceMemberRole },
+): Promise<WorkspaceMember> {
+  return apiFetch<WorkspaceMember>(`/workspaces/${workspaceId}/members`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function updateWorkspaceMember(
+  workspaceId: string,
+  memberId: string,
+  role: WorkspaceMemberRole,
+): Promise<WorkspaceMember> {
+  return apiFetch<WorkspaceMember>(`/workspaces/${workspaceId}/members/${memberId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ role }),
+  });
+}
+
+export function removeWorkspaceMember(workspaceId: string, memberId: string): Promise<void> {
+  return apiFetch<void>(`/workspaces/${workspaceId}/members/${memberId}`, {
+    method: "DELETE",
+  });
 }

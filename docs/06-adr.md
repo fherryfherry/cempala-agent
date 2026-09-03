@@ -77,6 +77,9 @@ code path must be `async`, and subprocesses must use `asyncio.create_subprocess_
 
 ## ADR-005 · No auth, single user
 
+**Superseded by [ADR-016](#adr-016--login--per-workspace-rbac).** Kept below as historical
+record of the MVP's original reasoning; do not re-implement against it.
+
 **Decision.** No login, no users, no RBAC in the MVP.
 
 **Context.** It runs on one person's `localhost`. Auth is real work that adds none of the
@@ -545,3 +548,89 @@ committed.
 **Revisit when.** A second global or per-workspace setting is added that genuinely needs to be
 DB-backed (e.g. something that must never be hand-editable, or that needs a foreign key) — at that
 point a hybrid store may be worth it, rather than forcing everything through one mechanism.
+
+---
+
+## ADR-016 · Login + per-workspace RBAC
+
+**Decision.** Two new DB tables: `User` (id, email, password_hash, `is_superadmin`, `is_active`)
+and `WorkspaceMember` (workspace_id, user_id, `role` ∈ {viewer, editor, admin}, unique per
+workspace+user). Session = a signed `itsdangerous` cookie carrying only the user id (stateless —
+no server-side session table); password hashing via `bcrypt` directly (not `passlib` — see
+Alternatives). `POST /auth/login` sets the cookie; every other route except `/auth/*` and
+`GET /health` requires it, including the WS terminal endpoint (checked inline against the socket's
+cookies, since FastAPI's `Depends` doesn't apply the same way there) and the SSE events stream
+(covered for free — it's a plain `GET`). RBAC is two-axis: `User.is_superadmin` bypasses every
+per-workspace check and is required to create workspaces or manage the global user list;
+`WorkspaceMember.role` gates everything scoped to one workspace (`viewer` = read-only, `editor` =
+create/edit tickets, run agents, `admin` = also manage that workspace's membership/settings/
+lifecycle). A workspace's creator is auto-added as its `admin` member so they aren't locked out of
+what they just made.
+
+**Context.** ADR-005 accepted no auth because the portal ran on one owner's `127.0.0.1`. That
+assumption no longer holds — the portal is now meant to be reachable by more than one person, which
+is exactly the condition ADR-005 itself named as the trigger to revisit ("a second person uses it,
+or the portal is deployed to a machine others can reach"). The reasoning wasn't wrong for its
+assumptions; the deployment model changed. Per-workspace scoping (not just a global login) is a
+deliberate requirement: this portal is expected to host workspaces that not every logged-in person
+should see at all, not just a shared single-tenant app.
+
+**Alternatives rejected.**
+- **Single shared password** — no per-user accountability, can't selectively revoke one person's
+  access without rotating the password for everyone.
+- **JWT session** — the stateless-verification benefit JWT exists for doesn't apply here: one
+  FastAPI process, one Next.js frontend, no third-party API consumers. A JWT library adds
+  algorithm-confusion footguns for no gain over a signed cookie.
+- **`passlib[bcrypt]`** — the originally planned hashing library. Dropped after hitting a real,
+  reproducible bug: passlib 1.7.4 (last released 2020) probes `bcrypt.__about__` to detect the
+  backend version, which newer `bcrypt` (5.x) no longer exposes; the failed probe falls through
+  into a self-test path that raises `ValueError: password cannot be longer than 72 bytes` on
+  every hash, even for short passwords. Calling `bcrypt.hashpw`/`checkpw` directly removes the
+  broken compatibility shim entirely — fewer moving parts, not just a version pin.
+- **Global admin/member only, no per-workspace scoping** — simpler, but rejected per the explicit
+  requirement above.
+- **Server-side session table (revocable sessions)** — would let a deactivation take effect
+  instantly even against an already-issued cookie. Rejected for now: `get_current_user` already
+  re-checks `User.is_active` on *every* request, so deactivation takes effect on the very next
+  request regardless; a session table adds a write on every login for a gap (a still-valid signed
+  cookie window, capped at 7 days) that's already this narrow. Revisit if instant revocation is
+  ever a real requirement.
+
+**Consequences.**
+- Every router except `auth`, and `GET /health`, gates each route with either
+  `require_workspace_role(min_role)` (routes with `workspace_id` directly in the path) or an
+  entity-specific variant (`require_ticket_role`, `require_run_role`, etc. — `app/core/auth.py`'s
+  `_entity_workspace_dependency` factory) that resolves the owning workspace via the entity's
+  existing `_get_x_or_404` helper before checking the role. This is route-level, not
+  router-level, because most routers mix `viewer`-level reads with `editor`-level writes.
+- `Run` has no `workspace_id` column of its own; its resolver walks `ticket_id` →
+  `Ticket.workspace_id`, else `conversation_id` → `Conversation.workspace_id`, else `routine_id` →
+  `Routine.workspace_id`.
+- `CORSMiddleware` gained `allow_credentials=True` (required for the session cookie to survive a
+  cross-origin request) — `CORS_ORIGINS` must therefore stay an explicit origin list, never `"*"`
+  (incompatible with `allow_credentials=True` per browser spec; it already was a list by default).
+- **The frontend cannot gate routes at the edge.** The Next.js frontend and FastAPI backend are
+  different origins (e.g. `localhost:3000` vs `127.0.0.1:8000`), so the session cookie the backend
+  sets is never visible to Next.js proxy/middleware running on the frontend's own origin — a
+  `proxy.ts` presence-check (the originally planned approach) would always see no cookie and loop
+  to `/login`. Gating happens client-side instead (`components/auth-context.tsx`): it calls
+  `GET /auth/me` on mount and renders nothing until that resolves, redirecting to `/login` on a
+  401. Real enforcement is unaffected either way — every API call re-verifies the cookie
+  server-side regardless of what the frontend shows.
+- Bootstrap: `ADMIN_EMAIL`/`ADMIN_PASSWORD` env vars, checked once at startup — if the `user`
+  table is empty and both are set, that row is created as the first superadmin. Left unset, the
+  app still starts (a warning is logged) rather than crashing; nobody can log in until an admin
+  exists some other way.
+- MCP server (`app/mcp_server.py`, ADR-011) is explicitly **out of scope** — it's a STDIO
+  subprocess spawned by the backend itself, never reachable over the network, so gating it would
+  add no security and just extra plumbing.
+- ADR-010's RCE risk is **unchanged**: login restricts who reaches a workspace, not what an
+  authenticated editor's agents can do to that workspace's `repo_path` once inside. The
+  non-dismissible security warning on workspace settings (MAP-032) now says this explicitly.
+- Docs/comments that assumed ADR-005 were updated in the same change: `README.md`,
+  `SECURITY.md`, `CLAUDE.md`, `docs/05-roadmap.md`, `docs/08-api-spec.md`,
+  `app/api/terminal.py`, `app/mcp_server.py`, `app/schemas/ticket.py`.
+
+**Revisit when.** A need for finer-grained per-resource permissions inside a workspace appears
+(e.g. per-ticket ACLs), or a real need for stateless/multi-instance session verification arises
+(today's cookie assumes one backend process, matching ADR-004).

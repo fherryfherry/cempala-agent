@@ -14,7 +14,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.errors import AppError
-from app.db.models import Agent, Role
+from app.core.auth import get_current_user, require_superadmin
+from app.db.models import Agent, Role, User
 from app.db.session import get_session
 from app.schemas.role import RoleCreate, RoleOut, RoleUpdate
 
@@ -36,7 +37,9 @@ async def _get_role_or_404(session: AsyncSession, key: str) -> Role:
 
 
 @router.get("", response_model=list[RoleOut])
-async def list_roles(session: AsyncSession = Depends(get_session)):
+async def list_roles(
+    session: AsyncSession = Depends(get_session), _: User = Depends(get_current_user)
+):
     rows = (
         await session.execute(
             select(Role, _AGENT_COUNT.label("agent_count")).order_by(Role.created_at)
@@ -51,7 +54,11 @@ async def list_roles(session: AsyncSession = Depends(get_session)):
 
 
 @router.post("", response_model=RoleOut, status_code=201)
-async def create_role(body: RoleCreate, session: AsyncSession = Depends(get_session)):
+async def create_role(
+    body: RoleCreate,
+    session: AsyncSession = Depends(get_session),
+    _: User = Depends(require_superadmin),
+):
     role = Role(
         key=body.key,
         name=body.name,
@@ -75,7 +82,10 @@ async def create_role(body: RoleCreate, session: AsyncSession = Depends(get_sess
 
 @router.patch("/{key}", response_model=RoleOut)
 async def update_role(
-    key: str, body: RoleUpdate, session: AsyncSession = Depends(get_session)
+    key: str,
+    body: RoleUpdate,
+    session: AsyncSession = Depends(get_session),
+    _: User = Depends(require_superadmin),
 ):
     role = await _get_role_or_404(session, key)
 
@@ -115,7 +125,11 @@ async def update_role(
 
 
 @router.delete("/{key}", status_code=204)
-async def delete_role(key: str, session: AsyncSession = Depends(get_session)):
+async def delete_role(
+    key: str,
+    session: AsyncSession = Depends(get_session),
+    _: User = Depends(require_superadmin),
+):
     role = await _get_role_or_404(session, key)
 
     if role.is_builtin:

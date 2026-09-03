@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.agents import _get_agent_or_404
 from app.api.errors import AppError
 from app.api.workspaces import _get_workspace_or_404
+from app.core.auth import WorkspaceRole, require_routine_role, require_workspace_role
 from app.core import orchestrator
 from app.core.guardrails import GuardrailBlocked
 from app.core.settings_store import SettingsLoadError
@@ -34,7 +35,11 @@ async def _get_routine_or_404(session: AsyncSession, routine_id: str) -> Routine
 
 
 @workspace_routines_router.get("", response_model=list[RoutineOut])
-async def list_routines(workspace_id: str, session: AsyncSession = Depends(get_session)):
+async def list_routines(
+    workspace_id: str,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_workspace_role(WorkspaceRole.viewer)),
+):
     await _get_workspace_or_404(session, workspace_id)
     result = await session.scalars(
         select(Routine).where(Routine.workspace_id == workspace_id).order_by(Routine.created_at)
@@ -44,7 +49,10 @@ async def list_routines(workspace_id: str, session: AsyncSession = Depends(get_s
 
 @workspace_routines_router.post("", response_model=RoutineOut, status_code=201)
 async def create_routine(
-    workspace_id: str, body: RoutineCreate, session: AsyncSession = Depends(get_session)
+    workspace_id: str,
+    body: RoutineCreate,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_workspace_role(WorkspaceRole.editor)),
 ):
     await _get_workspace_or_404(session, workspace_id)
     if body.agent_id is not None:
@@ -67,7 +75,10 @@ async def create_routine(
 
 @routines_router.patch("/{routine_id}", response_model=RoutineOut)
 async def update_routine(
-    routine_id: str, body: RoutineUpdate, session: AsyncSession = Depends(get_session)
+    routine_id: str,
+    body: RoutineUpdate,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_routine_role(WorkspaceRole.editor)),
 ):
     routine = await _get_routine_or_404(session, routine_id)
     if body.name is not None:
@@ -89,14 +100,22 @@ async def update_routine(
 
 
 @routines_router.delete("/{routine_id}", status_code=204)
-async def delete_routine(routine_id: str, session: AsyncSession = Depends(get_session)):
+async def delete_routine(
+    routine_id: str,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_routine_role(WorkspaceRole.editor)),
+):
     routine = await _get_routine_or_404(session, routine_id)
     await session.delete(routine)
     await session.commit()
 
 
 @routines_router.post("/{routine_id}/run", response_model=RoutineOut)
-async def run_routine_now(routine_id: str, session: AsyncSession = Depends(get_session)):
+async def run_routine_now(
+    routine_id: str,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_routine_role(WorkspaceRole.editor)),
+):
     """Manually trigger a routine run (test button)."""
     routine = await _get_routine_or_404(session, routine_id)
     if routine.status == "disabled":

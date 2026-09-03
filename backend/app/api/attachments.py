@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.errors import AppError
 from app.api.tickets import _get_ticket_or_404
+from app.core.auth import WorkspaceRole, require_attachment_role, require_ticket_role
 from app.config import settings
 from app.db.models import Attachment
 from app.db.session import get_session
@@ -53,7 +54,10 @@ async def _get_attachment_or_404(session: AsyncSession, attachment_id: str) -> A
 
 @ticket_attachments_router.post("", response_model=AttachmentOut, status_code=201)
 async def upload_attachment(
-    key: str, file: UploadFile, session: AsyncSession = Depends(get_session)
+    key: str,
+    file: UploadFile,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_ticket_role(WorkspaceRole.editor)),
 ):
     ticket = await _get_ticket_or_404(session, key)
 
@@ -93,6 +97,7 @@ async def download_attachment(
     attachment_id: str,
     inline: bool = False,
     session: AsyncSession = Depends(get_session),
+    _=Depends(require_attachment_role(WorkspaceRole.viewer)),
 ):
     attachment = await _get_attachment_or_404(session, attachment_id)
     file_path = _storage_dir() / attachment.path
@@ -107,7 +112,11 @@ async def download_attachment(
 
 
 @attachments_router.delete("/{attachment_id}", status_code=204)
-async def delete_attachment(attachment_id: str, session: AsyncSession = Depends(get_session)):
+async def delete_attachment(
+    attachment_id: str,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_attachment_role(WorkspaceRole.editor)),
+):
     attachment = await _get_attachment_or_404(session, attachment_id)
     (_storage_dir() / attachment.path).unlink(missing_ok=True)
     await session.delete(attachment)

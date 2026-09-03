@@ -6,12 +6,17 @@ import { toast } from "sonner";
 import {
   ApiError,
   createRole,
+  createUser,
   deleteRole,
   getHealth,
   listRoles,
+  listUsers,
   updateRole,
+  updateUser,
   type RoleDef,
+  type User,
 } from "@/lib/api";
+import { useAuth } from "@/components/auth-context";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -28,6 +33,7 @@ import {
 } from "@/components/ui/dialog";
 
 export default function GlobalSettingsPage() {
+  const { me } = useAuth();
   const health = useQuery({ queryKey: ["health"], queryFn: getHealth });
   const mcp = health.data?.mcp;
 
@@ -35,6 +41,7 @@ export default function GlobalSettingsPage() {
     <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-8 px-6 py-10">
       <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
 
+      {me?.user.is_superadmin && <UsersCard />}
       <RolesCard />
 
       <Card>
@@ -97,6 +104,166 @@ const FLAG_LABELS: { key: keyof Pick<RoleDef, "may_declare_tickets" | "may_manag
     hint: "Melihat ringkasan review sebelumnya, supaya tidak mengulang feedback yang sama kalau proses review-nya berulang.",
   },
 ];
+
+function UsersCard() {
+  const queryClient = useQueryClient();
+  const users = useQuery({ queryKey: ["users"], queryFn: listUsers });
+  const [creating, setCreating] = useState(false);
+
+  const toggleActive = useMutation({
+    mutationFn: (u: User) => updateUser(u.id, { is_active: !u.is_active }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["users"] }),
+    onError: (err: unknown) => toast.error(err instanceof ApiError ? err.message : "Failed"),
+  });
+
+  const toggleSuperadmin = useMutation({
+    mutationFn: (u: User) => updateUser(u.id, { is_superadmin: !u.is_superadmin }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["users"] }),
+    onError: (err: unknown) => toast.error(err instanceof ApiError ? err.message : "Failed"),
+  });
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between">
+        <div>
+          <CardTitle>Users</CardTitle>
+          <p className="mt-1 text-xs text-zinc-500">
+            Siapa saja yang boleh login ke portal ini. Superadmin bisa kelola user lain dan
+            membuat workspace baru; akses per-workspace diatur lewat menu Members di masing-masing
+            workspace.
+          </p>
+        </div>
+        <Button onClick={() => setCreating(true)}>New user</Button>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-2">
+        {users.isLoading && <p className="text-sm text-zinc-500">Loading…</p>}
+        {users.isError && (
+          <p className="text-sm text-red-600">
+            {users.error instanceof ApiError ? users.error.message : "Failed to load users"}
+          </p>
+        )}
+        {users.data?.map((u) => (
+          <div
+            key={u.id}
+            className="flex items-center gap-3 rounded-lg border border-border px-4 py-3"
+          >
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-sm font-medium">{u.email}</span>
+                {u.is_superadmin && <Badge variant="outline">superadmin</Badge>}
+                {!u.is_active && <Badge variant="outline">inactive</Badge>}
+              </div>
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={toggleSuperadmin.isPending}
+              onClick={() => toggleSuperadmin.mutate(u)}
+            >
+              {u.is_superadmin ? "Revoke superadmin" : "Make superadmin"}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className={
+                u.is_active
+                  ? "text-red-600 hover:text-red-700 hover:bg-red-50 dark:text-red-400 dark:hover:text-red-300 dark:hover:bg-red-950/40"
+                  : undefined
+              }
+              disabled={toggleActive.isPending}
+              onClick={() => toggleActive.mutate(u)}
+            >
+              {u.is_active ? "Deactivate" : "Activate"}
+            </Button>
+          </div>
+        ))}
+      </CardContent>
+
+      {creating && <NewUserDialog onClose={() => setCreating(false)} />}
+    </Card>
+  );
+}
+
+function NewUserDialog({ onClose }: { onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [isSuperadmin, setIsSuperadmin] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const mutation = useMutation({
+    mutationFn: () => createUser({ email, password, is_superadmin: isSuperadmin }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+      toast.success(`User "${email}" created`);
+      onClose();
+    },
+    onError: (err: unknown) => {
+      setError(err instanceof ApiError ? err.message : "Unexpected error");
+    },
+  });
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>New user</DialogTitle>
+          <DialogDescription>
+            Buat akun login baru. Akses ke workspace tertentu diberikan terpisah lewat menu
+            Members di workspace itu.
+          </DialogDescription>
+        </DialogHeader>
+        <form
+          className="flex flex-col gap-4"
+          onSubmit={(e) => {
+            e.preventDefault();
+            mutation.mutate();
+          }}
+        >
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="user-email">Email</Label>
+            <Input
+              id="user-email"
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="user-password">Password</Label>
+            <Input
+              id="user-password"
+              type="password"
+              minLength={8}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+            />
+          </div>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={isSuperadmin}
+              onChange={(e) => setIsSuperadmin(e.target.checked)}
+              className="h-4 w-4"
+            />
+            Superadmin (bisa kelola semua user & workspace)
+          </label>
+          {error && <p className="text-sm text-red-600">{error}</p>}
+          <DialogFooter className="pt-2">
+            <Button type="button" variant="outline" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={mutation.isPending || !email || password.length < 8}>
+              {mutation.isPending ? "Creating…" : "Create user"}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
 
 function RolesCard() {
   const queryClient = useQueryClient();

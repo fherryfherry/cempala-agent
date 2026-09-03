@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -422,6 +422,123 @@ function summarizeEvent(event: WorkspaceEvent): string {
   }
 }
 
+/** Renders one event as a { icon, className, node } block, styled after the
+ * agentic-CLI look (opencode/Claude Code/Codex): a bullet-prefixed tool call
+ * with its output nested underneath via a "⎿" connector, dim reasoning,
+ * plain assistant prose, centered dashed separators for run start/end. */
+function TerminalBlock({ event }: { event: RunEvent }) {
+  const p = event.payload as Record<string, unknown>;
+  const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+
+  switch (event.type) {
+    case "run_started": {
+      const prompt = str(p.prompt);
+      return (
+        <div className="my-2 text-center text-[11px] text-zinc-600">
+          ── session started {prompt ? `· ${prompt.slice(0, 140)}` : ""} ──
+        </div>
+      );
+    }
+    case "run_ended":
+      return (
+        <div className="my-2 text-center text-[11px] text-zinc-600">
+          ── run {String(p.status ?? "ended")}
+          {str(p.error) ? ` · ${p.error}` : ""} ──
+        </div>
+      );
+    case "assistant_text":
+      return (
+        <p className="whitespace-pre-wrap text-zinc-100">{str(p.text) ?? ""}</p>
+      );
+    case "reasoning":
+      return (
+        <p className="flex gap-2 text-zinc-500 italic">
+          <span className="shrink-0 not-italic text-zinc-600">·</span>
+          <span>{str(p.text) ?? summarizeEvent(event as unknown as WorkspaceEvent)}</span>
+        </p>
+      );
+    case "tool_call": {
+      const name = str(p.name) ?? str(p.tool) ?? "tool";
+      const args = p.args ?? p.input ?? p.arguments;
+      return (
+        <p className="text-amber-400">
+          <span className="text-amber-500">⏺</span> {name}
+          {args !== undefined && (
+            <span className="text-zinc-500">({JSON.stringify(args).slice(0, 200)})</span>
+          )}
+        </p>
+      );
+    }
+    case "tool_result": {
+      const output = str(p.output) ?? str(p.result) ?? JSON.stringify(p).slice(0, 300);
+      return (
+        <p className="flex gap-2 text-zinc-500">
+          <span className="shrink-0 text-zinc-700">⎿</span>
+          <span className="truncate">{output.slice(0, 300)}</span>
+        </p>
+      );
+    }
+    case "error":
+      return (
+        <p className="text-red-400">
+          <span className="text-red-500">✖</span> {str(p.error) ?? JSON.stringify(p).slice(0, 200)}
+        </p>
+      );
+    default:
+      return (
+        <p className="flex gap-2 text-zinc-600">
+          <span className="shrink-0">›</span>
+          <span>{summarizeEvent(event as unknown as WorkspaceEvent)}</span>
+        </p>
+      );
+  }
+}
+
+function RunTerminal({ events, running }: { events: RunEvent[]; running: boolean }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  // Only auto-follow the stream if the viewer is already at (or near) the
+  // bottom — someone scrolled up to read earlier tool output shouldn't get
+  // yanked back down by the next incoming event.
+  const stickToBottomRef = useRef(true);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el && stickToBottomRef.current) el.scrollTop = el.scrollHeight;
+  }, [events.length]);
+
+  function handleScroll(e: React.UIEvent<HTMLDivElement>) {
+    const el = e.currentTarget;
+    stickToBottomRef.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 24;
+  }
+
+  return (
+    <div>
+      <p className="mb-1 text-xs font-semibold text-zinc-500">Terminal</p>
+      <div className="overflow-hidden rounded-md border border-zinc-800 bg-zinc-950 shadow-inner">
+        <div className="flex items-center gap-1.5 border-b border-zinc-800 bg-zinc-900/80 px-3 py-1.5">
+          <span className="size-2.5 rounded-full bg-red-500/70" />
+          <span className="size-2.5 rounded-full bg-yellow-500/70" />
+          <span className="size-2.5 rounded-full bg-green-500/70" />
+          <span className="ml-2 truncate text-[11px] text-zinc-500">agent run</span>
+        </div>
+        <div
+          ref={scrollRef}
+          onScroll={handleScroll}
+          className="max-h-[28rem] overflow-y-auto p-3 font-mono text-[13px] leading-6"
+        >
+          {events.length === 0 && <p className="text-zinc-600">Waiting for output…</p>}
+          {events.map((ev) => (
+            <TerminalBlock key={ev.id} event={ev} />
+          ))}
+          {running && (
+            <span className="inline-block h-3.5 w-2 animate-pulse bg-zinc-400 align-middle" />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function RunDetailPanel({
   runId,
   agentName,
@@ -494,11 +611,6 @@ function RunDetailPanel({
 
   const run: Run = query.data;
   const events = [...query.data.events, ...extraEvents];
-  const transcript = events
-    .filter((e) => e.type === "assistant_text")
-    .map((e) => e.payload.text)
-    .filter((t): t is string => typeof t === "string")
-    .join("\n\n");
 
   async function loadMore() {
     setLoadingMore(true);
@@ -598,30 +710,8 @@ function RunDetailPanel({
           </div>
         )}
 
-        {transcript && (
-          <div>
-            <p className="mb-1 text-xs font-semibold text-zinc-500">Transcript</p>
-            <div className="whitespace-pre-wrap rounded-md bg-zinc-50 p-3 text-sm dark:bg-zinc-900/40">
-              {transcript}
-            </div>
-          </div>
-        )}
-
         <div>
-          <p className="mb-1 text-xs font-semibold text-zinc-500">Events ({events.length})</p>
-          <div className="flex flex-col gap-1">
-            {events.map((ev) => (
-              <div
-                key={ev.id}
-                className="flex items-start gap-2 border-b border-black/5 py-1 text-xs last:border-b-0 dark:border-white/5"
-              >
-                <Badge variant="outline" className="shrink-0">
-                  {ev.type}
-                </Badge>
-                <span className="truncate text-zinc-500">{JSON.stringify(ev.payload).slice(0, 200)}</span>
-              </div>
-            ))}
-          </div>
+          <RunTerminal events={events} running={run.status === "running"} />
           {canLoadMore && (
             <Button variant="outline" size="sm" className="mt-2" disabled={loadingMore} onClick={loadMore}>
               {loadingMore ? "Loading…" : "Load more"}

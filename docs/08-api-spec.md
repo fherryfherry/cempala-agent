@@ -23,7 +23,11 @@ All requests and responses use JSON. Uniform error format:
 
 ## Authentication
 
-No authentication (MVP — single local user, ADR-005). Backend binds `127.0.0.1` only.
+Session cookie (ADR-016, supersedes ADR-005's no-auth MVP posture): `POST /auth/login` sets an
+httpOnly `map_session` cookie; every other route (except `/auth/*` and `GET /health`) requires it.
+Two-axis RBAC: `User.is_superadmin` (manages the global user list, creates workspaces) and, per
+workspace, a `WorkspaceMember.role` of `viewer` / `editor` / `admin`. See `POST /users`,
+`GET/POST/PATCH/DELETE /workspaces/{id}/members`.
 
 ---
 

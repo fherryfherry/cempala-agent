@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.errors import AppError
 from app.api.workspaces import _get_workspace_or_404
+from app.core.auth import WorkspaceRole, require_ticket_role, require_workspace_role
 from app.core.state_machine import can_transition
 from app.db import session as db_session
 from app.db.models import Agent, Attachment, Comment, CommentMention, Run, Ticket, Workspace
@@ -68,6 +69,7 @@ async def list_tickets(
     limit: int | None = None,
     offset: int = 0,
     session: AsyncSession = Depends(get_session),
+    _=Depends(require_workspace_role(WorkspaceRole.viewer)),
 ):
     await _get_workspace_or_404(session, workspace_id)
 
@@ -92,7 +94,10 @@ async def list_tickets(
 
 @workspace_tickets_router.post("", response_model=TicketOut, status_code=201)
 async def create_ticket(
-    workspace_id: str, body: TicketCreate, session: AsyncSession = Depends(get_session)
+    workspace_id: str,
+    body: TicketCreate,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_workspace_role(WorkspaceRole.editor)),
 ):
     workspace = await _get_workspace_or_404(session, workspace_id)
 
@@ -137,7 +142,11 @@ async def create_ticket(
 
 
 @tickets_router.get("/{key}", response_model=TicketDetail)
-async def get_ticket(key: str, session: AsyncSession = Depends(get_session)):
+async def get_ticket(
+    key: str,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_ticket_role(WorkspaceRole.viewer)),
+):
     ticket = await _get_ticket_or_404(session, key)
 
     comments = (
@@ -179,7 +188,12 @@ async def get_ticket(key: str, session: AsyncSession = Depends(get_session)):
 
 
 @tickets_router.patch("/{key}", response_model=TicketOut)
-async def update_ticket(key: str, body: TicketUpdate, session: AsyncSession = Depends(get_session)):
+async def update_ticket(
+    key: str,
+    body: TicketUpdate,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_ticket_role(WorkspaceRole.editor)),
+):
     ticket = await _get_ticket_or_404(session, key)
 
     old_status = ticket.status
@@ -250,6 +264,7 @@ async def delete_ticket(
     key: str,
     actor_agent_id: str | None = None,
     session: AsyncSession = Depends(get_session),
+    _=Depends(require_ticket_role(WorkspaceRole.admin)),
 ):
     """Permanently delete a ticket (cascades to comments/attachments/runs).
 

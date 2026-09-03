@@ -10,9 +10,10 @@ import pytest
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.config import settings
+from app.config import INTERNAL_MCP_SECRET, settings
+from app.core.auth import get_current_user, hash_password
 from app.db import session as db_session
-from app.db.models import Base
+from app.db.models import Base, User
 from app.db.session import get_session
 from app.main import app
 from app.mcp_server import AGENT_ID, WORKSPACE_ID, _http, create_server
@@ -45,20 +46,49 @@ def client(tmp_path, monkeypatch):
 
     app.dependency_overrides[get_session] = _override_get_session
     monkeypatch.setattr(db_session, "async_session", maker)
+    # Drop conftest.py's blanket superadmin override — these tests must prove
+    # the MCP server's *own* auth (MAP_INTERNAL_SECRET, ADR-016) actually works,
+    # not ride on the test-only bypass every other file uses.
+    app.dependency_overrides.pop(get_current_user, None)
 
-    # Point the MCP server's HTTP client at the real app (ASGI transport).
+    # Point the MCP server's HTTP client at the real app (ASGI transport), with
+    # the same internal-secret header a real spawned MCP subprocess sends
+    # (app/agents/mcp_config.py sets MAP_INTERNAL_SECRET in its env).
     async def _point_client():
         transport = httpx.ASGITransport(app=app)
         import app.mcp_server as mcp_mod
 
         await mcp_mod._http.aclose()
-        mcp_mod._http = httpx.AsyncClient(transport=transport, timeout=30)
+        mcp_mod._http = httpx.AsyncClient(
+            transport=transport,
+            timeout=30,
+            headers={"x-map-internal-secret": INTERNAL_MCP_SECRET},
+        )
 
     asyncio.run(_point_client())
+
+    async def _seed_superadmin():
+        async with maker() as session:
+            session.add(
+                User(
+                    email="owner@test.local",
+                    password_hash=hash_password("secret123"),
+                    is_superadmin=True,
+                )
+            )
+            await session.commit()
+
+    asyncio.run(_seed_superadmin())
 
     from fastapi.testclient import TestClient
 
     with TestClient(app) as c:
+        # Setup calls below (_make_workspace/_make_agent/_make_ticket) go through
+        # this TestClient as "the owner", authenticated for real via cookie — a
+        # separate mechanism from the MCP server's own header-based bypass above,
+        # so this genuinely exercises both auth paths independently.
+        login = c.post("/api/auth/login", json={"email": "owner@test.local", "password": "secret123"})
+        assert login.status_code == 200, login.text
         yield c
 
     app.dependency_overrides.clear()
@@ -262,3 +292,26 @@ def test_ids_prefer_env_over_cli(monkeypatch):
     ws, agent = mcp_mod._ids_from_env_or_args()
     assert ws == "ws-env"
     assert agent == "ag-env"
+
+
+def test_internal_secret_resolves_from_cli_args_when_env_missing(monkeypatch):
+    """Real dogfooding regression: opencode dropped the whole env block (same
+    MAP-048 class of bug as the workspace/agent ids), leaving MAP_INTERNAL_SECRET
+    permanently empty and every MCP tool call 401ing with "login required"
+    regardless of backend restarts. The secret needs the same CLI-flag fallback
+    the ids already had."""
+    import sys
+
+    import app.mcp_server as mcp_mod
+
+    monkeypatch.delenv("MAP_INTERNAL_SECRET", raising=False)
+    monkeypatch.setattr(sys, "argv", ["mcp_server.py", "--internal-secret", "secret-from-cli"])
+
+    assert mcp_mod._internal_secret_from_env_or_args() == "secret-from-cli"
+
+
+def test_internal_secret_prefers_env_over_cli(monkeypatch):
+    import app.mcp_server as mcp_mod
+
+    monkeypatch.setenv("MAP_INTERNAL_SECRET", "secret-from-env")
+    assert mcp_mod._internal_secret_from_env_or_args() == "secret-from-env"

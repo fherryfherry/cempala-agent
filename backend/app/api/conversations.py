@@ -25,6 +25,12 @@ from app.api.errors import AppError
 from app.api.sprints import activate_sprint
 from app.api.tickets import _get_ticket_or_404
 from app.api.workspaces import _get_workspace_or_404
+from app.core.auth import (
+    WorkspaceRole,
+    require_conversation_attachment_role,
+    require_conversation_role,
+    require_workspace_role,
+)
 from app.core import orchestrator
 from app.core.guardrails import GuardrailBlocked
 from app.core.report import SprintDraft, TicketDraft
@@ -71,7 +77,9 @@ async def _get_conversation_or_404(session: AsyncSession, conversation_id: str) 
 
 @workspace_conversations_router.get("", response_model=list[ConversationOut])
 async def list_conversations(
-    workspace_id: str, session: AsyncSession = Depends(get_session)
+    workspace_id: str,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_workspace_role(WorkspaceRole.viewer)),
 ):
     await _get_workspace_or_404(session, workspace_id)
     conversations = (
@@ -89,6 +97,7 @@ async def create_conversation(
     workspace_id: str,
     body: ConversationCreate,
     session: AsyncSession = Depends(get_session),
+    _=Depends(require_workspace_role(WorkspaceRole.editor)),
 ):
     await _get_workspace_or_404(session, workspace_id)
     if body.linked_ticket_key:
@@ -106,7 +115,9 @@ async def create_conversation(
 
 @conversations_router.get("/{conversation_id}", response_model=ConversationOut)
 async def get_conversation(
-    conversation_id: str, session: AsyncSession = Depends(get_session)
+    conversation_id: str,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_conversation_role(WorkspaceRole.viewer)),
 ):
     return await _get_conversation_or_404(session, conversation_id)
 
@@ -117,6 +128,7 @@ async def list_messages(
     limit: int | None = None,
     offset: int = 0,
     session: AsyncSession = Depends(get_session),
+    _=Depends(require_conversation_role(WorkspaceRole.viewer)),
 ):
     await _get_conversation_or_404(session, conversation_id)
     stmt = (
@@ -139,6 +151,7 @@ async def create_message(
     conversation_id: str,
     body: ConversationMessageCreate,
     session: AsyncSession = Depends(get_session),
+    _=Depends(require_conversation_role(WorkspaceRole.editor)),
 ):
     """Owner message in a conversation: persisted, then triggers a PM chat run.
 
@@ -319,7 +332,9 @@ async def _execute_pending_proposal(
     "/{conversation_id}/attachments", response_model=list[ConversationAttachmentOut]
 )
 async def list_attachments(
-    conversation_id: str, session: AsyncSession = Depends(get_session)
+    conversation_id: str,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_conversation_role(WorkspaceRole.viewer)),
 ):
     await _get_conversation_or_404(session, conversation_id)
     attachments = (
@@ -339,6 +354,7 @@ async def upload_attachment(
     conversation_id: str,
     file: UploadFile,
     session: AsyncSession = Depends(get_session),
+    _=Depends(require_conversation_role(WorkspaceRole.editor)),
 ):
     conversation = await _get_conversation_or_404(session, conversation_id)
     dest_dir = _conversation_storage_dir(conversation.id)
@@ -374,7 +390,9 @@ async def upload_attachment(
 
 @conversations_router.get("/attachments/{attachment_id}/download")
 async def download_attachment(
-    attachment_id: str, session: AsyncSession = Depends(get_session)
+    attachment_id: str,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_conversation_attachment_role(WorkspaceRole.viewer)),
 ):
     attachment = await session.get(ConversationAttachment, attachment_id)
     if attachment is None:
@@ -387,7 +405,9 @@ async def download_attachment(
 
 @conversations_router.delete("/attachments/{attachment_id}", status_code=204)
 async def delete_attachment(
-    attachment_id: str, session: AsyncSession = Depends(get_session)
+    attachment_id: str,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_conversation_attachment_role(WorkspaceRole.editor)),
 ):
     attachment = await session.get(ConversationAttachment, attachment_id)
     if attachment is None:

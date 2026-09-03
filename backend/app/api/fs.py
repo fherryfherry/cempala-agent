@@ -9,10 +9,12 @@ hidden by default.
 
 import os
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from app.api.errors import AppError
+from app.core.auth import get_current_user
+from app.db.models import User
 
 router = APIRouter(prefix="/fs", tags=["fs"])
 
@@ -29,7 +31,7 @@ class FsBrowseOut(BaseModel):
 
 
 @router.get("/browse", response_model=FsBrowseOut)
-async def browse(path: str | None = None):
+async def browse(path: str | None = None, _: User = Depends(get_current_user)):
     target = os.path.abspath(os.path.expanduser(path or "~"))
     if not os.path.isdir(target):
         raise AppError(404, "not_found", f"not a directory: {target}")

@@ -13,7 +13,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from app.config import settings
+from app.config import INTERNAL_MCP_SECRET, settings
 
 
 # Agent tools that actually wire the map-tickets MCP server. `codex` and `agy` don't,
@@ -51,12 +51,15 @@ def mcp_config_path(workspace_id: str, agent_id: str) -> str | None:
                     workspace_id,
                     "--agent-id",
                     agent_id,
+                    "--internal-secret",
+                    INTERNAL_MCP_SECRET,
                 ],
                 "env": {
                     "PYTHONPATH": str(backend_dir),
                     "MAP_API_BASE": settings.MAP_API_BASE,
                     "MAP_WORKSPACE_ID": workspace_id,
                     "MAP_AGENT_ID": agent_id,
+                    "MAP_INTERNAL_SECRET": INTERNAL_MCP_SECRET,
                 },
             }
         }
@@ -87,12 +90,15 @@ def claude_mcp_config_path(workspace_id: str, agent_id: str) -> str | None:
                     workspace_id,
                     "--agent-id",
                     agent_id,
+                    "--internal-secret",
+                    INTERNAL_MCP_SECRET,
                 ],
                 "env": {
                     "PYTHONPATH": str(backend_dir),
                     "MAP_API_BASE": settings.MAP_API_BASE,
                     "MAP_WORKSPACE_ID": workspace_id,
                     "MAP_AGENT_ID": agent_id,
+                    "MAP_INTERNAL_SECRET": INTERNAL_MCP_SECRET,
                 },
             }
         }

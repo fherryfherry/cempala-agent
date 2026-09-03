@@ -14,6 +14,7 @@ from app.api.artifacts import workspace_artifacts_router
 from app.api.git import workspace_git_router
 from app.api.terminal import workspace_terminal_router
 from app.api.attachments import attachments_router, ticket_attachments_router
+from app.api.auth import router as auth_router
 from app.api.comments import comments_router
 from app.api.conversations import conversations_router, workspace_conversations_router
 from app.api.errors import AppError, app_error_handler, validation_error_handler
@@ -25,8 +26,11 @@ from app.api.roles import router as roles_router
 from app.api.runs import runs_router, ticket_run_router, workspace_runs_router
 from app.api.sprints import sprints_router, workspace_sprints_router
 from app.api.tickets import tickets_router, workspace_tickets_router
+from app.api.users import router as users_router
+from app.api.workspace_members import router as workspace_members_router
 from app.api.workspaces import router as workspaces_router
 from app.config import settings
+from app.core.auth import bootstrap_admin
 from app.core.auto_check import run_auto_check
 from app.core.orchestrator import recover_interrupted_runs
 from app.core.routine_scheduler import run_scheduler
@@ -37,6 +41,7 @@ from app.mcp_server import create_server as create_mcp_server
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Schema is managed by Alembic migrations (`make migrate`), not created here.
+    await bootstrap_admin(db_session.async_session)
     await recover_interrupted_runs(db_session.async_session)
     stop_event = asyncio.Event()
     scheduler_task = asyncio.create_task(run_scheduler(db_session.async_session, stop_event))
@@ -55,12 +60,16 @@ app = FastAPI(title="Multi-Agent Portal", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
+    allow_credentials=True,  # required for the session cookie to survive cross-origin requests
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.add_exception_handler(AppError, app_error_handler)
 app.add_exception_handler(RequestValidationError, validation_error_handler)
+app.include_router(auth_router, prefix="/api")
+app.include_router(users_router, prefix="/api")
+app.include_router(workspace_members_router, prefix="/api")
 app.include_router(workspaces_router, prefix="/api")
 app.include_router(fs_router, prefix="/api")
 app.include_router(models_router, prefix="/api")

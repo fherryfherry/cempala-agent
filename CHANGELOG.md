@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-03
+
+### Added
+
+- Login-gated access (ADR-016, supersedes ADR-005): every route now requires an authenticated
+  session, via a signed httpOnly cookie. First superadmin account bootstraps from
+  `ADMIN_EMAIL`/`ADMIN_PASSWORD` env vars on startup.
+- Two-axis RBAC: a global `is_superadmin` flag (manages the user list, creates workspaces) plus
+  per-workspace `viewer`/`editor`/`admin` membership roles, enforced on every route (REST, SSE,
+  and the terminal WebSocket).
+- Global Users admin panel (Settings) and per-workspace Members panel (Workspace Settings) for
+  managing who can log in and what they can do in each workspace.
+- Run detail (Activity page) now renders a live, terminal-styled stream of the run's events
+  (tool calls, output, reasoning, errors) instead of a static transcript + JSON dump, updating
+  as the run progresses.
+
+### Fixed
+
+- The MCP server's own outbound calls to the backend API were rejected by the new login gate
+  (every ticket/comment/artifact tool call failing with "login required"). Fixed with an
+  internal shared-secret header the MCP subprocess sends, generated per backend process and
+  trusted by `get_current_user` without requiring a session.
+- That secret is now also passed as a CLI flag (`--internal-secret`), not just via the
+  subprocess's `env` block — opencode's MCP launcher can drop the env block entirely (the same
+  failure mode already known to affect the workspace/agent id env vars), which left the secret
+  permanently empty and every MCP call 401ing regardless of backend restarts.
+
 ## [0.2.7] - 2026-08-31
 
 ### Changed

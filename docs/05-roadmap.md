@@ -150,5 +150,6 @@ What the "After MVP" list below originally proposed, resolved against what's act
    already has a slot for them.
 3. **Sandbox (Docker)** — if the portal is used on repositories that are not fully trusted.
 4. **Sub-tickets deeper than 1 level.**
-5. **Auth & multi-user** — once the portal leaves the laptop. Before that, don't expose it to the
-   network (ADR-005/ADR-010 still apply unchanged).
+5. ~~**Auth & multi-user**~~ — done (ADR-016): login, global user management, and per-workspace
+   viewer/editor/admin roles. ADR-010's RCE risk still applies unchanged to anyone with editor+
+   access — only expose the backend beyond `127.0.0.1` deliberately.

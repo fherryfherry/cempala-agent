@@ -1,7 +1,8 @@
-"""WebSocket route for the browser Terminal menu (ADR-005: localhost-only, no auth —
-this doesn't cross a new trust boundary since opencode --auto already grants agents
-arbitrary command execution in repo_path; the owner already has native terminal
-access to their own machine).
+"""WebSocket route for the browser Terminal menu (ADR-016 — supersedes ADR-005:
+this backend may now be reached by more than the owner, so terminal access is
+gated like every other workspace route; the underlying risk is unchanged —
+opencode --auto already grants agents arbitrary command execution in repo_path,
+so an authenticated editor having a shell too crosses no new trust boundary).
 
 Protocol: binary WS frames are raw PTY bytes passthrough both directions. Text WS
 frames are JSON control messages — currently only {"type": "resize", "cols", "rows"}.
@@ -15,8 +16,11 @@ import os
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app.api.errors import AppError
 from app.api.workspaces import _get_workspace_or_404
+from app.core.auth import SESSION_COOKIE, WorkspaceRole, _check_workspace_role, read_session_cookie
 from app.core.terminal import cleanup, resize, spawn
+from app.db.models import User
 from app.db.session import async_session
 
 workspace_terminal_router = APIRouter(prefix="/workspaces/{workspace_id}/terminal", tags=["terminal"])
@@ -24,13 +28,32 @@ workspace_terminal_router = APIRouter(prefix="/workspaces/{workspace_id}/termina
 
 @workspace_terminal_router.websocket("/ws")
 async def terminal_ws(websocket: WebSocket, workspace_id: str) -> None:
-    await websocket.accept()
+    # Cookies are available on the WS handshake request before accept() — reject
+    # unauthenticated/unauthorized clients without ever completing the handshake,
+    # rather than accept()-then-close() (Starlette supports close() pre-accept).
+    token = websocket.cookies.get(SESSION_COOKIE)
+    user_id = read_session_cookie(token) if token else None
+    if user_id is None:
+        await websocket.close(code=4401)
+        return
+
     async with async_session() as session:
+        user = await session.get(User, user_id)
+        if user is None or not user.is_active:
+            await websocket.close(code=4401)
+            return
+        try:
+            await _check_workspace_role(session, user, workspace_id, WorkspaceRole.editor)
+        except AppError:
+            await websocket.close(code=4403)
+            return
         try:
             ws = await _get_workspace_or_404(session, workspace_id)
-        except Exception:
+        except AppError:
             await websocket.close(code=4404)
             return
+
+    await websocket.accept()
     if not os.path.isdir(ws.repo_path):
         await websocket.close(code=4404)
         return

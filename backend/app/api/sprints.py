@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.errors import AppError
 from app.api.workspaces import _get_workspace_or_404
+from app.core.auth import WorkspaceRole, require_sprint_role, require_workspace_role
 from app.core import orchestrator
 from app.core.guardrails import GuardrailBlocked
 from app.core.settings_store import SettingsLoadError
@@ -38,7 +39,11 @@ async def _get_sprint_or_404(session: AsyncSession, sprint_id: str) -> Sprint:
 
 
 @workspace_sprints_router.get("", response_model=list[SprintOut])
-async def list_sprints(workspace_id: str, session: AsyncSession = Depends(get_session)):
+async def list_sprints(
+    workspace_id: str,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_workspace_role(WorkspaceRole.viewer)),
+):
     await _get_workspace_or_404(session, workspace_id)
     result = await session.scalars(
         select(Sprint).where(Sprint.workspace_id == workspace_id).order_by(Sprint.index)
@@ -48,7 +53,10 @@ async def list_sprints(workspace_id: str, session: AsyncSession = Depends(get_se
 
 @workspace_sprints_router.post("", response_model=SprintOut, status_code=201)
 async def create_sprint(
-    workspace_id: str, body: SprintCreate, session: AsyncSession = Depends(get_session)
+    workspace_id: str,
+    body: SprintCreate,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_workspace_role(WorkspaceRole.editor)),
 ):
     await _get_workspace_or_404(session, workspace_id)
     existing = (
@@ -221,7 +229,10 @@ async def complete_sprint(session: AsyncSession, sprint: Sprint) -> None:
 
 @sprints_router.patch("/{sprint_id}", response_model=SprintOut)
 async def update_sprint(
-    sprint_id: str, body: SprintUpdate, session: AsyncSession = Depends(get_session)
+    sprint_id: str,
+    body: SprintUpdate,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_sprint_role(WorkspaceRole.editor)),
 ):
     sprint = await _get_sprint_or_404(session, sprint_id)
 

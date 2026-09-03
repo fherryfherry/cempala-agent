@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.agents import _get_agent_or_404
 from app.api.errors import AppError
 from app.api.tickets import _get_ticket_or_404
+from app.core.auth import WorkspaceRole, require_ticket_role
 from app.core import orchestrator
 from app.core.guardrails import GuardrailBlocked
 from app.core.settings_store import SettingsLoadError
@@ -40,6 +41,7 @@ async def list_comments(
     limit: int | None = None,
     offset: int = 0,
     session: AsyncSession = Depends(get_session),
+    _=Depends(require_ticket_role(WorkspaceRole.viewer)),
 ):
     ticket = await _get_ticket_or_404(session, key)
     stmt = (
@@ -56,7 +58,12 @@ async def list_comments(
 
 
 @comments_router.post("", response_model=CommentOut, status_code=201)
-async def create_comment(key: str, body: CommentCreate, session: AsyncSession = Depends(get_session)):
+async def create_comment(
+    key: str,
+    body: CommentCreate,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_ticket_role(WorkspaceRole.editor)),
+):
     ticket = await _get_ticket_or_404(session, key)
 
     if body.author_agent_id is not None:

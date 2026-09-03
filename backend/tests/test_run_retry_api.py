@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import settings
 from app.db import session as db_session
-from app.db.models import Base, Run, Ticket
+from app.db.models import Base, Routine, Run, Ticket
 from app.db.session import get_session
 from app.main import app
 from app.schemas.workspace import DEFAULT_GUARDRAILS
@@ -154,7 +154,9 @@ print(json.dumps({{"type": "assistant_text", "text": text, "session_id": "{sessi
 '''
 
 
-async def _insert_run(maker, *, ticket_id, agent_id, status, trigger="manual", session_id=None):
+async def _insert_run(
+    maker, *, ticket_id, agent_id, status, trigger="manual", session_id=None, routine_id=None
+):
     async with maker() as session:
         run = Run(
             ticket_id=ticket_id,
@@ -164,10 +166,27 @@ async def _insert_run(maker, *, ticket_id, agent_id, status, trigger="manual", s
             tool_kind="opencode",
             model="opencode/big-pickle",
             session_id=session_id,
+            routine_id=routine_id,
         )
         session.add(run)
         await session.commit()
         return run.id
+
+
+async def _insert_routine(maker, *, workspace_id, agent_id):
+    async with maker() as session:
+        routine = Routine(
+            workspace_id=workspace_id,
+            name="Nightly sweep",
+            prompt="check for stuck tickets",
+            interval_minutes=60,
+            mode="idle_only",
+            agent_id=agent_id,
+            status="idle",
+        )
+        session.add(routine)
+        await session.commit()
+        return routine.id
 
 
 def test_retry_nonexistent_run_404(client):
@@ -179,6 +198,7 @@ def test_retry_routine_run_not_retryable_409(client, tmp_path):
     """A routine/chat run (ticket_id is None) can never be retried."""
     ws_id = _make_workspace(client, tmp_path)
     eng_id = _make_agent(client, ws_id, "engineer", "eng-1")
+    routine_id = _run_sync(_insert_routine(db_session.async_session, workspace_id=ws_id, agent_id=eng_id))
 
     run_id = _run_sync(
         _insert_run(
@@ -186,6 +206,7 @@ def test_retry_routine_run_not_retryable_409(client, tmp_path):
             ticket_id=None,
             agent_id=eng_id,
             status="failed",
+            routine_id=routine_id,
         )
     )
 

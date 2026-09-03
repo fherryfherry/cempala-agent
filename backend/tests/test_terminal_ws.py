@@ -14,10 +14,14 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.core.auth import hash_password
 from app.db import session as db_session
-from app.db.models import Base
+from app.db.models import Base, User
 from app.db.session import get_session
 from app.main import app
+
+_TEST_EMAIL = "terminal-test@example.com"
+_TEST_PASSWORD = "test-password"
 
 
 @pytest.fixture
@@ -47,7 +51,20 @@ async def client(monkeypatch):
     import app.api.terminal as terminal_mod
 
     monkeypatch.setattr(terminal_mod, "async_session", maker)
+
+    async with maker() as session:
+        session.add(
+            User(email=_TEST_EMAIL, password_hash=hash_password(_TEST_PASSWORD), is_superadmin=True)
+        )
+        await session.commit()
+
     with TestClient(app) as c:
+        # The WS route reads the session cookie directly off the socket (not via
+        # a FastAPI Depends), so it isn't covered by conftest.py's blanket
+        # get_current_user override — log in for real so the cookie jar (shared
+        # between HTTP calls and websocket_connect) carries a valid session.
+        resp = c.post("/api/auth/login", json={"email": _TEST_EMAIL, "password": _TEST_PASSWORD})
+        assert resp.status_code == 200, resp.text
         yield c
     app.dependency_overrides.clear()
 

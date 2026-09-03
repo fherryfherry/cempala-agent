@@ -32,17 +32,20 @@ business days. Fixes land on `main` before any public disclosure.
 
 The portal is a local tool for running AI agents autonomously. By design:
 
-- **There is no auth (ADR-005).** Anyone who can reach the API can use it.
-- **The backend must bind to `127.0.0.1` only.** Exposing it to a network is the same as
-  opening remote code execution — every supported CLI runs in full-auto mode
+- **Login is required (ADR-016), with per-workspace roles (viewer/editor/admin).** Superseded
+  ADR-005's no-auth posture — but login only controls *who reaches* the portal, not what an
+  authenticated editor's agents can do once inside a workspace (see the next point).
+- **Full-auto agent CLIs are not sandboxed.** Every supported CLI runs in full-auto mode
   (`opencode --auto`, `claude --permission-mode ...`, `codex --dangerously-bypass-approvals-and-sandbox`,
   `agy --dangerously-skip-permissions`), and the working-directory flag is **not** a sandbox.
 - **Agent runs have full user privileges.** An agent can run arbitrary commands with the
   privileges of the user running the backend. `repo_path` validation is a convenience
-  check, not a security boundary.
+  check, not a security boundary. This is unchanged by ADR-016 — only bind beyond
+  `127.0.0.1` deliberately, and only create accounts for people you actually trust with
+  that access.
 
 These are conscious architectural decisions, documented in detail in
-[`docs/06-adr.md`](docs/06-adr.md) (ADR-005, ADR-010) and the
+[`docs/06-adr.md`](docs/06-adr.md) (ADR-016, ADR-010) and the
 [README security warning](README.md#-security-warning--read-before-running).
 
 Reports about these by-design properties (e.g. "agents can run arbitrary commands") are

@@ -142,6 +142,15 @@
   );
 }
 
+/* Login page backdrop: faint dot grid, same technique as gantt-grid-lines above. */
+@utility login-grid {
+  background-image: radial-gradient(
+    color-mix(in oklab, var(--foreground) 6%, transparent) 1px,
+    transparent 1px
+  );
+  background-size: 20px 20px;
+}
+
 @utility animate-fade-pulse {
   animation: fade-pulse 2s ease-in-out infinite;
 }

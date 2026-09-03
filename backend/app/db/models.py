@@ -127,6 +127,44 @@ def _seed_builtin_roles(target, connection, **kwargs):
 event.listen(Role.__table__, "after_create", _seed_builtin_roles)
 
 
+class User(Base):
+    """Human login account (ADR-016, supersedes ADR-005's no-auth posture).
+
+    `is_superadmin` bypasses all `WorkspaceMember` checks (manages the global user
+    list and creates workspaces); a non-superadmin's access to any given workspace
+    is entirely determined by their `WorkspaceMember` row for it, if any.
+    """
+
+    __tablename__ = "user"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String, nullable=False)
+    is_superadmin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
+
+
+class WorkspaceMember(Base):
+    """Per-workspace RBAC grant: a `User`'s `role` ("viewer"/"editor"/"admin") is
+    scoped to one `workspace_id`, not global — see ADR-016."""
+
+    __tablename__ = "workspace_member"
+    __table_args__ = (UniqueConstraint("workspace_id", "user_id", name="uq_workspace_member"),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    workspace_id: Mapped[str] = mapped_column(
+        String, ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(
+        String, ForeignKey("user.id", ondelete="CASCADE"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(
+        Enum("viewer", "editor", "admin", name="workspace_member_role"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
+
+
 class Sprint(Base):
     __tablename__ = "sprint"
 

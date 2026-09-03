@@ -1,6 +1,6 @@
 [project]
 name = "map-backend"
-version = "0.2.7"
+version = "0.3.0"
 description = "Multi-Agent Portal backend (FastAPI). Never talks to an LLM directly — shells out to the opencode binary."
 license = { text = "MIT" }
 authors = [{ name = "Ferry", email = "ferdevelop15@gmail.com" }]
@@ -17,6 +17,8 @@ dependencies = [
     "pyyaml>=6.0",
     "mcp>=2.0.0",
     "httpx>=0.28.1",
+    "bcrypt>=4.0",
+    "itsdangerous>=2.2",
 ]
 
 [project.optional-dependencies]

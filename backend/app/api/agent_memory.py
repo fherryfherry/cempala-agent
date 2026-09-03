@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.agents import _get_agent_or_404
 from app.api.errors import AppError
+from app.core.auth import WorkspaceRole, require_agent_role, require_memory_role
 from app.core.report import MAX_MEMORY_NOTE_LEN
 from app.db.models import AgentMemory
 from app.db.session import get_session
@@ -14,7 +15,11 @@ memory_router = APIRouter(prefix="/agent-memory", tags=["agent-memory"])
 
 
 @agent_memory_router.get("", response_model=list[AgentMemoryOut])
-async def list_agent_memory(agent_id: str, session: AsyncSession = Depends(get_session)):
+async def list_agent_memory(
+    agent_id: str,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_agent_role(WorkspaceRole.viewer)),
+):
     await _get_agent_or_404(session, agent_id)
     result = await session.scalars(
         select(AgentMemory)
@@ -26,7 +31,10 @@ async def list_agent_memory(agent_id: str, session: AsyncSession = Depends(get_s
 
 @agent_memory_router.post("", response_model=AgentMemoryOut, status_code=201)
 async def create_agent_memory(
-    agent_id: str, body: AgentMemoryCreate, session: AsyncSession = Depends(get_session)
+    agent_id: str,
+    body: AgentMemoryCreate,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_agent_role(WorkspaceRole.editor)),
 ):
     await _get_agent_or_404(session, agent_id)
 
@@ -46,7 +54,10 @@ async def create_agent_memory(
 
 @memory_router.patch("/{memory_id}", response_model=AgentMemoryOut)
 async def update_agent_memory(
-    memory_id: str, body: AgentMemoryCreate, session: AsyncSession = Depends(get_session)
+    memory_id: str,
+    body: AgentMemoryCreate,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_memory_role(WorkspaceRole.editor)),
 ):
     memory = await session.get(AgentMemory, memory_id)
     if memory is None:
@@ -62,7 +73,11 @@ async def update_agent_memory(
 
 
 @memory_router.delete("/{memory_id}", status_code=204)
-async def delete_agent_memory(memory_id: str, session: AsyncSession = Depends(get_session)):
+async def delete_agent_memory(
+    memory_id: str,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_memory_role(WorkspaceRole.editor)),
+):
     memory = await session.get(AgentMemory, memory_id)
     if memory is None:
         raise AppError(404, "not_found", f"agent memory {memory_id} not found")

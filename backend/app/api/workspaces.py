@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.errors import AppError
+from app.core.auth import WorkspaceRole, get_current_user, require_superadmin, require_workspace_role
 from app.core.git import GitError, clone_repo
 from app.core.settings_store import (
     SettingsLoadError,
@@ -23,7 +24,9 @@ from app.db.models import (
     Run,
     Sprint,
     Ticket,
+    User,
     Workspace,
+    WorkspaceMember,
 )
 from app.db.session import get_session
 from app.schemas.workspace import (
@@ -113,13 +116,27 @@ async def _load_settings_or_500(repo_path: str) -> WorkspaceSettings:
 
 
 @router.get("", response_model=list[WorkspaceOut])
-async def list_workspaces(session: AsyncSession = Depends(get_session)):
-    rows = (await session.scalars(select(Workspace))).all()
+async def list_workspaces(
+    session: AsyncSession = Depends(get_session), user: User = Depends(get_current_user)
+):
+    if user.is_superadmin:
+        rows = (await session.scalars(select(Workspace))).all()
+    else:
+        member_ws_ids = select(WorkspaceMember.workspace_id).where(
+            WorkspaceMember.user_id == user.id
+        )
+        rows = (
+            await session.scalars(select(Workspace).where(Workspace.id.in_(member_ws_ids)))
+        ).all()
     return [_compose_out(ws, await _load_settings_or_500(ws.repo_path)) for ws in rows]
 
 
 @router.post("", response_model=WorkspaceOut, status_code=201)
-async def create_workspace(body: WorkspaceCreate, session: AsyncSession = Depends(get_session)):
+async def create_workspace(
+    body: WorkspaceCreate,
+    session: AsyncSession = Depends(get_session),
+    actor: User = Depends(require_superadmin),
+):
     if body.clone_url:
         repo_path = _resolve_repo_path(body.repo_path, create=False)
         if os.path.exists(repo_path) and os.listdir(repo_path):
@@ -148,24 +165,37 @@ async def create_workspace(body: WorkspaceCreate, session: AsyncSession = Depend
         await session.rollback()
         raise AppError(409, "duplicate_key", f"workspace key '{body.key}' already exists")
     await session.refresh(ws)
+
+    # The creator gets admin access to their own new workspace so they aren't
+    # locked out of it (only superadmins reach this endpoint at all).
+    session.add(WorkspaceMember(workspace_id=ws.id, user_id=actor.id, role="admin"))
+    await session.commit()
+
     return _compose_out(ws, await _load_settings_or_500(ws.repo_path))
 
 
 @router.get("/workflow-prompt-default")
-async def get_workflow_prompt_default():
+async def get_workflow_prompt_default(_: User = Depends(get_current_user)):
     """The default workflow prompt, for the Settings page's "reset to default" button."""
     return {"workflow_prompt": DEFAULT_WORKFLOW_PROMPT}
 
 
 @router.get("/{workspace_id}", response_model=WorkspaceOut)
-async def get_workspace(workspace_id: str, session: AsyncSession = Depends(get_session)):
+async def get_workspace(
+    workspace_id: str,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_workspace_role(WorkspaceRole.viewer)),
+):
     ws = await _get_workspace_or_404(session, workspace_id)
     return _compose_out(ws, await _load_settings_or_500(ws.repo_path))
 
 
 @router.patch("/{workspace_id}", response_model=WorkspaceOut)
 async def update_workspace(
-    workspace_id: str, body: WorkspaceUpdate, session: AsyncSession = Depends(get_session)
+    workspace_id: str,
+    body: WorkspaceUpdate,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_workspace_role(WorkspaceRole.admin)),
 ):
     ws = await _get_workspace_or_404(session, workspace_id)
 
@@ -202,7 +232,11 @@ async def update_workspace(
 
 
 @router.post("/{workspace_id}/pause", response_model=WorkspaceOut)
-async def pause_workspace(workspace_id: str, session: AsyncSession = Depends(get_session)):
+async def pause_workspace(
+    workspace_id: str,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_workspace_role(WorkspaceRole.admin)),
+):
     """Kill switch (MAP-031, docs/02-tsd.md §6): stop every run in this workspace and
 
     reject new schedules until resumed. Sets the cancel event on each executing run
@@ -237,7 +271,11 @@ async def pause_workspace(workspace_id: str, session: AsyncSession = Depends(get
 
 
 @router.post("/{workspace_id}/resume", response_model=WorkspaceOut)
-async def resume_workspace(workspace_id: str, session: AsyncSession = Depends(get_session)):
+async def resume_workspace(
+    workspace_id: str,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_workspace_role(WorkspaceRole.admin)),
+):
     ws = await _get_workspace_or_404(session, workspace_id)
     ws.paused = False
     await session.commit()
@@ -246,7 +284,11 @@ async def resume_workspace(workspace_id: str, session: AsyncSession = Depends(ge
 
 
 @router.post("/{workspace_id}/reset", response_model=WorkspaceOut)
-async def reset_workspace(workspace_id: str, session: AsyncSession = Depends(get_session)):
+async def reset_workspace(
+    workspace_id: str,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_workspace_role(WorkspaceRole.admin)),
+):
     """Wipe all tickets (cascades to comments/attachments/runs/events — chat history and
 
     Activity are just those, per docs/03-agent-design.md: chat = comments on tickets
@@ -282,7 +324,11 @@ async def reset_workspace(workspace_id: str, session: AsyncSession = Depends(get
 
 
 @router.delete("/{workspace_id}", status_code=204)
-async def delete_workspace(workspace_id: str, session: AsyncSession = Depends(get_session)):
+async def delete_workspace(
+    workspace_id: str,
+    session: AsyncSession = Depends(get_session),
+    _: User = Depends(require_superadmin),
+):
     ws = await _get_workspace_or_404(session, workspace_id)
     await session.delete(ws)
     await session.commit()
@@ -319,7 +365,11 @@ def _workspace_runs_stmt(workspace_id: str):
 
 
 @router.post("/{workspace_id}/terminate", status_code=204)
-async def terminate_workspace(workspace_id: str, session: AsyncSession = Depends(get_session)):
+async def terminate_workspace(
+    workspace_id: str,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_workspace_role(WorkspaceRole.admin)),
+):
     """Permanently delete a workspace and all its data.
 
     Pauses the workspace (kill switch), waits for every running/queued run to

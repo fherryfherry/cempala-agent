@@ -17,6 +17,7 @@ from app.api.agents import _get_agent_or_404
 from app.api.errors import AppError
 from app.api.tickets import _get_ticket_or_404
 from app.api.workspaces import _get_workspace_or_404
+from app.core.auth import WorkspaceRole, require_run_role, require_ticket_role, require_workspace_role
 from app.core import orchestrator
 from app.core.guardrails import GuardrailBlocked
 from app.core.settings_store import SettingsLoadError
@@ -45,7 +46,12 @@ async def _get_run_or_404(session: AsyncSession, run_id: str) -> Run:
 
 
 @ticket_run_router.post("", response_model=RunOut, status_code=201)
-async def start_run(key: str, body: RunCreate, session: AsyncSession = Depends(get_session)):
+async def start_run(
+    key: str,
+    body: RunCreate,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_ticket_role(WorkspaceRole.editor)),
+):
     ticket = await _get_ticket_or_404(session, key)
 
     agent_id = body.agent_id or ticket.assignee_id
@@ -76,7 +82,11 @@ async def start_run(key: str, body: RunCreate, session: AsyncSession = Depends(g
 
 
 @runs_router.post("/{run_id}/retry", response_model=RunOut, status_code=201)
-async def retry_run(run_id: str, session: AsyncSession = Depends(get_session)):
+async def retry_run(
+    run_id: str,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_run_role(WorkspaceRole.editor)),
+):
     """Re-trigger the same agent on the same ticket a `failed`/`interrupted` run left
 
     behind, or re-trigger a `cancelled` run the owner stopped (UI calls this "Resume").
@@ -142,7 +152,11 @@ async def retry_run(run_id: str, session: AsyncSession = Depends(get_session)):
 
 
 @runs_router.post("/{run_id}/stop", response_model=RunOut)
-async def stop_run(run_id: str, session: AsyncSession = Depends(get_session)):
+async def stop_run(
+    run_id: str,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_run_role(WorkspaceRole.editor)),
+):
     run = await _get_run_or_404(session, run_id)
 
     if run.status == "running":
@@ -164,6 +178,7 @@ async def get_run(
     offset: int = 0,
     limit: int = 500,
     session: AsyncSession = Depends(get_session),
+    _=Depends(require_run_role(WorkspaceRole.viewer)),
 ):
     run = await _get_run_or_404(session, run_id)
     events = (
@@ -186,6 +201,7 @@ async def list_runs(
     workspace_id: str,
     status: str | None = None,
     session: AsyncSession = Depends(get_session),
+    _=Depends(require_workspace_role(WorkspaceRole.viewer)),
 ):
     await _get_workspace_or_404(session, workspace_id)
 

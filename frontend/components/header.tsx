@@ -7,11 +7,55 @@ import { useQuery } from "@tanstack/react-query";
 import { listAgents, listWorkspaces } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { AgentAvatars } from "@/components/agent-avatars";
+import { avatarColorOf } from "@/components/agent-avatar";
+import { useAuth } from "@/components/auth-context";
 import { LogoBanner } from "@/components/logo";
 import { NotificationBell } from "@/components/notification-bell";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { WorkspaceSwitcher } from "@/components/workspace-switcher";
 import { readUnreadChatCount } from "@/components/events-context";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+
+/** 1-2 letter initials from an email's local part ("ferry.dev@x.com" -> "FD"). */
+function emailInitials(email: string): string {
+  const local = email.split("@")[0] ?? email;
+  const parts = local.split(/[.\-_+]+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  const first = parts[0][0] ?? "?";
+  const second = parts.length > 1 ? (parts[1][0] ?? "") : (parts[0][1] ?? "");
+  return (first + second).toUpperCase();
+}
+
+function UserMenu() {
+  const { me, logout } = useAuth();
+  if (!me) return null;
+  const email = me.user.email;
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        aria-label={`Account menu (${email})`}
+        className="flex size-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold text-white outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+        style={{ backgroundColor: avatarColorOf(email) }}
+      >
+        {emailInitials(email)}
+      </DropdownMenuTrigger>
+      <DropdownMenuContent>
+        <DropdownMenuLabel title={email}>{email}</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onClick={() => void logout()} variant="destructive">
+          Sign out
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
 
 function readLastAgentChat(workspaceId: string): string | null {
   try {
@@ -102,6 +146,7 @@ export function Header() {
 
         {!activeKey && (
           <div className="ml-auto flex items-center gap-3">
+            <UserMenu />
             <ThemeToggle />
             <Link
               href="/settings"
@@ -261,6 +306,7 @@ export function Header() {
                   timezone={workspaceTimezone}
                 />
               )}
+              <UserMenu />
             </div>
           </>
         )}

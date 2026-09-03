@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.errors import AppError
 from app.api.workspaces import _get_workspace_or_404
+from app.core.auth import WorkspaceRole, require_agent_role, require_workspace_role
 from app.db.models import Agent, AgentMemory, Role, Run
 from app.db.session import get_session
 from app.schemas.agent import AgentCreate, AgentListOut, AgentOut, AgentUpdate
@@ -29,7 +30,11 @@ async def _role_exists_or_422(session: AsyncSession, role: str) -> None:
 
 
 @workspace_agents_router.get("", response_model=list[AgentListOut])
-async def list_agents(workspace_id: str, session: AsyncSession = Depends(get_session)):
+async def list_agents(
+    workspace_id: str,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_workspace_role(WorkspaceRole.viewer)),
+):
     await _get_workspace_or_404(session, workspace_id)
     memory_count = (
         select(func.count())
@@ -54,7 +59,10 @@ async def list_agents(workspace_id: str, session: AsyncSession = Depends(get_ses
 
 @workspace_agents_router.post("", response_model=AgentOut, status_code=201)
 async def create_agent(
-    workspace_id: str, body: AgentCreate, session: AsyncSession = Depends(get_session)
+    workspace_id: str,
+    body: AgentCreate,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_workspace_role(WorkspaceRole.editor)),
 ):
     await _get_workspace_or_404(session, workspace_id)
     await _role_exists_or_422(session, body.role)
@@ -81,7 +89,12 @@ async def create_agent(
 
 
 @agents_router.patch("/{agent_id}", response_model=AgentOut)
-async def update_agent(agent_id: str, body: AgentUpdate, session: AsyncSession = Depends(get_session)):
+async def update_agent(
+    agent_id: str,
+    body: AgentUpdate,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_agent_role(WorkspaceRole.editor)),
+):
     agent = await _get_agent_or_404(session, agent_id)
 
     if body.role is not None:
@@ -114,7 +127,11 @@ async def update_agent(agent_id: str, body: AgentUpdate, session: AsyncSession =
 
 
 @agents_router.delete("/{agent_id}", status_code=204)
-async def delete_agent(agent_id: str, session: AsyncSession = Depends(get_session)):
+async def delete_agent(
+    agent_id: str,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_agent_role(WorkspaceRole.editor)),
+):
     agent = await _get_agent_or_404(session, agent_id)
 
     active_run = await session.scalar(

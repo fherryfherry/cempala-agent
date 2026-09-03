@@ -6,17 +6,24 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   ApiError,
+  addWorkspaceMember,
   getWorkflowPromptDefault,
+  listUsers,
+  listWorkspaceMembers,
   listWorkspaces,
   pauseWorkspace,
+  removeWorkspaceMember,
   resetWorkspace,
   resumeWorkspace,
   terminateWorkspace,
   updateWorkspace,
+  updateWorkspaceMember,
   type AgentRole,
   type TimeUnit,
   type Workspace,
+  type WorkspaceMemberRole,
 } from "@/lib/api";
+import { useAuth } from "@/components/auth-context";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -125,6 +132,7 @@ export default function SettingsPage() {
       <WorkflowPromptForm workspace={workspace} />
       <GuardrailsForm workspace={workspace} />
       <PauseResumeCard workspace={workspace} pause={pause} resume={resume} />
+      <MembersCard workspace={workspace} />
       <ResetDataCard workspace={workspace} />
       <TerminateWorkspaceCard workspace={workspace} />
       <SecurityWarningCard />
@@ -793,6 +801,141 @@ function TerminateWorkspaceCard({ workspace }: { workspace: Workspace }) {
   );
 }
 
+const MEMBER_ROLE_OPTIONS: WorkspaceMemberRole[] = ["viewer", "editor", "admin"];
+
+function MembersCard({ workspace }: { workspace: Workspace }) {
+  const { me } = useAuth();
+  const queryClient = useQueryClient();
+  const [addingUserId, setAddingUserId] = useState("");
+  const [addingRole, setAddingRole] = useState<WorkspaceMemberRole>("viewer");
+
+  const myMembership = me?.memberships.find((m) => m.workspace_id === workspace.id);
+  const isWorkspaceAdmin = me?.user.is_superadmin || myMembership?.role === "admin";
+
+  const members = useQuery({
+    queryKey: ["workspace-members", workspace.id],
+    queryFn: () => listWorkspaceMembers(workspace.id),
+    enabled: isWorkspaceAdmin,
+  });
+  // Only fetched to populate the "add existing user" picker — creating new
+  // accounts is a separate, superadmin-only concern (Settings -> Users).
+  const users = useQuery({ queryKey: ["users"], queryFn: listUsers, enabled: isWorkspaceAdmin });
+
+  const invalidate = () =>
+    queryClient.invalidateQueries({ queryKey: ["workspace-members", workspace.id] });
+
+  const add = useMutation({
+    mutationFn: () => addWorkspaceMember(workspace.id, { user_id: addingUserId, role: addingRole }),
+    onSuccess: () => {
+      invalidate();
+      setAddingUserId("");
+      toast.success("Member added");
+    },
+    onError: (err: unknown) => toast.error(err instanceof ApiError ? err.message : "Failed"),
+  });
+
+  const changeRole = useMutation({
+    mutationFn: ({ memberId, role }: { memberId: string; role: WorkspaceMemberRole }) =>
+      updateWorkspaceMember(workspace.id, memberId, role),
+    onSuccess: invalidate,
+    onError: (err: unknown) => toast.error(err instanceof ApiError ? err.message : "Failed"),
+  });
+
+  const remove = useMutation({
+    mutationFn: (memberId: string) => removeWorkspaceMember(workspace.id, memberId),
+    onSuccess: () => {
+      invalidate();
+      toast.success("Member removed");
+    },
+    onError: (err: unknown) => toast.error(err instanceof ApiError ? err.message : "Failed"),
+  });
+
+  if (!isWorkspaceAdmin) return null;
+
+  const memberUserIds = new Set(members.data?.map((m) => m.user_id));
+  const addableUsers = users.data?.filter((u) => !memberUserIds.has(u.id)) ?? [];
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Members</CardTitle>
+        <p className="mt-1 text-xs text-zinc-500">
+          Siapa yang punya akses ke workspace ini dan level aksesnya (viewer = read-only, editor =
+          bisa jalankan agent/edit ticket, admin = juga bisa kelola member &amp; pengaturan
+          workspace). Membuat akun login baru ada di Settings global &rarr; Users.
+        </p>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        {members.isLoading && <p className="text-sm text-zinc-500">Loading…</p>}
+        {members.data?.map((m) => (
+          <div
+            key={m.id}
+            className="flex items-center gap-3 rounded-lg border border-border px-4 py-3"
+          >
+            <span className="min-w-0 flex-1 truncate text-sm font-medium">{m.email}</span>
+            <Select
+              value={m.role}
+              onValueChange={(role) =>
+                changeRole.mutate({ memberId: m.id, role: role as WorkspaceMemberRole })
+              }
+            >
+              <SelectTrigger className="w-28">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {MEMBER_ROLE_OPTIONS.map((r) => (
+                  <SelectItem key={r} value={r}>
+                    {r}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:text-red-400 dark:hover:text-red-300 dark:hover:bg-red-950/40"
+              disabled={remove.isPending}
+              onClick={() => remove.mutate(m.id)}
+            >
+              Remove
+            </Button>
+          </div>
+        ))}
+
+        <div className="flex items-center gap-2 border-t border-border pt-3">
+          <Select value={addingUserId} onValueChange={(v) => setAddingUserId(v ?? "")}>
+            <SelectTrigger className="flex-1">
+              <SelectValue placeholder="Add existing user by email…" />
+            </SelectTrigger>
+            <SelectContent>
+              {addableUsers.map((u) => (
+                <SelectItem key={u.id} value={u.id}>
+                  {u.email}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select value={addingRole} onValueChange={(v) => setAddingRole(v as WorkspaceMemberRole)}>
+            <SelectTrigger className="w-28">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {MEMBER_ROLE_OPTIONS.map((r) => (
+                <SelectItem key={r} value={r}>
+                  {r}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button disabled={!addingUserId || add.isPending} onClick={() => add.mutate()}>
+            Add
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function SecurityWarningCard() {
   return (
     <Card className="border-red-300 bg-red-50 dark:border-red-900 dark:bg-red-950/30">
@@ -807,12 +950,16 @@ function SecurityWarningCard() {
           sandbox.
         </p>
         <p>
-          Only point the portal at repositories you trust, on a machine you control. Never
-          expose this backend beyond <code className="font-mono">127.0.0.1</code>, and keep
+          Only point the portal at repositories you trust, on a machine you control, and keep
           production secrets out of <code className="font-mono">repo_path</code>.
         </p>
+        <p>
+          Login (ADR-016) controls who can reach this portal at all, but does not sandbox
+          opencode — anyone with <strong>editor</strong> access or higher on this workspace has
+          the same command-execution risk described above.
+        </p>
         <p className="text-xs opacity-80">
-          This warning cannot be dismissed. Details: docs/02-tsd.md §7, ADR-010.
+          This warning cannot be dismissed. Details: docs/02-tsd.md §7, ADR-010, ADR-016.
         </p>
       </CardContent>
     </Card>

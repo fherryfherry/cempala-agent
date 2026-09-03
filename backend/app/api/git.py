@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.errors import AppError
 from app.api.workspaces import _get_workspace_or_404
+from app.core.auth import WorkspaceRole, require_workspace_role
 from app.core.git import (
     CommitDetail,
     GitError,
@@ -50,6 +51,7 @@ def _to_commit_out(c: GraphCommit) -> GraphCommitOut:
 async def list_branches(
     workspace_id: str,
     session: AsyncSession = Depends(get_session),
+    _=Depends(require_workspace_role(WorkspaceRole.viewer)),
 ):
     ws = await _get_workspace_or_404(session, workspace_id)
     repo_path = ws.repo_path
@@ -75,6 +77,7 @@ async def get_graph(
     workspace_id: str,
     limit: int = 100,
     session: AsyncSession = Depends(get_session),
+    _=Depends(require_workspace_role(WorkspaceRole.viewer)),
 ):
     ws = await _get_workspace_or_404(session, workspace_id)
     repo_path = ws.repo_path
@@ -94,6 +97,7 @@ async def list_commits(
     limit: int = 100,
     offset: int = 0,
     session: AsyncSession = Depends(get_session),
+    _=Depends(require_workspace_role(WorkspaceRole.viewer)),
 ):
     ws = await _get_workspace_or_404(session, workspace_id)
     repo_path = ws.repo_path
@@ -115,6 +119,7 @@ async def get_commit(
     workspace_id: str,
     sha: str,
     session: AsyncSession = Depends(get_session),
+    _=Depends(require_workspace_role(WorkspaceRole.viewer)),
 ):
     ws = await _get_workspace_or_404(session, workspace_id)
     repo_path = ws.repo_path

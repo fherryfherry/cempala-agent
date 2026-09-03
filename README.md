@@ -207,20 +207,26 @@ stored by this portal; each CLI manages its own auth.
 - Consequence: the agent can run **any command** with the privileges of the user running the
   backend.
 - Therefore:
-  - The backend **must** bind to `127.0.0.1` only. **Never** expose this portal to a network —
-    that is the same as opening remote code execution.
+  - Login is required to reach the portal at all (ADR-016), and a per-workspace role
+    (viewer/editor/admin) gates what a logged-in user can do — but **this does not sandbox
+    opencode**. Anyone with editor access or higher on a workspace has the same
+    command-execution risk described above.
   - Run it only on repos you trust, on a machine you control.
   - **Do not** put production secrets inside `repo_path`.
   - The `repo_path` validation in the API is a convenience, not a security boundary.
+  - Only expose the backend beyond `127.0.0.1` deliberately, to people you've actually created
+    accounts for — see [ADR-016](docs/06-adr.md).
 
 This is not an implementation detail you can ignore — it is a consciously accepted architectural
 consequence (see [ADR-010](docs/06-adr.md)).
 
 ### Want to access CEMPALA remotely? Use Tailscale, don't open a port
 
-The backend must stay bound to `127.0.0.1` — never expose it directly to the public internet or a
-LAN via `0.0.0.0` / port forwarding, since there is no auth (ADR-005) and `--auto` means anyone who
-can reach the API can run arbitrary commands as your user.
+Login (ADR-016) makes controlled network exposure possible, but the default `make dev` setup still
+binds to `127.0.0.1`. If you do bind wider, do it deliberately and behind real accounts — don't open
+a port to the public internet. For occasional remote access from your own devices without loosening
+that bind at all, `--auto` still means anyone with an account and editor+ access can run arbitrary
+commands as your user, so keep the account list short and trusted regardless of which approach you use.
 
 If you want to check on CEMPALA from another device (phone, laptop, another room) without loosening
 that bind, install [Tailscale](https://tailscale.com) on the machine running `make dev` and use

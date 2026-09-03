@@ -10,15 +10,25 @@ Env:
   MAP_API_BASE       base URL of the backend API (default http://127.0.0.1:8000/api)
   MAP_WORKSPACE_ID   workspace whose tickets these tools operate on
   MAP_AGENT_ID       agent on whose behalf tools write (comments/memory/ticket edits)
+  MAP_INTERNAL_SECRET  shared secret proving this is the backend's own subprocess (ADR-016)
 
-The workspace/agent ids are ALSO accepted as CLI flags (`--workspace-id`,
-`--agent-id`) as a fallback: opencode's MCP launcher may not forward the `env`
-block of a local config to the subprocess, and without the agent id every MCP
-comment would be attributed to the owner (and, being "human-authored", would
-trigger mention runs — a real incident, see MAP-048).
+The workspace/agent ids and internal secret are ALSO accepted as CLI flags
+(`--workspace-id`, `--agent-id`, `--internal-secret`) as a fallback: opencode's
+MCP launcher may not forward the `env` block of a local config to the
+subprocess at all — observed in dogfooding for workspace/agent id (MAP-048,
+comments landing as owner-authored) and for the internal secret (every MCP
+tool call permanently 401ing with "login required" regardless of backend
+restarts, since MAP_INTERNAL_SECRET has no other channel to reach this process).
 
-No auth (ADR-005): the backend binds 127.0.0.1 and this server is only ever
-spawned by the backend itself for a run it already authorizes.
+No auth on this server itself: it's a STDIO subprocess only ever spawned by the
+backend for a run it already authorizes — never reachable over the network, so
+it stays out of scope for ADR-016's login/RBAC (which supersedes ADR-005 for
+every HTTP/WS route, but deliberately not this internal server; see ADR-011).
+Its own outbound calls TO the backend API, however, now hit ADR-016-gated
+routes — MAP_INTERNAL_SECRET (env or --internal-secret, set by
+app/agents/mcp_config.py) is sent on every request so app.core.auth
+.get_current_user recognizes this as the backend's own trusted subprocess
+rather than 401ing.
 """
 
 from __future__ import annotations
@@ -33,6 +43,15 @@ from mcp.server.mcpserver import MCPServer
 API_BASE = os.environ.get("MAP_API_BASE", "http://127.0.0.1:8000/api")
 
 
+def _cli_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--workspace-id", dest="workspace_id")
+    parser.add_argument("--agent-id", dest="agent_id")
+    parser.add_argument("--internal-secret", dest="internal_secret")
+    args, _ = parser.parse_known_args()
+    return args
+
+
 def _ids_from_env_or_args() -> tuple[str, str]:
     """(workspace_id, agent_id) from env, falling back to CLI flags.
 
@@ -40,21 +59,28 @@ def _ids_from_env_or_args() -> tuple[str, str]:
     CLI flags cover the case where opencode drops the env block when spawning the
     subprocess (observed: MCP comments landing as owner-authored, MAP-048).
     """
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--workspace-id", dest="workspace_id")
-    parser.add_argument("--agent-id", dest="agent_id")
-    args, _ = parser.parse_known_args()
+    args = _cli_args()
     return (
         args.workspace_id or os.environ.get("MAP_WORKSPACE_ID", ""),
         args.agent_id or os.environ.get("MAP_AGENT_ID", ""),
     )
 
 
+def _internal_secret_from_env_or_args() -> str:
+    """Same env-block-may-be-dropped fallback as `_ids_from_env_or_args`, for the
+    internal secret — without this, a dropped env block leaves it permanently
+    empty and every outbound call 401s regardless of the backend's own state."""
+    return _cli_args().internal_secret or os.environ.get("MAP_INTERNAL_SECRET", "")
+
+
 WORKSPACE_ID, AGENT_ID = _ids_from_env_or_args()
+INTERNAL_SECRET = _internal_secret_from_env_or_args()
 
 # Module-level async client so tests can swap in an httpx transport (e.g.
 # ASGITransport over the real FastAPI app).
-_http: httpx.AsyncClient = httpx.AsyncClient(timeout=30)
+_http: httpx.AsyncClient = httpx.AsyncClient(
+    timeout=30, headers={"x-map-internal-secret": INTERNAL_SECRET}
+)
 
 
 async def _api(path: str, method: str = "GET", body: Any = None) -> Any:

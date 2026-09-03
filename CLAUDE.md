@@ -108,8 +108,10 @@ verified with `ps`, not just mark rows in the DB.
 sandbox. An agent can run arbitrary commands with the backend user's privileges. This was accepted
 deliberately (ADR-010), which makes three things non-negotiable:
 
-- Backend binds `127.0.0.1`. There is no auth (ADR-005), so exposing it to a network means handing
-  out remote code execution.
+- Login + per-workspace roles are required (ADR-016, supersedes ADR-005's no-auth MVP posture) —
+  but that only gates *who reaches* the portal, not what an authenticated editor's agents can do
+  once inside a workspace. Only bind the backend beyond `127.0.0.1` deliberately, and only create
+  accounts for people you actually trust with that access.
 - The warning must be visible in README and on the settings page, and must not be dismissible.
 - `repo_path` validation in the API is a convenience check, not a security boundary. Don't
   describe it as one.

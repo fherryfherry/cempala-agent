@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.workspaces import _get_workspace_or_404
+from app.core.auth import WorkspaceRole, require_workspace_role
 from app.db.models import ArtifactGroup, Attachment, Ticket
 from app.db.session import get_session
 from app.schemas.artifact import ArtifactAttachmentOut, ArtifactGroupOut
@@ -18,7 +19,11 @@ workspace_artifacts_router = APIRouter(prefix="/workspaces/{workspace_id}/artifa
 
 
 @workspace_artifacts_router.get("", response_model=list[ArtifactGroupOut])
-async def list_artifacts(workspace_id: str, session: AsyncSession = Depends(get_session)):
+async def list_artifacts(
+    workspace_id: str,
+    session: AsyncSession = Depends(get_session),
+    _=Depends(require_workspace_role(WorkspaceRole.viewer)),
+):
     await _get_workspace_or_404(session, workspace_id)
 
     rows = (

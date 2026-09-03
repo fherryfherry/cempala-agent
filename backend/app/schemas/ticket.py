@@ -34,8 +34,10 @@ class TicketUpdate(BaseModel):
     category: Category | None = None
     sprint_id: str | None = None
     duration_estimate: float | None = None
-    # Who is making this change, for status-transition permission checks (ADR-005: no
-    # auth, so the caller states it). None = owner, who may perform any transition.
+    # Which AGENT is making this change, for status-transition permission checks —
+    # distinct from the human User authenticated via session cookie (ADR-016); an
+    # agent has no login of its own, so the caller states it. None = owner, who may
+    # perform any transition.
     actor_agent_id: str | None = None
 
 

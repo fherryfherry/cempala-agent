@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import { ThemeProvider } from "next-themes";
 import "./globals.css";
 import { QueryProvider } from "@/components/query-provider";
+import { AuthProvider } from "@/components/auth-context";
 import { EventsShell } from "@/components/events-shell";
 import { Header } from "@/components/header";
 import { Toaster } from "@/components/ui/sonner";
@@ -32,11 +33,13 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       <body className="min-h-full flex flex-col">
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
           <QueryProvider>
-            <EventsShell>
-              <Header />
-              <main className="flex flex-1 flex-col">{children}</main>
-            </EventsShell>
-            <Toaster />
+            <AuthProvider>
+              <EventsShell>
+                <Header />
+                <main className="flex flex-1 flex-col">{children}</main>
+              </EventsShell>
+              <Toaster />
+            </AuthProvider>
           </QueryProvider>
         </ThemeProvider>
       </body>
